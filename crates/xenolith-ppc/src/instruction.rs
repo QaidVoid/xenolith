@@ -142,6 +142,46 @@ impl Instruction {
         self.word & 1 != 0
     }
 
+    /// Returns the destination vector register of an extension instruction.
+    ///
+    /// The console reaches 128 vector registers by scattering the register
+    /// number across the word: five bits sit where a standard vector
+    /// instruction keeps its whole register field, and the top two sit near the
+    /// bottom of the word in bits the standard encoding does not use.
+    #[must_use]
+    pub const fn vector_d(self) -> u8 {
+        let low = (self.word >> 21) & 0x1f;
+        let high = (self.word >> 2) & 0x3;
+        register_wide((high << 5) | low)
+    }
+
+    /// Returns the source vector register, which shares its position with
+    /// [`Instruction::vector_d`].
+    #[must_use]
+    pub const fn vector_s(self) -> u8 {
+        self.vector_d()
+    }
+
+    /// Returns the first source vector register of an extension instruction.
+    ///
+    /// This one is split three ways rather than two, with its top two bits in
+    /// separate single-bit fields at opposite ends of the word.
+    #[must_use]
+    pub const fn vector_a(self) -> u8 {
+        let low = (self.word >> 16) & 0x1f;
+        let bit5 = (self.word >> 6) & 0x1;
+        let bit6 = (self.word >> 10) & 0x1;
+        register_wide((bit6 << 6) | (bit5 << 5) | low)
+    }
+
+    /// Returns the second source vector register of an extension instruction.
+    #[must_use]
+    pub const fn vector_b(self) -> u8 {
+        let low = (self.word >> 11) & 0x1f;
+        let high = self.word & 0x3;
+        register_wide((high << 5) | low)
+    }
+
     /// Returns the branch condition field.
     ///
     /// Shares its position with the target register field. Meaningful only for
@@ -202,6 +242,11 @@ impl Instruction {
     pub const fn overflow_enable(self) -> bool {
         self.word & (1 << 10) != 0
     }
+}
+
+/// Narrows a reconstructed vector register number, which is always in range.
+const fn register_wide(number: u32) -> u8 {
+    (number & 0x7f) as u8
 }
 
 /// Extracts a five-bit register number from a shifted word.
@@ -333,5 +378,74 @@ mod tests {
         );
         assert_eq!(Instruction::decode(0x7c62_1838).extended_opcode(), Some(28));
         assert_eq!(Instruction::decode(0x3862_0001).extended_opcode(), None);
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    /// A vector load taken from the console's own documentation, whose operands
+    /// are known independently. It reaches register 64, which is past anything
+    /// the standard vector encoding can name, so it pins the reconstruction
+    /// rather than merely exercising it.
+    #[test]
+    fn reconstructs_a_register_beyond_the_standard_range() {
+        let instruction = Instruction::decode(0x100b_60cb);
+
+        assert_eq!(instruction.opcode(), Opcode::Lvx128);
+        assert_eq!(instruction.vector_d(), 64);
+        assert_eq!(instruction.ra(), 11);
+        assert_eq!(instruction.rb(), 12);
+    }
+
+    #[test]
+    fn the_low_bits_alone_would_give_the_wrong_register() {
+        let instruction = Instruction::decode(0x100b_60cb);
+
+        assert_eq!((instruction.word() >> 21) & 0x1f, 0, "low bits are zero");
+        assert_ne!(instruction.vector_d(), 0, "the high bits were dropped");
+    }
+
+    #[test]
+    fn every_reconstructed_register_stays_in_range() {
+        let mut state = 0x9e37_79b9u32;
+        for _ in 0..50_000 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let instruction = Instruction::decode(state);
+
+            assert!(instruction.vector_d() < 128);
+            assert!(instruction.vector_a() < 128);
+            assert!(instruction.vector_b() < 128);
+            assert_eq!(instruction.vector_s(), instruction.vector_d());
+        }
+    }
+
+    /// Each of the three registers draws on different bits, so a word that
+    /// moves one must not move the others.
+    #[test]
+    fn the_three_register_fields_are_independent() {
+        // Every bit clear, so each field is moved only by the bits under test.
+        let base = 0x1000_0000u32;
+        let field = |word: u32| {
+            let i = Instruction::decode(word);
+            (i.vector_d(), i.vector_a(), i.vector_b())
+        };
+
+        assert_eq!(field(base), (0, 0, 0));
+
+        assert_eq!(field(base | (0x1f << 21)).0, 31, "destination low bits");
+        assert_eq!(field(base | (0x3 << 2)).0, 96, "destination high bits");
+
+        assert_eq!(field(base | (0x1f << 16)).1, 31, "first source low bits");
+        assert_eq!(field(base | (1 << 6)).1, 32, "first source bit five");
+        assert_eq!(field(base | (1 << 10)).1, 64, "first source bit six");
+
+        assert_eq!(field(base | (0x1f << 11)).2, 31, "second source low bits");
+        assert_eq!(field(base | 0x3).2, 96, "second source high bits");
+
+        // Moving one field must leave the other two alone.
+        assert_eq!(field(base | (0x1f << 21)), (31, 0, 0));
+        assert_eq!(field(base | (0x1f << 11)), (0, 0, 31));
     }
 }

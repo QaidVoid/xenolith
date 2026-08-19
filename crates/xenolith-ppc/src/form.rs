@@ -62,7 +62,44 @@ pub enum Form {
     /// As [`Form::MD`], but the shift comes from a register, so the extended
     /// opcode is four bits.
     MDS,
+
+    /// mask `0xfc1f_07f0`, 10 instructions
+    Vx128Un,
+    /// mask `0xfc00_07f3`, 16 instructions
+    Vx128Ls,
+    /// mask `0xfc00_07f0`, 7 instructions
+    Vx128Cv,
+    /// mask `0xfc00_03d0`, 32 instructions
+    Vx128,
+    /// mask `0xfc00_0730`, 2 instructions
+    Vx128Ri,
+    /// mask `0xfc00_0390`, 5 instructions
+    Vx128Cmp,
+    /// mask `0xfc00_0630`, 1 instructions
+    Vx128Pwi,
+    /// mask `0xfc00_0210`, 1 instructions
+    Vx128Perm,
+    /// mask `0xfc00_0010`, 1 instructions
+    Vx128Sd,
 }
+
+/// Forms belonging to the console's own vector extension.
+///
+/// These scatter their identifying bits rather than gathering them into one
+/// field, so each states its mask outright instead of deriving one. They also
+/// re-encode a space that general purpose decoders read as much later
+/// instructions, which is why they are named as a group.
+const CONSOLE_EXTENSION: &[Form] = &[
+    Form::Vx128Un,
+    Form::Vx128Ls,
+    Form::Vx128Cv,
+    Form::Vx128,
+    Form::Vx128Ri,
+    Form::Vx128Cmp,
+    Form::Vx128Pwi,
+    Form::Vx128Perm,
+    Form::Vx128Sd,
+];
 
 /// Bits that identify the primary opcode.
 const PRIMARY_MASK: u32 = 0xfc00_0000;
@@ -80,7 +117,16 @@ impl Form {
             | Self::SC
             | Self::VX
             | Self::VC
-            | Self::VA => 0,
+            | Self::VA
+            | Self::Vx128Un
+            | Self::Vx128Ls
+            | Self::Vx128Cv
+            | Self::Vx128
+            | Self::Vx128Ri
+            | Self::Vx128Cmp
+            | Self::Vx128Pwi
+            | Self::Vx128Perm
+            | Self::Vx128Sd => 0,
             Self::A | Self::X | Self::XL | Self::XO | Self::MDS => 1,
             Self::XS | Self::MD => 2,
         }
@@ -91,7 +137,20 @@ impl Form {
     #[must_use]
     pub const fn extended_opcode_field(self) -> u32 {
         match self {
-            Self::D | Self::M | Self::I | Self::B | Self::SC => 0,
+            Self::D
+            | Self::M
+            | Self::I
+            | Self::B
+            | Self::SC
+            | Self::Vx128Un
+            | Self::Vx128Ls
+            | Self::Vx128Cv
+            | Self::Vx128
+            | Self::Vx128Ri
+            | Self::Vx128Cmp
+            | Self::Vx128Pwi
+            | Self::Vx128Perm
+            | Self::Vx128Sd => 0,
             Self::DS => 0x3,
             Self::A => 0x1f,
             Self::VX => 0x7ff,
@@ -109,7 +168,28 @@ impl Form {
     /// everywhere the mask covers are the same instruction.
     #[must_use]
     pub const fn mask(self) -> u32 {
-        PRIMARY_MASK | (self.extended_opcode_field() << self.extended_opcode_shift())
+        match self {
+            Self::Vx128Un => 0xfc1f_07f0,
+            Self::Vx128Ls => 0xfc00_07f3,
+            Self::Vx128Cv => 0xfc00_07f0,
+            Self::Vx128 => 0xfc00_03d0,
+            Self::Vx128Ri => 0xfc00_0730,
+            Self::Vx128Cmp => 0xfc00_0390,
+            Self::Vx128Pwi => 0xfc00_0630,
+            Self::Vx128Perm => 0xfc00_0210,
+            Self::Vx128Sd => 0xfc00_0010,
+            _ => PRIMARY_MASK | (self.extended_opcode_field() << self.extended_opcode_shift()),
+        }
+    }
+
+    /// Returns whether this form belongs to the console's vector extension.
+    ///
+    /// Those forms occupy encoding space that a general purpose decoder reads
+    /// as instructions the architecture gained long afterwards, so they are the
+    /// forms an external oracle cannot be asked about.
+    #[must_use]
+    pub fn is_console_extension(self) -> bool {
+        CONSOLE_EXTENSION.contains(&self)
     }
 
     /// Returns whether this form has a record bit at the bottom of the word.
@@ -279,6 +359,9 @@ mod tests {
     #[test]
     fn the_mask_follows_from_the_field_position_and_width() {
         for form in ALL {
+            if form.is_console_extension() {
+                continue;
+            }
             let field = form.extended_opcode_field();
             let shift = form.extended_opcode_shift();
 
@@ -293,6 +376,9 @@ mod tests {
     #[test]
     fn extended_opcode_fields_are_contiguous() {
         for form in ALL {
+            if form.is_console_extension() {
+                continue;
+            }
             let field = form.extended_opcode_field();
             if field == 0 {
                 continue;

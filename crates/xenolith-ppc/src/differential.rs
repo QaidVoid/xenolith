@@ -421,6 +421,13 @@ mod tests {
                 .collect();
 
             for (index, (entry, result)) in TABLE.iter().zip(disassemble(&words)).enumerate() {
+                // The console's own vector forms re-encode a space the
+                // architecture later reused. The oracle reads them as much
+                // later instructions and answers confidently rather than
+                // refusing, so it is never asked about them.
+                if entry.form.is_console_extension() {
+                    continue;
+                }
                 let Some(line) = result else {
                     continue;
                 };
@@ -443,6 +450,14 @@ mod tests {
         );
 
         for (entry, count) in TABLE.iter().zip(&compared) {
+            if entry.form.is_console_extension() {
+                assert_eq!(
+                    *count, 0,
+                    "{} belongs to the console extension and must never be compared",
+                    entry.mnemonic
+                );
+                continue;
+            }
             if ORACLE_UNSUPPORTED.contains(&entry.mnemonic) {
                 assert_eq!(
                     *count, 0,
@@ -468,6 +483,9 @@ mod tests {
 
         let mut operands = Operands::new();
         for entry in TABLE {
+            if entry.form.is_console_extension() {
+                continue;
+            }
             let words: Vec<u32> = (0..8).map(|_| encode(entry, operands.next())).collect();
 
             for line in disassemble(&words).into_iter().flatten() {
@@ -519,21 +537,26 @@ mod tests {
         }
 
         // The predicate names an encoding space, not a verdict on every
-        // instruction in it. The standard vector operations live here too and
-        // the oracle reads those correctly. What it cannot read is the
-        // console's own re-encoding of that space, which is excluded by the
-        // form it uses rather than by its primary opcode.
+        // instruction in it. The standard vector operations live there too and
+        // the oracle reads those correctly, so they are compared like anything
+        // else. What it cannot read is the console's own re-encoding, and that
+        // is excluded by the form an instruction uses rather than by where its
+        // primary opcode falls.
         for entry in TABLE {
-            if !in_vmx128_space(entry.value) {
-                continue;
+            if entry.form.is_console_extension() {
+                assert!(
+                    in_vmx128_space(entry.value),
+                    "{} uses an extension form but sits outside that space",
+                    entry.mnemonic
+                );
             }
-            assert_eq!(
-                entry.value >> 26,
-                4,
-                "{} draws from vmx128 space under an unexpected primary opcode",
-                entry.mnemonic
-            );
         }
+
+        let extension = TABLE.iter().filter(|e| e.form.is_console_extension());
+        assert!(
+            extension.count() > 0,
+            "no extension instructions are declared, so the exclusion proves nothing"
+        );
     }
 
     /// Our decoder and the oracle must agree on which encodings mean nothing,
@@ -545,6 +568,7 @@ mod tests {
         let mut operands = Operands::new();
         let words: Vec<u32> = TABLE
             .iter()
+            .filter(|entry| !entry.form.is_console_extension())
             .flat_map(|entry| {
                 let bits: Vec<u32> = (0..4).map(|_| operands.next()).collect();
                 bits.into_iter().map(|bits| encode(entry, bits))

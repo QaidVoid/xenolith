@@ -41,6 +41,9 @@ macro_rules! instructions {
                 $( $e_form:ident { $( $e_xo:literal => $e_var:ident = $e_mn:literal; )* } )*
             }
         )*
+        extension {
+            $( $x_form:ident { $( $x_value:literal => $x_var:ident = $x_mn:literal; )* } )*
+        }
     ) => {
         /// An operation the decoder recognizes.
         ///
@@ -54,6 +57,7 @@ macro_rules! instructions {
             Unknown,
             $( $( #[doc = concat!("`", $p_mn, "`")] $p_var, )* )*
             $( $( $( #[doc = concat!("`", $e_mn, "`")] $e_var, )* )* )*
+            $( $( #[doc = concat!("`", $x_mn, "`")] $x_var, )* )*
         }
 
         /// Every instruction this crate knows, in declaration order.
@@ -73,7 +77,30 @@ macro_rules! instructions {
                 value: ($e_primary << 26)
                     | ($e_xo << Form::$e_form.extended_opcode_shift()),
             }, )* )* )*
+            $( $( Entry {
+                opcode: Opcode::$x_var,
+                mnemonic: $x_mn,
+                form: Form::$x_form,
+                mask: Form::$x_form.mask(),
+                value: $x_value,
+            }, )* )*
         ];
+
+        /// Identifies an instruction of the console's vector extension.
+        ///
+        /// These forms scatter their identifying bits instead of gathering them
+        /// into one field, so each is matched against its own mask rather than
+        /// by reading a field out of the word. Forms are tried widest mask
+        /// first, the same precedence the ambiguity test enforces.
+        const fn decode_console_extension(word: u32) -> Opcode {
+            $(
+                match word & Form::$x_form.mask() {
+                    $( $x_value => return Opcode::$x_var, )*
+                    _ => {}
+                }
+            )*
+            Opcode::Unknown
+        }
 
         /// Identifies the operation a word encodes.
         pub(crate) const fn decode_opcode(word: u32) -> Opcode {
@@ -88,9 +115,9 @@ macro_rules! instructions {
                             _ => {}
                         }
                     )*
-                    Opcode::Unknown
+                    decode_console_extension(word)
                 } )*
-                _ => Opcode::Unknown,
+                _ => decode_console_extension(word),
             }
         }
     };
@@ -520,6 +547,98 @@ instructions! {
             459 => Divwu = "divwu";
             489 => Divd = "divd";
             491 => Divw = "divw";
+        }
+    }
+
+    extension {
+        Vx128Un {
+            0x1800_0330 => Vrfim128 = "vrfim128";
+            0x1800_0370 => Vrfin128 = "vrfin128";
+            0x1800_0380 => Vupkhsb128 = "vupkhsb128";
+            0x1800_03b0 => Vrfip128 = "vrfip128";
+            0x1800_03c0 => Vupklsb128 = "vupklsb128";
+            0x1800_03f0 => Vrfiz128 = "vrfiz128";
+            0x1800_0630 => Vrefp128 = "vrefp128";
+            0x1800_0670 => Vrsqrtefp128 = "vrsqrtefp128";
+            0x1800_06b0 => Vexptefp128 = "vexptefp128";
+            0x1800_06f0 => Vlogefp128 = "vlogefp128";
+        }
+        Vx128Ls {
+            0x1000_0003 => Lvsl128 = "lvsl128";
+            0x1000_0043 => Lvsr128 = "lvsr128";
+            0x1000_0083 => Lvewx128 = "lvewx128";
+            0x1000_00c3 => Lvx128 = "lvx128";
+            0x1000_01c3 => Stvx128 = "stvx128";
+            0x1000_02c3 => Lvxl128 = "lvxl128";
+            0x1000_0303 => Stewx128 = "stewx128";
+            0x1000_03c3 => Stvxl128 = "stvxl128";
+            0x1000_0403 => Lvlx128 = "lvlx128";
+            0x1000_0443 => Lvrx128 = "lvrx128";
+            0x1000_0503 => Stvlx128 = "stvlx128";
+            0x1000_0543 => Stvrx128 = "stvrx128";
+            0x1000_0603 => Lvlxl128 = "lvlxl128";
+            0x1000_0643 => Lvrxl128 = "lvrxl128";
+            0x1000_0703 => Stvlxl128 = "stvlxl128";
+            0x1000_0743 => Stvrxl128 = "stvrxl128";
+        }
+        Vx128Cv {
+            0x1800_0230 => Vcfpsxws128 = "vcfpsxws128";
+            0x1800_0270 => Vcfpuxws128 = "vcfpuxws128";
+            0x1800_02b0 => Vcsxwfp128 = "vcsxwfp128";
+            0x1800_02f0 => Vcuxwfp128 = "vcuxwfp128";
+            0x1800_0730 => Vspltw128 = "vspltw128";
+            0x1800_0770 => Vspltisw128 = "vspltisw128";
+            0x1800_07f0 => Vupkd3d128 = "vupkd3d128";
+        }
+        Vx128 {
+            0x1400_0010 => Vaddfp128 = "vaddfp128";
+            0x1400_0050 => Vsubfp128 = "vsubfp128";
+            0x1400_0090 => Vmulfp128 = "vmulfp128";
+            0x1400_00d0 => Vmaddfp128 = "vmaddfp128";
+            0x1400_0110 => Vmaddcfp128 = "vmaddcfp128";
+            0x1400_0150 => Vnmsubfp128 = "vnmsubfp128";
+            0x1400_0190 => Vmsum3fp128 = "vmsum3fp128";
+            0x1400_01d0 => Vmsum4fp128 = "vmsum4fp128";
+            0x1400_0200 => Vpkshss128 = "vpkshss128";
+            0x1400_0210 => Vand128 = "vand128";
+            0x1400_0240 => Vpkshus128 = "vpkshus128";
+            0x1400_0280 => Vpkswss128 = "vpkswss128";
+            0x1400_02c0 => Vpkswus128 = "vpkswus128";
+            0x1400_02d0 => Vor128 = "vor128";
+            0x1400_0300 => Vpkuhum128 = "vpkuhum128";
+            0x1400_0310 => Vxor128 = "vxor128";
+            0x1400_0340 => Vpkuhus128 = "vpkuhus128";
+            0x1400_0350 => Vsel128 = "vsel128";
+            0x1400_0380 => Vpkuwum128 = "vpkuwum128";
+            0x1400_0390 => Vslo128 = "vslo128";
+            0x1400_03c0 => Vpkuwus128 = "vpkuwus128";
+            0x1800_00d0 => Vslw128 = "vslw128";
+            0x1800_0150 => Vsraw128 = "vsraw128";
+            0x1800_01d0 => Vsrw128 = "vsrw128";
+            0x1800_0280 => Vmaxfp128 = "vmaxfp128";
+            0x1800_02c0 => Vminfp128 = "vminfp128";
+            0x1800_0300 => Vmrghw128 = "vmrghw128";
+            0x1800_0340 => Vmrglw128 = "vmrglw128";
+        }
+        Vx128Ri {
+            0x1800_0610 => Vpkd3d128 = "vpkd3d128";
+            0x1800_0710 => Vrlimi128 = "vrlimi128";
+        }
+        Vx128Cmp {
+            0x1800_0000 => Vcmpeqfp128 = "vcmpeqfp128";
+            0x1800_0080 => Vcmpgefp128 = "vcmpgefp128";
+            0x1800_0100 => Vcmpgtfp128 = "vcmpgtfp128";
+            0x1800_0180 => Vcmpbfp128 = "vcmpbfp128";
+            0x1800_0200 => Vcmpequw128 = "vcmpequw128";
+        }
+        Vx128Pwi {
+            0x1800_0210 => Vpermwi128 = "vpermwi128";
+        }
+        Vx128Perm {
+            0x1400_0000 => Vperm128 = "vperm128";
+        }
+        Vx128Sd {
+            0x1000_0010 => Vsldoi128 = "vsldoi128";
         }
     }
 }
