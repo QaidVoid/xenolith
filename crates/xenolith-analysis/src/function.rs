@@ -47,6 +47,37 @@ impl Origin {
     }
 }
 
+/// Where control goes when it leaves a block.
+///
+/// Edges describe movement inside one function. A transfer that leaves it, by
+/// returning, by calling, or by tail calling into another function, produces no
+/// edge here, because the block it would point at is not this function's to
+/// reason about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Edge {
+    /// Control transfers to another block of the same function.
+    Taken(u32),
+    /// Control continues at the instruction after the block.
+    FallThrough(u32),
+    /// Control leaves and nothing here determines where.
+    ///
+    /// Carried rather than dropped. A function missing an edge looks fully
+    /// analyzed while part of it was never reached, and every later stage would
+    /// inherit that.
+    Unresolved,
+}
+
+impl Edge {
+    /// Returns the block this edge points at, when it points at one.
+    #[must_use]
+    pub const fn target(self) -> Option<u32> {
+        match self {
+            Self::Taken(target) | Self::FallThrough(target) => Some(target),
+            Self::Unresolved => None,
+        }
+    }
+}
+
 /// A discovered function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -100,6 +131,64 @@ impl Function {
                 } => Some(target),
                 _ => None,
             })
+    }
+
+    /// Returns the outgoing edges of every block, keyed by the block's start.
+    ///
+    /// Computed rather than stored, so a function assembled by hand behaves the
+    /// same as one that came out of discovery.
+    #[must_use]
+    pub fn edges(&self) -> BTreeMap<u32, Vec<Edge>> {
+        let starts: BTreeSet<u32> = self.blocks.iter().map(|block| block.start).collect();
+
+        self.blocks
+            .iter()
+            .map(|block| (block.start, edges_of(block, &starts)))
+            .collect()
+    }
+
+    /// Returns the blocks reachable from the function's first block.
+    #[must_use]
+    pub fn reachable_blocks(&self) -> BTreeSet<u32> {
+        let edges = self.edges();
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec![self.start];
+
+        while let Some(start) = pending.pop() {
+            if !reachable.insert(start) {
+                continue;
+            }
+            for edge in edges.get(&start).into_iter().flatten() {
+                if let Some(target) = edge.target() {
+                    pending.push(target);
+                }
+            }
+        }
+
+        reachable
+    }
+
+    /// Returns the blocks no edge reaches.
+    ///
+    /// Reported rather than removed. A block nothing reaches is evidence that
+    /// something was misread, and deleting it would hide that.
+    #[must_use]
+    pub fn unreachable_blocks(&self) -> Vec<&Block> {
+        let reachable = self.reachable_blocks();
+        self.blocks
+            .iter()
+            .filter(|block| !reachable.contains(&block.start))
+            .collect()
+    }
+
+    /// Returns how many outgoing edges leave without a known target.
+    #[must_use]
+    pub fn unresolved_edge_count(&self) -> usize {
+        self.edges()
+            .values()
+            .flatten()
+            .filter(|edge| **edge == Edge::Unresolved)
+            .count()
     }
 
     /// Returns whether any block leaves without the target being known.
@@ -183,6 +272,51 @@ impl Program {
         }
         claimed.len() as u64
     }
+}
+
+/// Returns the outgoing edges of one block.
+fn edges_of(block: &Block, starts: &BTreeSet<u32>) -> Vec<Edge> {
+    let mut edges = Vec::new();
+
+    match block.terminator {
+        Terminator::Transfer {
+            kind,
+            target,
+            falls_through,
+        } => {
+            match kind {
+                // Returning and calling both leave for somewhere this function
+                // does not describe. A call comes back, and that is the fall
+                // through below rather than an edge to the callee.
+                FlowKind::Return | FlowKind::Call | FlowKind::Continue => {}
+                // A branch through a register has no intra function successor
+                // on its taken side until a table is recovered for it.
+                FlowKind::Indirect => edges.push(Edge::Unresolved),
+                FlowKind::Branch => match target {
+                    Some(target) if starts.contains(&target) => {
+                        edges.push(Edge::Taken(target));
+                    }
+                    // A branch to a known address outside this function is a
+                    // tail call, recorded separately.
+                    Some(_) => {}
+                    None => edges.push(Edge::Unresolved),
+                },
+            }
+
+            if falls_through && starts.contains(&block.end) {
+                edges.push(Edge::FallThrough(block.end));
+            }
+        }
+        Terminator::FallsInto { next } => {
+            if starts.contains(&next) {
+                edges.push(Edge::FallThrough(next));
+            }
+        }
+        // Neither reaches anything further.
+        Terminator::Undecodable { .. } | Terminator::SectionEnd => {}
+    }
+
+    edges
 }
 
 /// Returns whether an address is in an executable section.
@@ -490,6 +624,192 @@ mod tests {
                 .unwrap()
                 .has_unresolved_transfer()
         );
+    }
+
+    /// A conditional branch may or may not be taken, so both paths are edges.
+    #[test]
+    fn a_conditional_branch_has_a_taken_and_a_fall_through_edge() {
+        let program = analyze(
+            &image(&[encode::bc(12, 0, 8), encode::addi(3, 4, 1), encode::blr()]),
+            &[],
+        );
+
+        let function = program.function_at(0x8200_0000).unwrap();
+        let edges = function.edges();
+        let first = &edges[&0x8200_0000];
+
+        assert!(first.contains(&Edge::Taken(0x8200_0008)));
+        assert!(first.contains(&Edge::FallThrough(0x8200_0004)));
+        assert_eq!(first.len(), 2);
+    }
+
+    #[test]
+    fn an_unconditional_branch_has_only_a_taken_edge() {
+        let program = analyze(
+            &image(&[encode::b(8), encode::addi(3, 4, 1), encode::blr()]),
+            &[],
+        );
+
+        let function = program.function_at(0x8200_0000).unwrap();
+        let edges = function.edges();
+
+        assert_eq!(edges[&0x8200_0000], vec![Edge::Taken(0x8200_0008)]);
+    }
+
+    #[test]
+    fn a_return_has_no_successor_inside_the_function() {
+        let program = analyze(&image(&[encode::blr()]), &[]);
+
+        let function = program.function_at(0x8200_0000).unwrap();
+
+        assert!(function.edges()[&0x8200_0000].is_empty());
+    }
+
+    /// A call leaves for another function and comes back, so its only edge
+    /// inside this one is to the instruction it comes back to.
+    #[test]
+    fn a_call_falls_through_and_does_not_edge_to_its_callee() {
+        let program = analyze(&image(&[encode::bl(8), encode::blr(), encode::blr()]), &[]);
+
+        let function = program.function_at(0x8200_0000).unwrap();
+        let edges = function.edges();
+
+        assert_eq!(edges[&0x8200_0000], vec![Edge::FallThrough(0x8200_0004)]);
+    }
+
+    #[test]
+    fn an_indirect_branch_carries_an_unresolved_edge() {
+        let program = analyze(&image(&[encode::bctr()]), &[]);
+
+        let function = program.function_at(0x8200_0000).unwrap();
+
+        assert_eq!(function.edges()[&0x8200_0000], vec![Edge::Unresolved]);
+        assert_eq!(function.unresolved_edge_count(), 1);
+    }
+
+    /// An indirect call still returns to the instruction after it, so its
+    /// successor inside the function is known even though its callee is not.
+    #[test]
+    fn an_indirect_call_is_not_an_unresolved_edge() {
+        // bctrl: branch to the count register, taking the link.
+        let program = analyze(&image(&[0x4e80_0421, encode::blr()]), &[]);
+
+        let function = program.function_at(0x8200_0000).unwrap();
+
+        assert_eq!(function.unresolved_edge_count(), 0);
+        assert_eq!(
+            function.edges()[&0x8200_0000],
+            vec![Edge::FallThrough(0x8200_0004)]
+        );
+    }
+
+    #[test]
+    fn a_tail_call_produces_no_edge_inside_the_function() {
+        let program = analyze(
+            &image(&[
+                encode::bl(8),
+                encode::b(4),
+                encode::addi(3, 4, 1),
+                encode::blr(),
+            ]),
+            &[],
+        );
+
+        let function = program.function_at(0x8200_0000).unwrap();
+        let edges = function.edges();
+
+        assert!(
+            edges[&0x8200_0004].is_empty(),
+            "the branch leaves the function, so it is a tail call not an edge"
+        );
+        assert_eq!(function.tail_calls, vec![0x8200_0008]);
+    }
+
+    #[test]
+    fn every_block_of_a_discovered_function_is_reachable() {
+        let program = analyze(
+            &image(&[
+                encode::bc(12, 0, 12),
+                encode::addi(3, 4, 1),
+                encode::b(8),
+                encode::addi(3, 5, 1),
+                encode::blr(),
+            ]),
+            &[],
+        );
+
+        let function = program.function_at(0x8200_0000).unwrap();
+
+        assert!(
+            function.unreachable_blocks().is_empty(),
+            "discovery only walks what it can reach"
+        );
+        assert_eq!(function.reachable_blocks().len(), function.blocks.len());
+    }
+
+    /// Discovery cannot produce one of these, since it only walks what it
+    /// reaches, so the reporting is checked against a function assembled by
+    /// hand. It matters because a block nothing reaches is evidence that
+    /// something was misread, and removing it would hide that.
+    #[test]
+    fn a_block_nothing_reaches_is_reported_rather_than_removed() {
+        let orphan = Block {
+            start: 0x8200_0100,
+            end: 0x8200_0104,
+            terminator: Terminator::SectionEnd,
+        };
+        let function = Function {
+            start: 0x8200_0000,
+            origin: Origin::Root,
+            blocks: vec![
+                Block {
+                    start: 0x8200_0000,
+                    end: 0x8200_0004,
+                    terminator: Terminator::Transfer {
+                        kind: FlowKind::Return,
+                        target: None,
+                        falls_through: false,
+                    },
+                },
+                orphan,
+            ],
+            tail_calls: Vec::new(),
+        };
+
+        let unreachable = function.unreachable_blocks();
+
+        assert_eq!(unreachable.len(), 1);
+        assert_eq!(unreachable[0].start, 0x8200_0100);
+        assert_eq!(function.blocks.len(), 2, "it is still in the function");
+    }
+
+    #[test]
+    fn every_edge_points_at_a_block_of_the_same_function() {
+        let program = analyze(
+            &image(&[
+                encode::bc(12, 0, 12),
+                encode::bl(16),
+                encode::b(4),
+                encode::blr(),
+                encode::blr(),
+            ]),
+            &[],
+        );
+
+        for function in program.functions() {
+            let starts: BTreeSet<u32> = function.blocks.iter().map(|block| block.start).collect();
+            for edges in function.edges().values() {
+                for edge in edges {
+                    if let Some(target) = edge.target() {
+                        assert!(
+                            starts.contains(&target),
+                            "{target:#010x} is not a block of the function at {:#010x}",
+                            function.start
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

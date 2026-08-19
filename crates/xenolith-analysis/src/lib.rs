@@ -22,5 +22,5 @@ mod helper;
 mod testing;
 
 pub use block::{Block, Terminator, blocks_from, blocks_within};
-pub use function::{Function, Origin, Program, analyze};
+pub use function::{Edge, Function, Origin, Program, analyze};
 pub use helper::{Helper, HelperDirection, HelperKind, Helpers, detect};
