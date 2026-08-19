@@ -5,6 +5,10 @@ the PowerPC code inside it, works out where the functions are, and writes C.
 
 Linux only, and deliberately so. There is no Windows support and none planned.
 
+Fuller documentation lives in `docs/`, covering the pipeline stage by stage, the
+oracles each stage is checked against, and every subcommand. Build it with
+`cd docs && bun install && bun run dev`.
+
 ## Status
 
 This turns a retail game into C that compiles. It does not yet turn one into a
