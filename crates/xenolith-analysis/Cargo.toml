@@ -1,0 +1,15 @@
+[package]
+name = "xenolith-analysis"
+description = "Function and control flow recovery for Xbox 360 executables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+xenolith-ppc = { version = "0.1.0", path = "../xenolith-ppc" }
+xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
+
+[lints]
+workspace = true
