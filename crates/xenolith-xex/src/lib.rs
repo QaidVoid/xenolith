@@ -27,4 +27,5 @@ pub use headers::{
     BasicBlock, CompressionType, EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary,
     NormalCompression, Version, keys,
 };
+pub use image::{Image, Permissions, Section};
 pub use security::{PageDescriptor, PageKind, SecurityInfo};

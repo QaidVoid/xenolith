@@ -18,7 +18,7 @@ use crate::headers::{
     CompressionType, EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary, keys,
     parse_import_libraries,
 };
-use crate::image::{reconstruct_basic, reconstruct_uncompressed};
+use crate::image::{Image, reconstruct_basic, reconstruct_uncompressed};
 use crate::reader::Reader;
 use crate::security::SecurityInfo;
 
@@ -296,6 +296,22 @@ impl<'a> Container<'a> {
                 scheme: format!("{scheme:?}"),
             }),
         }
+    }
+
+    /// Decodes the container into an image addressable by virtual address.
+    ///
+    /// This is the loader's output, and the form every later stage consumes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for any reason [`Container::image`] does.
+    pub fn load(&self, key: Option<&KeyMaterial>) -> Result<Image> {
+        let bytes = self.image(key)?;
+        let base_address = self.security_info.load_address();
+        let sections =
+            Image::sections_from_descriptors(base_address, self.security_info.page_descriptors());
+
+        Ok(Image::new(base_address, bytes, sections).with_entry_point(self.entry_point))
     }
 
     /// Returns the security info block, which describes the image layout.

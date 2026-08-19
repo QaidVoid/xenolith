@@ -13,6 +13,7 @@
 
 use crate::error::{Error, Result};
 use crate::headers::BasicBlock;
+use crate::security::{PageDescriptor, PageKind};
 
 /// Largest image this crate will allocate for.
 ///
@@ -219,5 +220,524 @@ mod tests {
     fn accepts_a_size_just_inside_the_limit() {
         assert!(checked_image_size(MAX_IMAGE_SIZE).is_ok());
         assert!(checked_image_size(MAX_IMAGE_SIZE + 1).is_err());
+    }
+}
+
+/// Bytes in one image page, as recorded by the page descriptors.
+pub(crate) const PAGE_SIZE: u32 = 0x1_0000;
+
+/// What a section permits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Permissions {
+    /// The section can be read.
+    pub read: bool,
+    /// The section can be written.
+    pub write: bool,
+    /// The section holds executable code.
+    pub execute: bool,
+}
+
+/// A run of consecutive pages sharing one kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Section {
+    /// Virtual address the section starts at.
+    pub start: u32,
+    /// Length of the section in bytes.
+    pub size: u32,
+    /// What the pages of this section hold.
+    pub kind: PageKind,
+}
+
+impl Section {
+    /// Returns the address one past the end of the section.
+    #[must_use]
+    pub const fn end(&self) -> u64 {
+        self.start as u64 + self.size as u64
+    }
+
+    /// Returns whether an address falls inside this section.
+    #[must_use]
+    pub const fn contains(&self, address: u32) -> bool {
+        (address as u64) >= self.start as u64 && (address as u64) < self.end()
+    }
+
+    /// Returns what the section permits, or `None` when its kind is unknown.
+    ///
+    /// An unrecognized page kind yields `None` rather than a default, because a
+    /// wrong guess about what is executable would mislead the stage that tells
+    /// code from data.
+    #[must_use]
+    pub const fn permissions(&self) -> Option<Permissions> {
+        match self.kind {
+            PageKind::Code => Some(Permissions {
+                read: true,
+                write: false,
+                execute: true,
+            }),
+            PageKind::Data => Some(Permissions {
+                read: true,
+                write: true,
+                execute: false,
+            }),
+            PageKind::ReadOnlyData => Some(Permissions {
+                read: true,
+                write: false,
+                execute: false,
+            }),
+            PageKind::Unknown(_) => None,
+        }
+    }
+}
+
+/// A decoded image, addressable by Xbox 360 virtual address.
+///
+/// The image loads contiguously from one base address, so a lookup is a
+/// subtraction and a bounds check rather than a page table walk.
+#[derive(Debug, Clone)]
+pub struct Image {
+    base_address: u32,
+    bytes: Vec<u8>,
+    sections: Vec<Section>,
+    entry_point: Option<u32>,
+}
+
+impl Image {
+    /// Builds an image from decoded bytes and the sections describing them.
+    #[must_use]
+    pub fn new(base_address: u32, bytes: Vec<u8>, sections: Vec<Section>) -> Self {
+        Self {
+            base_address,
+            bytes,
+            sections,
+            entry_point: None,
+        }
+    }
+
+    /// Records the entry point address.
+    #[must_use]
+    pub fn with_entry_point(mut self, entry_point: Option<u32>) -> Self {
+        self.entry_point = entry_point;
+        self
+    }
+
+    /// Coalesces page descriptors into sections of one kind each.
+    pub(crate) fn sections_from_descriptors(
+        base_address: u32,
+        descriptors: &[PageDescriptor],
+    ) -> Vec<Section> {
+        let mut sections: Vec<Section> = Vec::new();
+        let mut address = base_address;
+
+        for descriptor in descriptors {
+            let size = descriptor.page_count.saturating_mul(PAGE_SIZE);
+
+            match sections.last_mut() {
+                Some(last) if last.kind == descriptor.kind => {
+                    last.size = last.size.saturating_add(size);
+                }
+                _ => sections.push(Section {
+                    start: address,
+                    size,
+                    kind: descriptor.kind,
+                }),
+            }
+
+            address = address.saturating_add(size);
+        }
+
+        sections
+    }
+
+    /// Returns the address the image loads at.
+    #[must_use]
+    pub const fn base_address(&self) -> u32 {
+        self.base_address
+    }
+
+    /// Returns the length of the image in bytes.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Returns the entry point address, when the container recorded one.
+    #[must_use]
+    pub const fn entry_point(&self) -> Option<u32> {
+        self.entry_point
+    }
+
+    /// Returns every section, in address order.
+    #[must_use]
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
+    }
+
+    /// Returns the section containing `address`, if any.
+    #[must_use]
+    pub fn section_at(&self, address: u32) -> Option<&Section> {
+        self.sections
+            .iter()
+            .find(|section| section.contains(address))
+    }
+
+    /// Returns only the sections holding executable code.
+    pub fn executable_sections(&self) -> impl Iterator<Item = &Section> {
+        self.sections
+            .iter()
+            .filter(|section| section.kind.is_executable())
+    }
+
+    /// Reads `len` bytes starting at a virtual address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the range is not fully inside the image, including
+    /// when the address arithmetic would leave the 32-bit address space.
+    ///
+    /// ```
+    /// use xenolith_xex::{Image, PageKind, Section};
+    ///
+    /// let sections = vec![Section { start: 0x8200_0000, size: 4, kind: PageKind::Code }];
+    /// let image = Image::new(0x8200_0000, vec![0xde, 0xad, 0xbe, 0xef], sections);
+    ///
+    /// assert_eq!(image.read(0x8200_0001, 2).unwrap(), &[0xad, 0xbe]);
+    /// assert!(image.read(0x8200_0003, 2).is_err());
+    /// ```
+    pub fn read(&self, address: u32, len: usize) -> Result<&[u8]> {
+        let start = self.offset_of(address, len)?;
+        let end = start
+            .checked_add(len)
+            .ok_or(Error::UnmappedRead { address, len })?;
+
+        self.bytes
+            .get(start..end)
+            .ok_or(Error::UnmappedRead { address, len })
+    }
+
+    /// Reads a byte at a virtual address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the address is not mapped.
+    pub fn u8(&self, address: u32) -> Result<u8> {
+        self.read_array::<1>(address).map(u8::from_be_bytes)
+    }
+
+    /// Reads a big-endian 16-bit value at a virtual address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the range is not mapped.
+    pub fn u16(&self, address: u32) -> Result<u16> {
+        self.read_array::<2>(address).map(u16::from_be_bytes)
+    }
+
+    /// Reads a big-endian 32-bit value at a virtual address.
+    ///
+    /// The console is big-endian, so this is the natural width for reading an
+    /// instruction or a pointer out of the image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the range is not mapped.
+    ///
+    /// ```
+    /// use xenolith_xex::{Image, PageKind, Section};
+    ///
+    /// let sections = vec![Section { start: 0x8200_0000, size: 4, kind: PageKind::Code }];
+    /// let image = Image::new(0x8200_0000, vec![0x7c, 0x08, 0x02, 0xa6], sections);
+    ///
+    /// assert_eq!(image.u32(0x8200_0000).unwrap(), 0x7c08_02a6);
+    /// ```
+    pub fn u32(&self, address: u32) -> Result<u32> {
+        self.read_array::<4>(address).map(u32::from_be_bytes)
+    }
+
+    /// Reads a big-endian 64-bit value at a virtual address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the range is not mapped.
+    pub fn u64(&self, address: u32) -> Result<u64> {
+        self.read_array::<8>(address).map(u64::from_be_bytes)
+    }
+
+    /// Reads a fixed width value at a virtual address.
+    fn read_array<const N: usize>(&self, address: u32) -> Result<[u8; N]> {
+        let bytes = self.read(address, N)?;
+        <[u8; N]>::try_from(bytes).map_err(|_| Error::UnmappedRead { address, len: N })
+    }
+
+    /// Converts a virtual address to an offset, rejecting unmapped ranges.
+    fn offset_of(&self, address: u32, len: usize) -> Result<usize> {
+        let unmapped = || Error::UnmappedRead { address, len };
+
+        let length = u64::try_from(len).unwrap_or(u64::MAX);
+        let last = u64::from(address)
+            .checked_add(length)
+            .ok_or_else(unmapped)?;
+        if last > u64::from(u32::MAX) + 1 {
+            return Err(unmapped());
+        }
+
+        let offset = u64::from(address)
+            .checked_sub(u64::from(self.base_address))
+            .ok_or_else(unmapped)?;
+
+        usize::try_from(offset).map_err(|_| unmapped())
+    }
+}
+
+#[cfg(test)]
+mod address_space_tests {
+    use super::*;
+
+    /// Builds an image of `len` ascending bytes based at 0x82000000.
+    fn image_of(len: usize, kind: PageKind) -> Image {
+        let bytes: Vec<u8> = (0..len)
+            .map(|index| u8::try_from(index % 251).unwrap_or(0))
+            .collect();
+        let sections = vec![Section {
+            start: 0x8200_0000,
+            size: u32::try_from(len).unwrap(),
+            kind,
+        }];
+        Image::new(0x8200_0000, bytes, sections)
+    }
+
+    #[test]
+    fn reads_inside_a_section() {
+        let image = image_of(16, PageKind::Code);
+
+        assert_eq!(image.read(0x8200_0004, 4).unwrap(), &[4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn reads_big_endian_widths() {
+        let sections = vec![Section {
+            start: 0x8200_0000,
+            size: 8,
+            kind: PageKind::Code,
+        }];
+        let image = Image::new(0x8200_0000, vec![1, 2, 3, 4, 5, 6, 7, 8], sections);
+
+        assert_eq!(image.u8(0x8200_0000).unwrap(), 1);
+        assert_eq!(image.u16(0x8200_0000).unwrap(), 0x0102);
+        assert_eq!(image.u32(0x8200_0000).unwrap(), 0x0102_0304);
+        assert_eq!(image.u64(0x8200_0000).unwrap(), 0x0102_0304_0506_0708);
+    }
+
+    #[test]
+    fn rejects_a_read_below_the_base() {
+        let image = image_of(16, PageKind::Code);
+
+        let error = image.read(0x81ff_ffff, 1).unwrap_err();
+
+        assert!(matches!(error, Error::UnmappedRead { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn rejects_a_read_straddling_the_end() {
+        let image = image_of(16, PageKind::Code);
+
+        assert!(image.read(0x8200_000e, 2).is_ok());
+        assert!(image.read(0x8200_000f, 2).is_err());
+    }
+
+    #[test]
+    fn rejects_a_sized_read_too_close_to_the_end() {
+        let image = image_of(16, PageKind::Code);
+
+        assert!(image.u32(0x8200_000c).is_ok());
+        assert!(image.u32(0x8200_000d).is_err());
+    }
+
+    /// A read near the top of the address space must fail rather than wrap.
+    ///
+    /// This image ends exactly at the top of the 32-bit space, so a read that
+    /// finishes on that boundary is legal and only one going past it is not.
+    #[test]
+    fn rejects_arithmetic_that_would_leave_the_address_space() {
+        let sections = vec![Section {
+            start: 0xffff_fff0,
+            size: 16,
+            kind: PageKind::Data,
+        }];
+        let image = Image::new(0xffff_fff0, vec![0; 16], sections);
+
+        assert!(image.read(0xffff_fff0, 16).is_ok());
+        assert!(image.u64(0xffff_fff8).is_ok());
+
+        assert!(image.read(0xffff_ffff, 8).is_err());
+        assert!(image.u64(0xffff_fff9).is_err());
+        assert!(image.read(0xffff_fff0, 17).is_err());
+    }
+
+    #[test]
+    fn a_zero_length_read_inside_the_image_succeeds() {
+        let image = image_of(16, PageKind::Code);
+
+        assert_eq!(image.read(0x8200_0004, 0).unwrap(), &[] as &[u8]);
+    }
+
+    #[test]
+    fn resolves_an_address_to_its_section() {
+        let descriptors = [
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 2,
+                kind: PageKind::Data,
+                digest: [0; 20],
+            },
+        ];
+        let sections = Image::sections_from_descriptors(0x8200_0000, &descriptors);
+        let image = Image::new(0x8200_0000, vec![0; 3 * 0x1_0000], sections);
+
+        assert_eq!(image.section_at(0x8200_0000).unwrap().kind, PageKind::Code);
+        assert_eq!(image.section_at(0x8201_0000).unwrap().kind, PageKind::Data);
+        assert_eq!(image.section_at(0x8202_ffff).unwrap().kind, PageKind::Data);
+        assert!(image.section_at(0x8203_0000).is_none());
+    }
+
+    #[test]
+    fn adjacent_descriptors_of_one_kind_become_a_single_section() {
+        let descriptors = [
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 3,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Data,
+                digest: [0; 20],
+            },
+        ];
+
+        let sections = Image::sections_from_descriptors(0x8200_0000, &descriptors);
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].size, 4 * PAGE_SIZE);
+        assert_eq!(sections[0].kind, PageKind::Code);
+        assert_eq!(sections[1].start, 0x8204_0000);
+    }
+
+    #[test]
+    fn sections_do_not_overlap() {
+        let descriptors = [
+            PageDescriptor {
+                page_count: 2,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Data,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::ReadOnlyData,
+                digest: [0; 20],
+            },
+        ];
+
+        let sections = Image::sections_from_descriptors(0x8200_0000, &descriptors);
+
+        for pair in sections.windows(2) {
+            assert!(
+                pair[0].end() <= u64::from(pair[1].start),
+                "sections overlap"
+            );
+        }
+    }
+
+    #[test]
+    fn only_code_sections_are_executable() {
+        let descriptors = [
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Data,
+                digest: [0; 20],
+            },
+        ];
+        let sections = Image::sections_from_descriptors(0x8200_0000, &descriptors);
+        let image = Image::new(0x8200_0000, vec![0; 2 * 0x1_0000], sections);
+
+        let executable: Vec<_> = image.executable_sections().collect();
+
+        assert_eq!(executable.len(), 1);
+        assert_eq!(executable[0].kind, PageKind::Code);
+    }
+
+    #[test]
+    fn permissions_follow_the_page_kind() {
+        let code = Section {
+            start: 0,
+            size: 1,
+            kind: PageKind::Code,
+        };
+        let data = Section {
+            start: 0,
+            size: 1,
+            kind: PageKind::Data,
+        };
+        let readonly = Section {
+            start: 0,
+            size: 1,
+            kind: PageKind::ReadOnlyData,
+        };
+
+        assert_eq!(
+            code.permissions(),
+            Some(Permissions {
+                read: true,
+                write: false,
+                execute: true
+            })
+        );
+        assert_eq!(
+            data.permissions(),
+            Some(Permissions {
+                read: true,
+                write: true,
+                execute: false
+            })
+        );
+        assert_eq!(
+            readonly.permissions(),
+            Some(Permissions {
+                read: true,
+                write: false,
+                execute: false
+            })
+        );
+    }
+
+    /// An unknown kind reports no permissions rather than a default, so a later
+    /// stage cannot silently treat it as data.
+    #[test]
+    fn an_unknown_page_kind_reports_no_permissions() {
+        let section = Section {
+            start: 0,
+            size: 1,
+            kind: PageKind::Unknown(7),
+        };
+
+        assert_eq!(section.permissions(), None);
     }
 }

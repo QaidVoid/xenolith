@@ -100,6 +100,15 @@ pub enum Error {
         scheme: String,
     },
 
+    /// A read fell outside the mapped image.
+    #[error("read of {len} bytes at {address:#010x} is not mapped")]
+    UnmappedRead {
+        /// Address the read started at.
+        address: u32,
+        /// Length the read asked for.
+        len: usize,
+    },
+
     /// The container declares an image larger than the console could load.
     #[error("declared image size of {size} bytes exceeds what the console can hold")]
     ImageTooLarge {
