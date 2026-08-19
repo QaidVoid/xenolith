@@ -1,21 +1,17 @@
 //! The disassemble subcommand.
 //!
-//! Two input shapes are accepted. The usual one is a container, which is
-//! decoded through the loader. The other is an image that has already been
-//! decoded by something else, which matters because decoding a container needs
-//! key material and reading an existing image does not. The coverage sweep is
-//! the measurement the instruction table's real world accuracy rests on, so it
-//! must not be gated behind having a key.
+//! The coverage sweep is the measurement the instruction table's real world
+//! accuracy rests on, so it must stay possible against a title whose key is not
+//! to hand. Reading an already decoded image is what allows that.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_ppc::Instruction;
-use xenolith_xex::{Container, Image, PageKind, Section};
+use xenolith_xex::Image;
 
-use crate::keys;
+use crate::input::{Source, number};
 
 /// How many instructions are printed when no range is given.
 const DEFAULT_WINDOW: u32 = 64;
@@ -23,19 +19,9 @@ const DEFAULT_WINDOW: u32 = 64;
 /// Arguments of the disassemble subcommand.
 #[derive(Debug, Parser)]
 pub(crate) struct Args {
-    /// Path to the XEX file, or to a decoded image when `--raw` is given.
-    pub(crate) file: PathBuf,
-
-    /// Treat the input as an already decoded image rather than a container.
-    ///
-    /// Reading one needs no key material, which is what makes a coverage sweep
-    /// possible against a title whose key is not to hand.
-    #[arg(long)]
-    pub(crate) raw: bool,
-
-    /// Address a raw image loads at.
-    #[arg(long, value_name = "ADDR", default_value = "0x82000000")]
-    pub(crate) base: String,
+    /// Where the image comes from.
+    #[command(flatten)]
+    pub(crate) source: Source,
 
     /// Address to start disassembling at.
     #[arg(long, value_name = "ADDR")]
@@ -56,65 +42,6 @@ pub(crate) struct Args {
     /// Disassemble a range that is not marked executable.
     #[arg(long)]
     pub(crate) allow_data: bool,
-
-    /// Path to a file holding the static key as 32 hexadecimal digits.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) key_file: Option<PathBuf>,
-}
-
-/// Parses an address or size written in decimal or hexadecimal.
-fn number(text: &str) -> Result<u32> {
-    let trimmed = text.trim();
-    let parsed = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .map_or_else(
-            || trimmed.parse::<u32>().ok(),
-            |hex| u32::from_str_radix(hex, 16).ok(),
-        );
-
-    parsed.ok_or_else(|| miette!("{text} is not an address or size this tool understands"))
-}
-
-/// Loads the image to disassemble, from whichever input shape was given.
-fn load(args: &Args) -> Result<Image> {
-    let bytes = std::fs::read(&args.file)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("reading {}", args.file.display()))?;
-
-    if args.raw {
-        let base = number(&args.base)?;
-        let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
-        // Nothing describes the layout of a bare image, so it is treated as one
-        // executable span. Saying so is better than inventing a section table.
-        let sections = vec![Section {
-            start: base,
-            size,
-            kind: PageKind::Code,
-        }];
-        return Ok(Image::new(base, bytes, sections));
-    }
-
-    let container = Container::parse(&bytes)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("parsing {} as a XEX container", args.file.display()))?;
-
-    let key = keys::resolve(args.key_file.as_deref())?;
-    if container.encryption() == xenolith_xex::EncryptionType::Encrypted && key.is_none() {
-        return Err(miette!(
-            help = format!(
-                "{}, or pass an already decoded image with --raw",
-                keys::sources_consulted(args.key_file.as_deref())
-            ),
-            "{} is encrypted and no key material was found",
-            args.file.display()
-        ));
-    }
-
-    container
-        .load(key.as_ref())
-        .into_diagnostic()
-        .wrap_err_with(|| format!("decoding the image of {}", args.file.display()))
 }
 
 /// Resolves the range to disassemble.
@@ -152,7 +79,7 @@ fn range(args: &Args, image: &Image) -> Result<(u32, u32)> {
 /// Returns an error when the input cannot be read or decoded, when the range is
 /// malformed or unmapped, or when key material is needed and absent.
 pub(crate) fn run(args: &Args) -> Result<()> {
-    let image = load(args)?;
+    let image = args.source.load()?;
 
     if args.sweep {
         return sweep(&image);

@@ -1,6 +1,8 @@
 //! Command line front end for the xenolith static recompiler.
 
+mod analyze;
 mod disasm;
+mod input;
 mod inspect;
 mod keys;
 
@@ -23,11 +25,14 @@ enum Command {
     Inspect(inspect::Args),
     /// Disassemble a range of an Xbox 360 executable.
     Disasm(disasm::Args),
+    /// Report the functions, blocks, and jump tables of an executable.
+    Analyze(analyze::Args),
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Inspect(args) => inspect::run(&args),
         Command::Disasm(args) => disasm::run(&args),
+        Command::Analyze(args) => analyze::run(&args),
     }
 }

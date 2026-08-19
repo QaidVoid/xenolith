@@ -969,6 +969,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "miette",
+ "xenolith-analysis",
  "xenolith-ppc",
  "xenolith-xex",
 ]

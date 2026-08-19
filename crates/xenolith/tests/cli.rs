@@ -206,3 +206,121 @@ fn a_sweep_reports_coverage() {
         "the undecoded encoding was not listed: {stdout}"
     );
 }
+
+#[test]
+fn top_level_help_lists_analyze() {
+    let (ok, stdout, _) = run!("--help");
+
+    assert!(ok, "help should succeed");
+    assert!(stdout.contains("analyze"), "help did not list analyze");
+}
+
+#[test]
+fn analyze_help_documents_its_arguments() {
+    let (ok, stdout, _) = run!("analyze", "--help");
+
+    assert!(ok, "analyze help should succeed");
+    for flag in ["--raw", "--base", "--key-file", "--functions", "--tables"] {
+        assert!(stdout.contains(flag), "{flag} not documented: {stdout}");
+    }
+}
+
+#[test]
+fn analyze_names_a_file_it_cannot_read_as_a_container() {
+    let path = std::env::temp_dir().join("xenolith-analyze-garbage.bin");
+    std::fs::write(&path, b"this is definitely not a xex file").unwrap();
+
+    let (ok, _, stderr) = run!("analyze", path.to_str().unwrap());
+
+    assert!(!ok, "analyzing a non container should fail");
+    assert!(
+        stderr.contains("xenolith-analyze-garbage.bin"),
+        "the error did not name the file: {stderr}"
+    );
+}
+
+#[test]
+fn analyze_refuses_an_image_with_no_executable_words() {
+    let path = std::env::temp_dir().join("xenolith-analyze-empty.bin");
+    std::fs::write(&path, b"").unwrap();
+
+    let (ok, _, stderr) = run!("analyze", "--raw", path.to_str().unwrap());
+
+    assert!(!ok, "an image with no code should fail");
+    assert!(
+        stderr.contains("no executable words"),
+        "the error did not say what was wrong: {stderr}"
+    );
+}
+
+/// A switch whose recovery can be worked out by hand, so the reported table can
+/// be checked against what the code says rather than against itself.
+///
+/// ```text
+/// 0x82000000  mflr   r12                  a prologue, so the function is found
+/// 0x82000004  stwu   r1, -32(r1)
+/// 0x82000008  cmpli  r10, 3               four entries
+/// 0x8200000c  bc     0x82000038           the default
+/// 0x82000010  lis    r12, 0x8200
+/// 0x82000014  addi   r12, r12, 0x48       the table
+/// 0x82000018  lbzx   r0, r12, r10         entry = table[r10]
+/// 0x8200001c  rlwinm r0, r0, 2, 0, 29     entry * 4
+/// 0x82000020  lis    r12, 0x8200
+/// 0x82000024  addi   r12, r12, 0x28       the base
+/// 0x82000028  add    r12, r12, r0         target = base + entry * 4
+/// 0x8200002c  mtctr  r12
+/// 0x82000030  bctr
+/// ```
+///
+/// The table holds 3, 5, 6 and 7, so the targets are the base plus 12, 20, 24
+/// and 28.
+#[test]
+fn analyze_reports_a_jump_table_worked_out_by_hand() {
+    const WORDS: [u32; 19] = [
+        0x7d88_02a6,
+        0x9421_ffe0,
+        0x280a_0003,
+        0x4181_002c,
+        0x3d80_8200,
+        0x398c_0048,
+        0x7c0c_50ae,
+        0x5400_103a,
+        0x3d80_8200,
+        0x398c_0028,
+        0x7d8c_0214,
+        0x7d89_03a6,
+        0x4e80_0420,
+        0x4e80_0020,
+        0x4e80_0020,
+        0x4e80_0020,
+        0x4e80_0020,
+        0x4e80_0020,
+        0x0305_0607,
+    ];
+
+    let path = std::env::temp_dir().join("xenolith-analyze-switch.bin");
+    let bytes: Vec<u8> = WORDS.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (ok, stdout, stderr) = run!(
+        "analyze",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--tables",
+        path.to_str().unwrap()
+    );
+
+    assert!(ok, "analyzing a crafted image should succeed: {stderr}");
+    assert!(
+        stdout.contains("tables recovered          1"),
+        "the table was not recovered: {stdout}"
+    );
+    assert!(
+        stdout.contains("branch 0x82000030  index r10  table 0x82000048  default 0x82000038"),
+        "the table was not reported as expected: {stdout}"
+    );
+    for target in ["0x82000034", "0x8200003c", "0x82000040", "0x82000044"] {
+        assert!(stdout.contains(target), "{target} missing from: {stdout}");
+    }
+}
