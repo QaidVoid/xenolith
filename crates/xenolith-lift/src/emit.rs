@@ -114,11 +114,15 @@ fn rotate_mask(begin: u8, end: u8) -> u32 {
     mask
 }
 
-/// Writes the statements that set a condition field from a signed comparison.
-fn compare_signed(into: &mut String, field: u8, left: &str, right: &str) {
+/// Writes the statements that set a condition field from a comparison.
+///
+/// The less than expression is given rather than derived, because an unsigned
+/// comparison against zero is never true and a compiler asked for warnings says
+/// so once for every occurrence.
+fn compare(into: &mut String, field: u8, left: &str, right: &str, less: &str) {
     let _ = writeln!(
         into,
-        "    ctx->cr[{field}].lt = ({left}) < ({right});\n    \
+        "    ctx->cr[{field}].lt = {less};\n    \
          ctx->cr[{field}].gt = ({left}) > ({right});\n    \
          ctx->cr[{field}].eq = ({left}) == ({right});\n    \
          ctx->cr[{field}].so = (uint8_t)(ctx->xer >> 31) & 1;"
@@ -393,7 +397,14 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             } else {
                 format!("(int64_t)({displacement})")
             };
-            compare_signed(&mut out, u8::try_from(field).unwrap_or(0), &left, &right);
+            let less = format!("({left}) < ({right})");
+            compare(
+                &mut out,
+                u8::try_from(field).unwrap_or(0),
+                &left,
+                &right,
+                &less,
+            );
         }
         Opcode::Cmpl | Opcode::Cmpli => {
             let field = rt >> 2;
@@ -412,7 +423,18 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             } else {
                 format!("{immediate}ull")
             };
-            compare_signed(&mut out, u8::try_from(field).unwrap_or(0), &left, &right);
+            let less = if instruction.opcode() == Opcode::Cmpli && immediate == 0 {
+                "0".to_owned()
+            } else {
+                format!("({left}) < ({right})")
+            };
+            compare(
+                &mut out,
+                u8::try_from(field).unwrap_or(0),
+                &left,
+                &right,
+                &less,
+            );
         }
 
         Opcode::Mtspr => {
