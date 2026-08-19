@@ -497,6 +497,128 @@ fn vector_convert(instruction: Instruction) -> Option<String> {
     Some(out)
 }
 
+/// Returns the C for a vector instruction that reaches memory or permutes
+/// bytes.
+///
+/// The console added loads that take whichever part of a sixteen byte block
+/// falls on one side of an address, so that a pair of them fetches a vector
+/// from anywhere. Each writes zeroes over the part it did not take, which is
+/// what lets the two be combined with a bitwise or.
+fn vector_access(instruction: Instruction) -> Option<String> {
+    let (d, a, b, c) = vector_operands(instruction);
+    let (ra, rb) = (u32::from(instruction.ra()), u32::from(instruction.rb()));
+    let mut out = String::new();
+
+    let effective = if ra == 0 {
+        format!("(uint32_t)ctx->r[{rb}]")
+    } else {
+        format!("(uint32_t)ctx->r[{ra}] + (uint32_t)ctx->r[{rb}]")
+    };
+
+    match instruction.opcode() {
+        // The control vectors a permute is driven by, which say how far a
+        // vector has to move to become aligned.
+        Opcode::Lvsl | Opcode::Lvsl128 | Opcode::Lvsr | Opcode::Lvsr128 => {
+            let value = if matches!(instruction.opcode(), Opcode::Lvsl | Opcode::Lvsl128) {
+                "sh + lane"
+            } else {
+                "16 - sh + lane"
+            };
+            let _ = writeln!(out, "    {{ uint32_t ea = {effective};");
+            let _ = writeln!(out, "    unsigned sh = ea & 0xf; xenolith_vector t;");
+            let _ = writeln!(out, "    for (unsigned lane = 0; lane < 16; lane++) {{");
+            let _ = writeln!(
+                out,
+                "        xenolith_vector_set_u8(&t, lane, (uint8_t)({value}));"
+            );
+            let _ = writeln!(out, "    }}");
+            let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+        }
+        // Whichever part of the block lies at or after the address, moved to
+        // the front, with zeroes behind it.
+        Opcode::Lvlx | Opcode::Lvlx128 | Opcode::Lvlxl | Opcode::Lvlxl128 => {
+            unaligned_load(&mut out, d, &effective, "lane + sh < 16", "ea + lane");
+        }
+        // Whichever part lies before it, moved to the back, with zeroes ahead.
+        Opcode::Lvrx | Opcode::Lvrx128 | Opcode::Lvrxl | Opcode::Lvrxl128 => {
+            unaligned_load(&mut out, d, &effective, "lane + sh >= 16", "ea - 16 + lane");
+        }
+        Opcode::Stvlx | Opcode::Stvlx128 | Opcode::Stvlxl | Opcode::Stvlxl128 => {
+            unaligned_store(&mut out, d, &effective, "lane + sh < 16", "ea + lane");
+        }
+        Opcode::Stvrx | Opcode::Stvrx128 | Opcode::Stvrxl | Opcode::Stvrxl128 => {
+            unaligned_store(&mut out, d, &effective, "lane + sh >= 16", "ea - 16 + lane");
+        }
+        // One word, into or out of the lane the address selects. The rest of
+        // the register is left alone, which the instruction leaves undefined
+        // and is the least surprising of the things undefined allows.
+        Opcode::Lvewx | Opcode::Lvewx128 => {
+            let _ = writeln!(out, "    {{ uint32_t ea = ({effective}) & ~3u;");
+            let _ = writeln!(
+                out,
+                "    xenolith_vector_set_u32(&ctx->v[{d}], (ea >> 2) & 3, xenolith_load32(base, ea)); }}"
+            );
+        }
+        Opcode::Stvewx | Opcode::Stewx128 => {
+            let _ = writeln!(out, "    {{ uint32_t ea = ({effective}) & ~3u;");
+            let _ = writeln!(
+                out,
+                "    xenolith_store32(base, ea, xenolith_vector_u32(&ctx->v[{d}], (ea >> 2) & 3)); }}"
+            );
+        }
+        // Every byte of the result is chosen by the matching byte of a third
+        // register, which is the one family that reads its indices out of a
+        // register rather than out of the encoding.
+        Opcode::Vperm => {
+            let _ = writeln!(out, "    {{ xenolith_vector t;");
+            let _ = writeln!(out, "    for (unsigned lane = 0; lane < 16; lane++) {{");
+            let _ = writeln!(
+                out,
+                "        unsigned pick = xenolith_vector_u8(&ctx->v[{c}], lane) & 0x1f;"
+            );
+            let _ = writeln!(
+                out,
+                "        xenolith_vector_set_u8(&t, lane, pick < 16 ? xenolith_vector_u8(&ctx->v[{a}], pick) : xenolith_vector_u8(&ctx->v[{b}], pick - 16));"
+            );
+            let _ = writeln!(out, "    }}");
+            let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+        }
+
+        _ => return None,
+    }
+
+    Some(out)
+}
+
+/// Writes an unaligned load, which takes the bytes a condition selects and
+/// zeroes the rest.
+fn unaligned_load(out: &mut String, destination: u32, effective: &str, taken: &str, from: &str) {
+    let _ = writeln!(out, "    {{ uint32_t ea = {effective};");
+    let _ = writeln!(out, "    unsigned sh = ea & 0xf; xenolith_vector t;");
+    let _ = writeln!(out, "    for (unsigned lane = 0; lane < 16; lane++) {{");
+    let _ = writeln!(
+        out,
+        "        xenolith_vector_set_u8(&t, lane, ({taken}) ? xenolith_load8(base, {from}) : 0);"
+    );
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    ctx->v[{destination}] = t; }}");
+}
+
+/// Writes an unaligned store, which writes only the bytes a condition selects.
+fn unaligned_store(out: &mut String, source: u32, effective: &str, taken: &str, to: &str) {
+    let _ = writeln!(out, "    {{ uint32_t ea = {effective};");
+    let _ = writeln!(out, "    unsigned sh = ea & 0xf;");
+    let _ = writeln!(out, "    for (unsigned lane = 0; lane < 16; lane++) {{");
+    let _ = writeln!(out, "        if ({taken}) {{");
+    let _ = writeln!(
+        out,
+        "            xenolith_store8(base, {to}, xenolith_vector_u8(&ctx->v[{source}], lane));"
+    );
+    let _ = writeln!(out, "        }}");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    }}");
+}
+
 /// Returns the C for a vector comparison.
 ///
 /// Each lane becomes all ones or all zeroes, and the recording form also writes
@@ -505,7 +627,9 @@ fn vector_convert(instruction: Instruction) -> Option<String> {
 /// produce code that compiles and takes the wrong path.
 fn vector_compare(instruction: Instruction) -> Option<String> {
     let (d, a, b, _) = vector_operands(instruction);
-    let (width, floating, test) = comparison(instruction.opcode())?;
+    let Some((width, floating, test)) = comparison(instruction.opcode()) else {
+        return vector_access(instruction);
+    };
     let (name, count) = lane_width(width);
     let bits = width * 8;
 

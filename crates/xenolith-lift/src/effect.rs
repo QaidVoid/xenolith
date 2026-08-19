@@ -374,11 +374,48 @@ fn floating_shape(opcode: Opcode) -> Option<Shape> {
     })
 }
 
+/// Returns whether an operation reaches memory or permutes bytes, both of
+/// which name places no shape describes.
+fn vector_access_shape(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Lvsl
+            | Opcode::Lvsl128
+            | Opcode::Lvsr
+            | Opcode::Lvsr128
+            | Opcode::Lvlx
+            | Opcode::Lvlx128
+            | Opcode::Lvlxl
+            | Opcode::Lvlxl128
+            | Opcode::Lvrx
+            | Opcode::Lvrx128
+            | Opcode::Lvrxl
+            | Opcode::Lvrxl128
+            | Opcode::Stvlx
+            | Opcode::Stvlx128
+            | Opcode::Stvlxl
+            | Opcode::Stvlxl128
+            | Opcode::Stvrx
+            | Opcode::Stvrx128
+            | Opcode::Stvrxl
+            | Opcode::Stvrxl128
+            | Opcode::Lvewx
+            | Opcode::Lvewx128
+            | Opcode::Stvewx
+            | Opcode::Stewx128
+            | Opcode::Vperm
+    )
+}
+
 /// Returns how a vector operation maps onto what it touches.
 ///
 /// Every one of these arrives twice, once as the standard extension and once as
 /// the console's, whose forms hold their register numbers in different bits.
 fn vector_shape(opcode: Opcode) -> Option<Shape> {
+    if vector_access_shape(opcode) {
+        return Some(Shape::Named);
+    }
+
     Some(match opcode {
         Opcode::Vand
         | Opcode::Vand128
@@ -526,6 +563,11 @@ fn other_shape(opcode: Opcode) -> Option<Shape> {
 /// register writes whichever one its field selects, and a trap reads its
 /// operands to decide whether to leave the function entirely.
 fn named_effect(instruction: Instruction, effect: &mut Effect) {
+    if vector_access_shape(instruction.opcode()) {
+        vector_access_effect(instruction, effect);
+        return;
+    }
+
     let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
 
     match instruction.opcode() {
@@ -662,6 +704,59 @@ fn special(number: u32) -> Option<Location> {
         9 => Some(Location::Count),
         _ => None,
     }
+}
+
+/// Records what a vector access or permute touches.
+fn vector_access_effect(instruction: Instruction, effect: &mut Effect) {
+    match instruction.opcode() {
+        // The unaligned vector accesses build an address from two general
+        // purpose registers and move a whole vector register through it.
+        Opcode::Lvsl
+        | Opcode::Lvsl128
+        | Opcode::Lvsr
+        | Opcode::Lvsr128
+        | Opcode::Lvlx
+        | Opcode::Lvlx128
+        | Opcode::Lvlxl
+        | Opcode::Lvlxl128
+        | Opcode::Lvrx
+        | Opcode::Lvrx128
+        | Opcode::Lvrxl
+        | Opcode::Lvrxl128
+        | Opcode::Lvewx
+        | Opcode::Lvewx128 => {
+            address_effect(instruction, effect);
+            effect.write(Location::Vector(vector_operands(instruction).0));
+        }
+        Opcode::Stvlx
+        | Opcode::Stvlx128
+        | Opcode::Stvlxl
+        | Opcode::Stvlxl128
+        | Opcode::Stvrx
+        | Opcode::Stvrx128
+        | Opcode::Stvrxl
+        | Opcode::Stvrxl128
+        | Opcode::Stvewx
+        | Opcode::Stewx128 => {
+            address_effect(instruction, effect);
+            effect.read(Location::Vector(vector_operands(instruction).0));
+        }
+        // A single element load leaves the rest of the register alone, so it
+        // reads what it is about to write into.
+        Opcode::Vperm => vector_effect(Shape::VectorFromThree, instruction, effect),
+        _ => {}
+    }
+}
+
+/// Records the registers an indexed address is built from.
+///
+/// Register zero in the base position names no register rather than naming the
+/// register numbered zero, which is why it is dropped rather than read.
+fn address_effect(instruction: Instruction, effect: &mut Effect) {
+    if instruction.ra() != 0 {
+        effect.read(Location::General(instruction.ra()));
+    }
+    effect.read(Location::General(instruction.rb()));
 }
 
 /// Returns the vector registers an instruction names, as destination and three

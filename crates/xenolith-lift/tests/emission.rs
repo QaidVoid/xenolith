@@ -852,3 +852,59 @@ fn the_vector_comparisons_lift() {
     );
     assert_eq!(compiles("vector_compare_emitted", &emitted), Ok(()));
 }
+
+/// An unaligned load is the one place where reading the right bytes in the
+/// wrong order gives a plausible answer, so this runs one over a patterned
+/// buffer at every alignment and reads back what landed.
+#[test]
+fn an_unaligned_vector_load_takes_the_right_bytes() {
+    // lvlx v1, 0, r3; blr
+    let emitted = lift_entry(&[0x7c20_1c0e, 0x4e80_0020]).expect("the load should lift");
+
+    let program = format!(
+        "#include \"xenolith.h\"\n#include <stdio.h>\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\n\
+         {emitted}\n\
+         int main(void) {{\n\
+         \x20 static uint8_t memory[256];\n\
+         \x20 for (unsigned i = 0; i < 256; i++) {{ memory[i] = (uint8_t)i; }}\n\
+         \x20 for (unsigned offset = 0; offset < 4; offset++) {{\n\
+         \x20   xenolith_context ctx = {{0}};\n\
+         \x20   ctx.r[3] = 64 + offset;\n\
+         \x20   sub_82000000(&ctx, memory);\n\
+         \x20   for (unsigned lane = 0; lane < 16; lane++) {{\n\
+         \x20     printf(\"%02x\", xenolith_vector_u8(&ctx.v[1], lane));\n\
+         \x20   }}\n\
+         \x20   printf(\"\\n\");\n\
+         \x20 }}\n\
+         \x20 return 0;\n\
+         }}\n"
+    );
+
+    let Some(output) = run_program("unaligned_vector_load", &program) else {
+        return;
+    };
+
+    // At offset n the load takes the bytes at the address and the ones after
+    // it up to the end of the block, and writes zeroes over the rest.
+    let expected: Vec<String> = (0..4u32)
+        .map(|offset| {
+            (0..16u32)
+                .map(|lane| {
+                    if lane + offset < 16 {
+                        format!("{:02x}", 64 + offset + lane)
+                    } else {
+                        "00".to_owned()
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        expected,
+        "the unaligned load did not take the bytes the address names"
+    );
+}
