@@ -174,13 +174,19 @@ pub fn blocks_within(image: &Image, entry: u32, boundaries: &BTreeSet<u32>) -> V
             let flow = instruction.flow(address);
 
             if flow.terminates_block() {
+                // A call leaves for somewhere else and comes back, so its
+                // target is not part of this walk. Following it would pull the
+                // callee's blocks into the caller. That normally cannot happen,
+                // because a callee is a boundary, but it does happen for a call
+                // into a shared helper, since a helper is not a function.
+                let follow = !matches!(flow.kind, FlowKind::Call);
+
                 if let Some(target) = flow.target {
                     // A transfer into another function is recorded but not
                     // followed, so its blocks stay with the function that owns
                     // them.
-                    if is_executable(image, target)
-                        && !(target != entry && boundaries.contains(&target))
-                    {
+                    let elsewhere = target != entry && boundaries.contains(&target);
+                    if follow && is_executable(image, target) && !elsewhere {
                         leaders.insert(target);
                         pending.push(target);
                     }
@@ -357,6 +363,28 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].len(), 2);
         assert_eq!(blocks[0].terminator, Terminator::SectionEnd);
+    }
+
+    /// A call leaves the function. Walking into its target would make the
+    /// callee's blocks part of the caller, and they would then be unreachable
+    /// because a call produces no edge to them.
+    #[test]
+    fn a_call_target_is_not_walked_into() {
+        let image = ImageBuilder::new(0x8200_0000)
+            .code(&[
+                encode::bl(8),
+                encode::blr(),
+                encode::addi(3, 4, 1),
+                encode::blr(),
+            ])
+            .build();
+
+        let blocks = blocks_from(&image, 0x8200_0000);
+
+        assert!(
+            !blocks.iter().any(|b| b.contains(0x8200_0008)),
+            "the callee's blocks stayed out of the caller"
+        );
     }
 
     #[test]

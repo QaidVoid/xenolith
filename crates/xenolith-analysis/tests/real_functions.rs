@@ -107,3 +107,62 @@ fn claimed_instructions_never_exceed_the_section() {
 
     assert!(program.claimed_instructions() <= words);
 }
+
+/// Reports the shape of the graphs discovery produced, so a figure that looks
+/// wrong can be investigated rather than assumed.
+#[test]
+fn reports_graph_shape() {
+    let (image, _) = supplied_image!();
+    let program = analyze(&image, &[]);
+
+    let blocks: usize = program.functions().map(|f| f.blocks.len()).sum();
+    let edges: usize = program
+        .functions()
+        .map(|f| f.edges().values().map(Vec::len).sum::<usize>())
+        .sum();
+    let unresolved: usize = program
+        .functions()
+        .map(xenolith_analysis::Function::unresolved_edge_count)
+        .sum();
+    let unreachable: usize = program
+        .functions()
+        .map(|f| f.unreachable_blocks().len())
+        .sum();
+
+    eprintln!("blocks         {blocks:>10}");
+    eprintln!("edges          {edges:>10}");
+    eprintln!("unresolved     {unresolved:>10}");
+    eprintln!("unreachable    {unreachable:>10}");
+
+    // A block nothing reaches means the walk pulled in code belonging to
+    // somebody else, which is how a call into a shared helper once behaved.
+    // One example is printed so the cause can be looked at rather than guessed.
+    for function in program.functions() {
+        let orphans = function.unreachable_blocks();
+        if orphans.is_empty() {
+            continue;
+        }
+        eprintln!(
+            "\nfunction {:#010x} has {} unreachable",
+            function.start,
+            orphans.len()
+        );
+        for block in &function.blocks {
+            let mark = if orphans.iter().any(|o| o.start == block.start) {
+                "  <-- unreachable"
+            } else {
+                ""
+            };
+            eprintln!(
+                "  block {:#010x}..{:#010x}  {:?}{mark}",
+                block.start, block.end, block.terminator
+            );
+        }
+        break;
+    }
+
+    assert_eq!(
+        unreachable, 0,
+        "discovery only walks what it reaches, so nothing should be unreachable"
+    );
+}
