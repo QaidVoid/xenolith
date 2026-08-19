@@ -156,6 +156,143 @@ instructions! {
         }
     }
 
+    extended 4 {
+        VX {
+            0 => Vaddubm = "vaddubm";
+            2 => Vmaxub = "vmaxub";
+            4 => Vrlb = "vrlb";
+            10 => Vaddfp = "vaddfp";
+            12 => Vmrghb = "vmrghb";
+            14 => Vpkuhum = "vpkuhum";
+            64 => Vadduhm = "vadduhm";
+            66 => Vmaxuh = "vmaxuh";
+            68 => Vrlh = "vrlh";
+            74 => Vsubfp = "vsubfp";
+            76 => Vmrghh = "vmrghh";
+            78 => Vpkuwum = "vpkuwum";
+            128 => Vadduwm = "vadduwm";
+            130 => Vmaxuw = "vmaxuw";
+            132 => Vrlw = "vrlw";
+            140 => Vmrghw = "vmrghw";
+            142 => Vpkuhus = "vpkuhus";
+            206 => Vpkuwus = "vpkuwus";
+            258 => Vmaxsb = "vmaxsb";
+            260 => Vslb = "vslb";
+            268 => Vmrglb = "vmrglb";
+            270 => Vpkshus = "vpkshus";
+            266 => Vrefp = "vrefp";
+            322 => Vmaxsh = "vmaxsh";
+            324 => Vslh = "vslh";
+            330 => Vrsqrtefp = "vrsqrtefp";
+            332 => Vmrglh = "vmrglh";
+            334 => Vpkswus = "vpkswus";
+            386 => Vmaxsw = "vmaxsw";
+            388 => Vslw = "vslw";
+            394 => Vexptefp = "vexptefp";
+            396 => Vmrglw = "vmrglw";
+            398 => Vpkshss = "vpkshss";
+            452 => Vsl = "vsl";
+            458 => Vlogefp = "vlogefp";
+            462 => Vpkswss = "vpkswss";
+            512 => Vaddubs = "vaddubs";
+            514 => Vminub = "vminub";
+            516 => Vsrb = "vsrb";
+            522 => Vrfin = "vrfin";
+            524 => Vspltb = "vspltb";
+            526 => Vupkhsb = "vupkhsb";
+            576 => Vadduhs = "vadduhs";
+            578 => Vminuh = "vminuh";
+            580 => Vsrh = "vsrh";
+            586 => Vrfiz = "vrfiz";
+            588 => Vsplth = "vsplth";
+            590 => Vupkhsh = "vupkhsh";
+            640 => Vadduws = "vadduws";
+            642 => Vminuw = "vminuw";
+            644 => Vsrw = "vsrw";
+            650 => Vrfip = "vrfip";
+            652 => Vspltw = "vspltw";
+            654 => Vupklsb = "vupklsb";
+            708 => Vsr = "vsr";
+            714 => Vrfim = "vrfim";
+            718 => Vupklsh = "vupklsh";
+            768 => Vaddsbs = "vaddsbs";
+            770 => Vminsb = "vminsb";
+            772 => Vsrab = "vsrab";
+            778 => Vcfux = "vcfux";
+            780 => Vspltisb = "vspltisb";
+            782 => Vpkpx = "vpkpx";
+            832 => Vaddshs = "vaddshs";
+            834 => Vminsh = "vminsh";
+            836 => Vsrah = "vsrah";
+            842 => Vcfsx = "vcfsx";
+            844 => Vspltish = "vspltish";
+            846 => Vupkhpx = "vupkhpx";
+            896 => Vaddsws = "vaddsws";
+            898 => Vminsw = "vminsw";
+            900 => Vsraw = "vsraw";
+            906 => Vctuxs = "vctuxs";
+            908 => Vspltisw = "vspltisw";
+            970 => Vctsxs = "vctsxs";
+            974 => Vupklpx = "vupklpx";
+            1024 => Vsububm = "vsububm";
+            1026 => Vavgub = "vavgub";
+            1028 => Vand = "vand";
+            1034 => Vmaxfp = "vmaxfp";
+            1036 => Vslo = "vslo";
+            1088 => Vsubuhm = "vsubuhm";
+            1090 => Vavguh = "vavguh";
+            1092 => Vandc = "vandc";
+            1098 => Vminfp = "vminfp";
+            1100 => Vsro = "vsro";
+            1152 => Vsubuwm = "vsubuwm";
+            1154 => Vavguw = "vavguw";
+            1156 => Vor = "vor";
+            1220 => Vxor = "vxor";
+            1282 => Vavgsb = "vavgsb";
+            1284 => Vnor = "vnor";
+            1346 => Vavgsh = "vavgsh";
+            1410 => Vavgsw = "vavgsw";
+            1536 => Vsububs = "vsububs";
+            1540 => Mfvscr = "mfvscr";
+            1600 => Vsubuhs = "vsubuhs";
+            1604 => Mtvscr = "mtvscr";
+            1664 => Vsubuws = "vsubuws";
+            1792 => Vsubsbs = "vsubsbs";
+            1856 => Vsubshs = "vsubshs";
+            1920 => Vsubsws = "vsubsws";
+        }
+        VC {
+            6 => Vcmpequb = "vcmpequb";
+            70 => Vcmpequh = "vcmpequh";
+            134 => Vcmpequw = "vcmpequw";
+            198 => Vcmpeqfp = "vcmpeqfp";
+            454 => Vcmpgefp = "vcmpgefp";
+            518 => Vcmpgtub = "vcmpgtub";
+            582 => Vcmpgtuh = "vcmpgtuh";
+            646 => Vcmpgtuw = "vcmpgtuw";
+            710 => Vcmpgtfp = "vcmpgtfp";
+            774 => Vcmpgtsb = "vcmpgtsb";
+            838 => Vcmpgtsh = "vcmpgtsh";
+            902 => Vcmpgtsw = "vcmpgtsw";
+        }
+        VA {
+            32 => Vmhaddshs = "vmhaddshs";
+            33 => Vmhraddshs = "vmhraddshs";
+            34 => Vmladduhm = "vmladduhm";
+            36 => Vmsumubm = "vmsumubm";
+            37 => Vmsummbm = "vmsummbm";
+            38 => Vmsumuhm = "vmsumuhm";
+            39 => Vmsumuhs = "vmsumuhs";
+            40 => Vmsumshm = "vmsumshm";
+            41 => Vmsumshs = "vmsumshs";
+            42 => Vsel = "vsel";
+            43 => Vperm = "vperm";
+            44 => Vsldoi = "vsldoi";
+            46 => Vmaddfp = "vmaddfp";
+            47 => Vnmsubfp = "vnmsubfp";
+        }
+    }
+
     extended 19 {
         XL {
             0 => Mcrf = "mcrf";
@@ -260,6 +397,8 @@ instructions! {
         X {
             0 => Cmp = "cmp";
             4 => Tw = "tw";
+            6 => Lvsl = "lvsl";
+            7 => Lvebx = "lvebx";
             19 => Mfcr = "mfcr";
             20 => Lwarx = "lwarx";
             21 => Ldx = "ldx";
@@ -269,6 +408,9 @@ instructions! {
             27 => Sld = "sld";
             28 => And = "and";
             32 => Cmpl = "cmpl";
+            38 => Lvsr = "lvsr";
+            39 => Lvehx = "lvehx";
+            71 => Lvewx = "lvewx";
             53 => Ldux = "ldux";
             54 => Dcbst = "dcbst";
             55 => Lwzux = "lwzux";
@@ -276,21 +418,26 @@ instructions! {
             60 => Andc = "andc";
             68 => Td = "td";
             83 => Mfmsr = "mfmsr";
+            103 => Lvx = "lvx";
             84 => Ldarx = "ldarx";
             86 => Dcbf = "dcbf";
             87 => Lbzx = "lbzx";
             119 => Lbzux = "lbzux";
             124 => Nor = "nor";
+            135 => Stvebx = "stvebx";
             144 => Mtcrf = "mtcrf";
             146 => Mtmsr = "mtmsr";
             149 => Stdx = "stdx";
             150 => Stwcx = "stwcx.";
             151 => Stwx = "stwx";
+            167 => Stvehx = "stvehx";
             178 => Mtmsrd = "mtmsrd";
+            199 => Stvewx = "stvewx";
             181 => Stdux = "stdux";
             183 => Stwux = "stwux";
             214 => Stdcx = "stdcx.";
             215 => Stbx = "stbx";
+            231 => Stvx = "stvx";
             246 => Dcbtst = "dcbtst";
             247 => Stbux = "stbux";
             278 => Dcbt = "dcbt";
@@ -300,13 +447,17 @@ instructions! {
             316 => Xor = "xor";
             339 => Mfspr = "mfspr";
             341 => Lwax = "lwax";
+            342 => Dst = "dst";
             343 => Lhax = "lhax";
             371 => Mftb = "mftb";
+            359 => Lvxl = "lvxl";
             373 => Lwaux = "lwaux";
+            374 => Dstst = "dstst";
             375 => Lhaux = "lhaux";
             407 => Sthx = "sthx";
             412 => Orc = "orc";
             439 => Sthux = "sthux";
+            487 => Stvxl = "stvxl";
             444 => Or = "or";
             467 => Mtspr = "mtspr";
             476 => Nand = "nand";
@@ -334,6 +485,7 @@ instructions! {
             790 => Lhbrx = "lhbrx";
             792 => Sraw = "sraw";
             794 => Srad = "srad";
+            822 => Dss = "dss";
             824 => Srawi = "srawi";
             854 => Eieio = "eieio";
             918 => Sthbrx = "sthbrx";

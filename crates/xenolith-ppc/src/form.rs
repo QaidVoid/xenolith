@@ -40,6 +40,14 @@ pub enum Form {
     /// Four register fields and a five-bit extended opcode, used by the
     /// floating point operations that take three source operands.
     A,
+    /// Three vector register fields and an eleven-bit extended opcode.
+    VX,
+    /// A vector comparison, whose extended opcode gives up its top bit to a
+    /// flag saying whether the result also updates a condition register field.
+    VC,
+    /// Four vector register fields and a six-bit extended opcode, used by the
+    /// vector operations that take three source operands.
+    VA,
     /// Three register fields, a 10-bit extended opcode, and the record bit.
     X,
     /// As [`Form::X`], but the extended opcode is nine bits and the bit above it
@@ -64,7 +72,15 @@ impl Form {
     #[must_use]
     pub const fn extended_opcode_shift(self) -> u32 {
         match self {
-            Self::D | Self::M | Self::DS | Self::I | Self::B | Self::SC => 0,
+            Self::D
+            | Self::M
+            | Self::DS
+            | Self::I
+            | Self::B
+            | Self::SC
+            | Self::VX
+            | Self::VC
+            | Self::VA => 0,
             Self::A | Self::X | Self::XL | Self::XO | Self::MDS => 1,
             Self::XS | Self::MD => 2,
         }
@@ -78,7 +94,9 @@ impl Form {
             Self::D | Self::M | Self::I | Self::B | Self::SC => 0,
             Self::DS => 0x3,
             Self::A => 0x1f,
-            Self::X | Self::XL => 0x3ff,
+            Self::VX => 0x7ff,
+            Self::VA => 0x3f,
+            Self::X | Self::XL | Self::VC => 0x3ff,
             Self::XO | Self::XS => 0x1ff,
             Self::MD => 0x7,
             Self::MDS => 0xf,
@@ -212,7 +230,17 @@ mod tests {
     /// word on something else, which is why the rule above has to be selective.
     #[test]
     fn the_forms_without_a_record_bit_spend_the_low_bits_otherwise() {
-        for form in [Form::D, Form::DS, Form::I, Form::B, Form::SC, Form::XL] {
+        for form in [
+            Form::D,
+            Form::DS,
+            Form::I,
+            Form::B,
+            Form::SC,
+            Form::XL,
+            Form::VX,
+            Form::VC,
+            Form::VA,
+        ] {
             assert!(!form.has_record_bit(), "{form:?} should have no record bit");
         }
     }
@@ -234,6 +262,8 @@ mod tests {
             (Form::X, Form::XS),
             (Form::MDS, Form::MD),
             (Form::X, Form::A),
+            (Form::VX, Form::VC),
+            (Form::VC, Form::VA),
         ] {
             assert_eq!(
                 wider.mask() & narrower.mask(),
@@ -285,6 +315,9 @@ mod tests {
         assert_eq!(Form::SC.mask(), 0xfc00_0000);
         assert_eq!(Form::XL.mask(), 0xfc00_07fe);
         assert_eq!(Form::A.mask(), 0xfc00_003e);
+        assert_eq!(Form::VX.mask(), 0xfc00_07ff);
+        assert_eq!(Form::VC.mask(), 0xfc00_03ff);
+        assert_eq!(Form::VA.mask(), 0xfc00_003f);
         assert_eq!(Form::X.mask(), 0xfc00_07fe);
         assert_eq!(Form::XO.mask(), 0xfc00_03fe);
         assert_eq!(Form::XS.mask(), 0xfc00_07fc);
