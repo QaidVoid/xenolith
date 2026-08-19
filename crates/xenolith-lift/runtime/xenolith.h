@@ -133,6 +133,58 @@ static inline void xenolith_store64(uint8_t *base, uint32_t address, uint64_t va
     xenolith_store32(base, address + 4, (uint32_t)value);
 }
 
+/* The high half of a doubleword product.
+ *
+ * C has no type wider than the operands to hold it in, so it is built from the
+ * word products the way it would be done by hand. A compiler that has a
+ * double-width type of its own recognizes this and emits the single
+ * instruction; one that does not still gets the right answer.
+ */
+static inline uint64_t xenolith_multiply_high(uint64_t left, uint64_t right) {
+    uint64_t low_left = left & 0xffffffffull;
+    uint64_t high_left = left >> 32;
+    uint64_t low_right = right & 0xffffffffull;
+    uint64_t high_right = right >> 32;
+
+    uint64_t low = low_left * low_right;
+    uint64_t cross_a = high_left * low_right;
+    uint64_t cross_b = low_left * high_right;
+    uint64_t high = high_left * high_right;
+
+    uint64_t carry = ((low >> 32) + (cross_a & 0xffffffffull) + (cross_b & 0xffffffffull)) >> 32;
+    return high + (cross_a >> 32) + (cross_b >> 32) + carry;
+}
+
+static inline int64_t xenolith_multiply_high_signed(int64_t left, int64_t right) {
+    uint64_t high = xenolith_multiply_high((uint64_t)left, (uint64_t)right);
+
+    /* An unsigned product treats a negative operand as its two's complement,
+     * which overstates the high half by the other operand once per negative. */
+    if (left < 0) {
+        high -= (uint64_t)right;
+    }
+    if (right < 0) {
+        high -= (uint64_t)left;
+    }
+    return (int64_t)high;
+}
+
+/* Zeroing a data cache block.
+ *
+ * The block size is implementation defined, and this console uses 32 bytes for
+ * this instruction, which is why it carries a separate one for 128. A general
+ * purpose emulator does not share that size, so this is the one instruction
+ * here with no oracle behind it.
+ */
+#define XENOLITH_CACHE_BLOCK 32
+
+static inline void xenolith_zero_block(uint8_t *base, uint32_t address) {
+    uint32_t start = address & ~(uint32_t)(XENOLITH_CACHE_BLOCK - 1);
+    for (unsigned byte = 0; byte < XENOLITH_CACHE_BLOCK; byte++) {
+        base[start + byte] = 0;
+    }
+}
+
 /* The condition register as one word, and back.
  *
  * The first field occupies the most significant four bits, and within a field

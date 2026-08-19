@@ -397,6 +397,7 @@ fn other_shape(opcode: Opcode) -> Option<Shape> {
         | Opcode::Sync
         | Opcode::Isync
         | Opcode::Eieio
+        | Opcode::Dcbz
         | Opcode::Dcbt
         | Opcode::Dcbtst
         | Opcode::Dcbf
@@ -490,33 +491,19 @@ fn named_effect(instruction: Instruction, effect: &mut Effect) {
             effect.read(Location::Condition(rb >> 2));
             effect.write(Location::Condition(rt >> 2));
         }
-        // A branch reads the field its condition names, unless it is taken
-        // whatever the condition says. One that decrements the count register
-        // reads and writes it. One that takes the link writes it.
-        Opcode::Bc | Opcode::Bclr | Opcode::Bcctr => {
-            let condition = instruction.branch_condition();
-            if condition & 0b1_0000 == 0 {
-                let bit = u8::try_from(instruction.branch_condition_bit()).unwrap_or(0);
-                effect.read(Location::Condition(bit >> 2));
-            }
-            if condition & 0b0_0100 == 0 {
-                effect.read(Location::Count);
-                effect.write(Location::Count);
-            }
-            if instruction.opcode() == Opcode::Bclr {
-                effect.read(Location::Link);
-            }
-            if instruction.opcode() == Opcode::Bcctr {
-                effect.read(Location::Count);
-            }
-            if instruction.link_bit() {
-                effect.write(Location::Link);
-            }
+        Opcode::Bc | Opcode::Bclr | Opcode::Bcctr | Opcode::B => {
+            branch_effect(instruction, effect);
         }
-        Opcode::B => {
-            if instruction.link_bit() {
-                effect.write(Location::Link);
+        // Zeroing a block builds an address and writes through it, so it reads
+        // the registers that address is built from. The cache hints beside it
+        // build one too and then do nothing with it, and since no code is
+        // emitted for them, saying they touch nothing keeps the model and the
+        // code agreeing about the same instruction.
+        Opcode::Dcbz => {
+            if ra != 0 {
+                effect.read(Location::General(ra));
             }
+            effect.read(Location::General(rb));
         }
         Opcode::Tw | Opcode::Td => {
             effect.read(Location::General(ra));
@@ -525,6 +512,35 @@ fn named_effect(instruction: Instruction, effect: &mut Effect) {
         Opcode::Twi | Opcode::Tdi => effect.read(Location::General(ra)),
         // Ordering touches no register this model describes.
         _ => {}
+    }
+}
+
+/// Records what a branch consults and what taking it leaves behind.
+///
+/// A branch reads the field its condition names, unless it is taken whatever
+/// the condition register holds. One that decrements the count register reads
+/// and writes it. One that takes the link writes it.
+fn branch_effect(instruction: Instruction, effect: &mut Effect) {
+    if instruction.opcode() != Opcode::B {
+        let condition = instruction.branch_condition();
+        if condition & 0b1_0000 == 0 {
+            let bit = u8::try_from(instruction.branch_condition_bit()).unwrap_or(0);
+            effect.read(Location::Condition(bit >> 2));
+        }
+        if condition & 0b0_0100 == 0 {
+            effect.read(Location::Count);
+            effect.write(Location::Count);
+        }
+        if instruction.opcode() == Opcode::Bclr {
+            effect.read(Location::Link);
+        }
+        if instruction.opcode() == Opcode::Bcctr {
+            effect.read(Location::Count);
+        }
+    }
+
+    if instruction.link_bit() {
+        effect.write(Location::Link);
     }
 }
 

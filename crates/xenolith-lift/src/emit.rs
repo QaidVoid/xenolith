@@ -963,6 +963,23 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             )
             .ok()?;
         }
+        // The high half of a doubleword product needs a wider type than the
+        // operands, which C does not have, so it is built from the word
+        // products the way it would be done by hand.
+        Opcode::Mulhdu => {
+            writeln!(
+                out,
+                "    ctx->r[{rt}] = xenolith_multiply_high(ctx->r[{ra}], ctx->r[{rb}]);"
+            )
+            .ok()?;
+        }
+        Opcode::Mulhd => {
+            writeln!(
+                out,
+                "    ctx->r[{rt}] = (uint64_t)xenolith_multiply_high_signed((int64_t)ctx->r[{ra}], (int64_t)ctx->r[{rb}]);"
+            )
+            .ok()?;
+        }
         Opcode::Divd => {
             writeln!(
                 out,
@@ -1139,6 +1156,13 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
                 "    ctx->cr[0].eq = xenolith_conditional{width}(base, address, {cast}ctx->r[{rt}]);"
             );
             let _ = writeln!(out, "    ctx->cr[0].so = (uint8_t)(ctx->xer >> 31) & 1;");
+        }
+
+        // Zeroing a block is the one cache instruction with an effect a
+        // program can see, so it is the one that is not nothing.
+        Opcode::Dcbz => {
+            let _ = writeln!(out, "    address = {};", indexed_address(ra, rb));
+            let _ = writeln!(out, "    xenolith_zero_block(base, address);");
         }
 
         // Cache hints change no register this model describes, and control

@@ -47,6 +47,47 @@ fn lift_entry(words: &[u32]) -> Result<String, String> {
         })
 }
 
+/// Builds and runs a whole C program against the interface, returning what it
+/// printed, or nothing when there is no compiler to build it with.
+///
+/// The interface computes some things itself rather than declaring them, and
+/// what it computes has to be checked by running it. Reading it is not a check.
+fn run_program(name: &str, program: &str) -> Option<String> {
+    let usable = Command::new("clang")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !usable {
+        eprintln!("skipping the run: clang is not installed");
+        return None;
+    }
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::create_dir_all(&directory);
+    let _ = std::fs::write(directory.join("xenolith.h"), RUNTIME_HEADER);
+
+    let source = directory.join("program.c");
+    let _ = std::fs::write(&source, program);
+
+    let binary = directory.join("program");
+    let built = Command::new("clang")
+        .args(["-std=c17", "-Wall", "-Wextra", "-Werror", "-O2"])
+        .arg("-o")
+        .arg(&binary)
+        .arg(&source)
+        .output()
+        .ok()?;
+    assert!(
+        built.status.success(),
+        "{}\n--- program ---\n{program}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let ran = Command::new(&binary).output().ok()?;
+    assert!(ran.status.success(), "the program exited with a failure");
+    Some(String::from_utf8_lossy(&ran.stdout).into_owned())
+}
+
 /// Compiles emitted C against the interface, returning what the compiler said.
 fn compiles(name: &str, emitted: &str) -> Result<(), String> {
     let usable = Command::new("clang")
@@ -550,4 +591,108 @@ fn the_byte_reversed_accesses_lift() {
         "the halfword store did not write its low byte first: {emitted}"
     );
     assert_eq!(compiles("byte_reversed", &emitted), Ok(()));
+}
+
+/// The high half of a doubleword product needs a type C does not have, so it
+/// is built by hand and has to be checked against known answers.
+#[test]
+fn the_doubleword_multiplies_lift() {
+    // mflr r12; stwu r1, -96(r1); mulhdu r3, r4, r5; mulhd r6, r4, r5;
+    // addi r1, r1, 96; blr
+    const WORDS: [u32; 6] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x7c64_2812,
+        0x7cc4_2892,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the multiplies should lift");
+
+    assert!(
+        emitted.contains("ctx->r[3] = xenolith_multiply_high(ctx->r[4], ctx->r[5]);"),
+        "the unsigned high half was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("xenolith_multiply_high_signed((int64_t)ctx->r[4], (int64_t)ctx->r[5])"),
+        "the signed high half was not emitted: {emitted}"
+    );
+    assert_eq!(compiles("doubleword_multiply", &emitted), Ok(()));
+}
+
+/// The interface computes the high half itself, so the answers it gives are
+/// worth checking against ones worked out another way.
+#[test]
+fn the_high_half_matches_a_wider_type() {
+    let cases: [(u64, u64); 6] = [
+        (0, 0),
+        (1, 1),
+        (u64::MAX, u64::MAX),
+        (u64::MAX, 2),
+        (0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210),
+        (1 << 63, 1 << 63),
+    ];
+
+    let mut program =
+        String::from("#include \"xenolith.h\"\n#include <stdio.h>\nint main(void) {\n");
+    for (left, right) in cases {
+        let _ = std::fmt::Write::write_fmt(
+            &mut program,
+            format_args!(
+                "  printf(\"%llu %lld\\n\", (unsigned long long)xenolith_multiply_high({left}ull, {right}ull), (long long)xenolith_multiply_high_signed((int64_t){left}ull, (int64_t){right}ull));\n"
+            ),
+        );
+    }
+    program.push_str("  return 0;\n}\n");
+
+    let Some(output) = run_program("multiply_high", &program) else {
+        return;
+    };
+
+    let expected: Vec<String> = cases
+        .iter()
+        .map(|(left, right)| {
+            let unsigned =
+                u64::try_from((u128::from(*left) * u128::from(*right)) >> 64).unwrap_or(u64::MAX);
+            let wide = |value: u64| i128::from(i64::from_ne_bytes(value.to_ne_bytes()));
+            let signed = i64::try_from((wide(*left) * wide(*right)) >> 64).unwrap_or(i64::MAX);
+            format!("{unsigned} {signed}")
+        })
+        .collect();
+
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        expected,
+        "the high half disagrees with a wider type"
+    );
+}
+
+/// A block is zeroed whole, and nothing either side of it is touched.
+#[test]
+fn zeroing_a_block_stays_inside_it() {
+    let program = String::from(
+        "#include \"xenolith.h\"\n#include <stdio.h>\n\
+         int main(void) {\n\
+         \x20 static uint8_t memory[256];\n\
+         \x20 for (unsigned i = 0; i < 256; i++) { memory[i] = 0xaa; }\n\
+         \x20 xenolith_zero_block(memory, 100);\n\
+         \x20 unsigned first = 256, last = 0, count = 0;\n\
+         \x20 for (unsigned i = 0; i < 256; i++) {\n\
+         \x20   if (memory[i] == 0) { if (i < first) first = i; last = i; count++; }\n\
+         \x20 }\n\
+         \x20 printf(\"%u %u %u\\n\", first, last, count);\n\
+         \x20 return 0;\n\
+         }\n",
+    );
+
+    let Some(output) = run_program("zero_block", &program) else {
+        return;
+    };
+
+    assert_eq!(
+        output.trim(),
+        "96 127 32",
+        "the zeroed range was not the block containing the address"
+    );
 }
