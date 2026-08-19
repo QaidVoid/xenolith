@@ -17,6 +17,8 @@
 //!
 //! The crate contains no `unsafe` code and allocates nothing while decoding.
 
+#[cfg(test)]
+mod differential;
 mod form;
 mod instruction;
 mod table;
