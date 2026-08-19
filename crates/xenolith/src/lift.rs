@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_analysis::analyze;
-use xenolith_lift::{RUNTIME_HEADER, declaration_of, lift};
+use xenolith_lift::{RUNTIME_HEADER, Unlifted, declaration_of, lift};
 
 use crate::input::{Source, number};
 
@@ -248,6 +248,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .wrap_err_with(|| format!("writing the runtime header into {}", args.out.display()))?;
 
     let mut lifted = 0u64;
+    let mut thunks = 0u64;
     let mut refused = Vec::new();
     let mut blocking: BTreeMap<&str, u64> = BTreeMap::new();
     let mut referenced: BTreeSet<u32> = BTreeSet::new();
@@ -258,6 +259,9 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         match lift(&image, function, &imports) {
             Ok(result) => {
                 lifted += 1;
+                if imports.contains_key(&function.start) {
+                    thunks += 1;
+                }
                 referenced.extend(result.calls);
                 units.push(function.start, &result.code)?;
             }
@@ -304,18 +308,53 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .into_diagnostic()
         .wrap_err_with(|| format!("writing {}", path.display()))?;
 
-    let total = lifted + refused.len() as u64;
+    report(
+        args,
+        &Outcome {
+            lifted,
+            thunks,
+            refused,
+            blocking,
+            declarations: referenced.len(),
+            sizes,
+        },
+    );
+
+    Ok(())
+}
+
+/// What lifting produced, in the form the report reads it.
+struct Outcome<'a> {
+    /// How many functions were emitted.
+    lifted: u64,
+    /// How many of those were import thunks rather than translated code.
+    thunks: u64,
+    /// The functions that were not emitted, and what stopped each.
+    refused: Vec<Unlifted>,
+    /// How many functions each instruction stopped.
+    blocking: BTreeMap<&'a str, u64>,
+    /// How many functions the emitted code declares.
+    declarations: usize,
+    /// Size of each translation unit written.
+    sizes: Vec<u64>,
+}
+
+/// Prints what lifting produced.
+fn report(args: &Args, outcome: &Outcome<'_>) {
+    let total = outcome.lifted + outcome.refused.len() as u64;
     println!("functions          {total:>10}");
     println!(
-        "  lifted           {lifted:>10}  ({} percent)",
-        percent(lifted, total)
+        "  lifted           {:>10}  ({} percent)",
+        outcome.lifted,
+        percent(outcome.lifted, total)
     );
-    println!("  not lifted       {:>10}", refused.len());
-    println!("declarations       {:>10}", referenced.len());
-    println!("units              {:>10}", sizes.len());
+    println!("    import thunks  {:>10}", outcome.thunks);
+    println!("  not lifted       {:>10}", outcome.refused.len());
+    println!("declarations       {:>10}", outcome.declarations);
+    println!("units              {:>10}", outcome.sizes.len());
     println!(
         "  largest          {:>10} bytes",
-        sizes.iter().copied().max().unwrap_or(0)
+        outcome.sizes.iter().copied().max().unwrap_or(0)
     );
     println!("\nwritten to {}", args.out.display());
     println!("build it with make -j, which stops at an archive");
@@ -324,7 +363,12 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     if args.blockers {
         // The instruction that appears most is not the one to model next. The
         // one blocking the most functions is, and they are not the same list.
-        let mut ranked: Vec<(&str, u64)> = blocking.into_iter().collect();
+        // An import thunk appears in neither, since it lifts.
+        let mut ranked: Vec<(&str, u64)> = outcome
+            .blocking
+            .iter()
+            .map(|(mnemonic, count)| (*mnemonic, *count))
+            .collect();
         ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
         println!("\ninstructions blocking the most functions");
@@ -335,13 +379,11 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     if args.unlifted {
         println!("\nfunctions that were not lifted");
-        for unlifted in &refused {
+        for unlifted in &outcome.refused {
             println!(
                 "  {:#010x}  stopped at {:#010x} on {}",
                 unlifted.function, unlifted.address, unlifted.mnemonic
             );
         }
     }
-
-    Ok(())
 }

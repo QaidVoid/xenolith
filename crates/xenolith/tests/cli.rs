@@ -421,6 +421,10 @@ fn lift_emits_c_for_a_crafted_image() {
         stdout.contains("lifted                    1"),
         "one function should lift: {stdout}"
     );
+    assert!(
+        stdout.contains("import thunks           0"),
+        "a raw image declares no imports: {stdout}"
+    );
 
     let units = units_in(&out);
     assert_eq!(units.len(), 1, "one function should fit in one unit");
