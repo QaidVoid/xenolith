@@ -39,6 +39,24 @@ pub struct Lifted {
     pub calls: std::collections::BTreeSet<u32>,
 }
 
+/// An imported function a thunk stands for.
+///
+/// The container names an import by ordinal within a library and never by name,
+/// so this is everything known about which function is meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Imported {
+    /// Name of the library it comes from, such as `xboxkrnl.exe`.
+    pub library: String,
+    /// Ordinal within that library.
+    pub ordinal: u16,
+}
+
+/// Import thunks, keyed by the address of the thunk.
+///
+/// The name is owned rather than borrowed because the container it came from is
+/// read and dropped well before anything is emitted.
+pub type Imports = std::collections::BTreeMap<u32, Imported>;
+
 /// Why a function was not emitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unlifted {
@@ -1178,6 +1196,55 @@ fn condition_of(instruction: Instruction) -> String {
     }
 }
 
+/// Returns a C string literal holding the given text.
+///
+/// The text comes from a container, which is input rather than something this
+/// crate chose, so anything that could end the literal early or leave the source
+/// malformed is escaped. Octal is used because it takes a fixed three digits and
+/// so cannot absorb the character after it.
+fn string_literal(text: &str) -> String {
+    let mut out = String::from("\"");
+    for byte in text.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => {
+                let _ = write!(out, "\\{byte:03o}");
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Returns the C for a thunk that calls an imported function.
+fn import_thunk(address: u32, imported: &Imported) -> Lifted {
+    let mut code = String::new();
+    let _ = writeln!(
+        code,
+        "/* {address:#010x}  import: {} ordinal {} */",
+        imported.library, imported.ordinal
+    );
+    let _ = writeln!(
+        code,
+        "void {}(xenolith_context *ctx, uint8_t *base) {{",
+        name_of(address)
+    );
+    let _ = writeln!(
+        code,
+        "    xenolith_import(ctx, base, {}, {});",
+        string_literal(&imported.library),
+        imported.ordinal
+    );
+    let _ = writeln!(code, "}}");
+
+    Lifted {
+        code,
+        calls: std::collections::BTreeSet::new(),
+    }
+}
+
 /// Turns a discovered function into C.
 ///
 /// # Errors
@@ -1186,7 +1253,14 @@ fn condition_of(instruction: Instruction) -> String {
 /// cannot be both described and written out. Nothing is emitted in that case,
 /// because a function that is right except in one place compiles and runs and is
 /// wrong, and nothing downstream can tell.
-pub fn lift(image: &Image, function: &Function) -> Result<Lifted, Unlifted> {
+pub fn lift(image: &Image, function: &Function, imports: &Imports) -> Result<Lifted, Unlifted> {
+    // A thunk's first two words are placeholders the console's loader
+    // overwrites with the address it resolved, so there is nothing to decode
+    // and the container is the only thing that says what it stands for.
+    if let Some(imported) = imports.get(&function.start) {
+        return Ok(import_thunk(function.start, imported));
+    }
+
     // A function whose walk decoded nothing has no blocks, and so no label to
     // enter at. There is nothing to emit and saying so is the answer.
     if function.blocks.is_empty() {

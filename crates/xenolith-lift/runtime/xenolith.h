@@ -132,4 +132,13 @@ void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address);
  */
 void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address);
 
+/* Where a call to an imported function goes.
+ *
+ * The container names an import by ordinal within a library and never by name,
+ * so that is everything known about which function is meant. What the ordinal
+ * does is the environment's to decide. Implemented there, not here.
+ */
+void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
+                     uint32_t ordinal);
+
 #endif /* XENOLITH_H */

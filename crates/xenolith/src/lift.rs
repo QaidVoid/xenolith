@@ -227,7 +227,9 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         ));
     }
 
-    let image = args.source.load()?;
+    let loaded = args.source.load()?;
+    let image = loaded.image;
+    let imports = loaded.imports?;
     let program = analyze(&image, &[]);
 
     if program.function_count() == 0 {
@@ -253,7 +255,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     for function in program.functions() {
         referenced.insert(function.start);
-        match lift(&image, function) {
+        match lift(&image, function, &imports) {
             Ok(result) => {
                 lifted += 1;
                 referenced.extend(result.calls);

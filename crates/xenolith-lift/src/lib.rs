@@ -20,4 +20,6 @@ mod emit;
 pub const RUNTIME_HEADER: &str = include_str!("../runtime/xenolith.h");
 
 pub use effect::{Effect, Location, effect_of, is_modelled, unmodelled};
-pub use emit::{Lifted, Unlifted, code_for, declaration_of, is_liftable, lift, name_of};
+pub use emit::{
+    Imported, Imports, Lifted, Unlifted, code_for, declaration_of, is_liftable, lift, name_of,
+};

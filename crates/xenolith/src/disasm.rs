@@ -79,7 +79,7 @@ fn range(args: &Args, image: &Image) -> Result<(u32, u32)> {
 /// Returns an error when the input cannot be read or decoded, when the range is
 /// malformed or unmapped, or when key material is needed and absent.
 pub(crate) fn run(args: &Args) -> Result<()> {
-    let image = args.source.load()?;
+    let image = args.source.load()?.image;
 
     if args.sweep {
         return sweep(&image);

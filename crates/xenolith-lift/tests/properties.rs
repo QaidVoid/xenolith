@@ -7,7 +7,7 @@
 
 use proptest::prelude::*;
 use xenolith_analysis::analyze;
-use xenolith_lift::{is_liftable, lift};
+use xenolith_lift::{Imports, is_liftable, lift};
 use xenolith_ppc::Instruction;
 use xenolith_xex::{Image, PageKind, Section};
 
@@ -38,7 +38,7 @@ proptest! {
         let program = analyze(&image, &[]);
 
         for function in program.functions() {
-            match lift(&image, function) {
+            match lift(&image, function, &Imports::new()) {
                 Ok(result) => {
                     prop_assert!(!result.code.is_empty());
                     // Nothing in an emitted function may be beyond the model.
@@ -74,7 +74,7 @@ proptest! {
         let program = analyze(&image, &[]);
 
         for function in program.functions() {
-            let Err(unlifted) = lift(&image, function) else {
+            let Err(unlifted) = lift(&image, function, &Imports::new()) else {
                 continue;
             };
             // A function with no blocks is refused without naming an
@@ -103,7 +103,7 @@ proptest! {
         let program = analyze(&image, &[]);
 
         for function in program.functions() {
-            let Ok(result) = lift(&image, function) else {
+            let Ok(result) = lift(&image, function, &Imports::new()) else {
                 continue;
             };
             for target in &result.calls {

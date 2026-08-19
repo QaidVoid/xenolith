@@ -171,7 +171,7 @@ fn report_tables(program: &Program, tables: &JumpTables, list: bool) {
 /// Returns an error when the input cannot be read or decoded, or when it holds
 /// no executable words to analyze.
 pub(crate) fn run(args: &Args) -> Result<()> {
-    let image = args.source.load()?;
+    let image = args.source.load()?.image;
 
     let words = executable_words(&image);
     if words == 0 {

@@ -867,7 +867,7 @@ fn sequences_on_the_model(
             .functions()
             .find(|function| function.start == base)
             .ok_or_else(|| format!("{name} was not discovered as a function"))?;
-        let lifted = xenolith_lift::lift(&image, function)
+        let lifted = xenolith_lift::lift(&image, function, &xenolith_lift::Imports::new())
             .map_err(|refusal| format!("{name} did not lift: {}", refusal.mnemonic))?;
 
         out.push_str(&lifted.code);

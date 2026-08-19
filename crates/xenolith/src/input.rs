@@ -10,9 +10,22 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
-use xenolith_xex::{Container, Image, PageKind, Section};
+use xenolith_lift::{Imported, Imports};
+use xenolith_xex::{Container, Image, ImportKind, PageKind, Section, imports};
 
 use crate::keys;
+
+/// What was read from an input.
+pub(crate) struct Loaded {
+    /// The decoded image.
+    pub(crate) image: Image,
+    /// Import thunks the container declares, or why they could not be read.
+    ///
+    /// Held unresolved because only lifting needs them. A container whose
+    /// records will not decode should still be one the other subcommands can be
+    /// pointed at, since they are how anyone would find out why.
+    pub(crate) imports: Result<Imports>,
+}
 
 /// Where a subcommand reads its image from.
 #[derive(Debug, Parser)]
@@ -55,13 +68,13 @@ pub(crate) fn number(text: &str) -> Result<u32> {
 }
 
 impl Source {
-    /// Loads the image this source describes.
+    /// Loads the image this source describes, and what its container declares.
     ///
     /// # Errors
     ///
     /// Returns an error when the file cannot be read, when a container cannot be
     /// parsed or decoded, or when key material is needed and absent.
-    pub(crate) fn load(&self) -> Result<Image> {
+    pub(crate) fn load(&self) -> Result<Loaded> {
         let bytes = std::fs::read(&self.file)
             .into_diagnostic()
             .wrap_err_with(|| format!("reading {}", self.file.display()))?;
@@ -77,7 +90,10 @@ impl Source {
                 size,
                 kind: PageKind::Code,
             }];
-            return Ok(Image::new(base, bytes, sections));
+            return Ok(Loaded {
+                image: Image::new(base, bytes, sections),
+                imports: Ok(Imports::new()),
+            });
         }
 
         let container = Container::parse(&bytes)
@@ -96,9 +112,33 @@ impl Source {
             ));
         }
 
-        container
+        let image = container
             .load(key.as_ref())
             .into_diagnostic()
-            .wrap_err_with(|| format!("decoding the image of {}", self.file.display()))
+            .wrap_err_with(|| format!("decoding the image of {}", self.file.display()))?;
+
+        let thunks = imports(&image, container.import_libraries())
+            .into_diagnostic()
+            .wrap_err_with(|| format!("reading the imports of {}", self.file.display()))
+            .map(|found| {
+                found
+                    .into_iter()
+                    .filter(|import| import.kind == ImportKind::Thunk)
+                    .map(|import| {
+                        (
+                            import.address,
+                            Imported {
+                                library: import.library.to_owned(),
+                                ordinal: import.ordinal,
+                            },
+                        )
+                    })
+                    .collect()
+            });
+
+        Ok(Loaded {
+            image,
+            imports: thunks,
+        })
     }
 }

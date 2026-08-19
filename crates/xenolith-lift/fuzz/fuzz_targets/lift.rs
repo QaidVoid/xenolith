@@ -13,7 +13,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use xenolith_analysis::analyze;
-use xenolith_lift::{is_liftable, lift};
+use xenolith_lift::{Imports, is_liftable, lift};
 use xenolith_ppc::Instruction;
 use xenolith_xex::{Image, PageKind, Section};
 
@@ -46,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
     let program = analyze(&image, &[]);
 
     for function in program.functions() {
-        let outcome = lift(&image, function);
+        let outcome = lift(&image, function, &Imports::new());
 
         match outcome {
             Ok(result) => {

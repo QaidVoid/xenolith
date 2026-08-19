@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use xenolith_analysis::analyze;
-use xenolith_lift::{RUNTIME_HEADER, lift};
+use xenolith_lift::{Imported, Imports, RUNTIME_HEADER, lift};
 use xenolith_xex::{Image, PageKind, Section};
 
 /// The address images are placed at, matching where a title loads.
@@ -37,7 +37,7 @@ fn lift_entry(words: &[u32]) -> Result<String, String> {
         .find(|function| function.start == BASE)
         .ok_or_else(|| "nothing was discovered at the entry point".to_owned())?;
 
-    lift(&image, function)
+    lift(&image, function, &Imports::new())
         .map(|lifted| lifted.code)
         .map_err(|unlifted| {
             format!(
@@ -67,7 +67,8 @@ fn compiles(name: &str, emitted: &str) -> Result<(), String> {
     let program = format!(
         "#include \"xenolith.h\"\n\n\
          void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
-         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\n\
+         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o) {{ (void)c; (void)b; (void)l; (void)o; }}\n\n\
          {emitted}"
     );
     std::fs::write(&source, &program).map_err(|error| format!("writing the source: {error}"))?;
@@ -188,7 +189,7 @@ fn a_tail_call_returns_after_calling() {
 
     let mut found = false;
     for function in program.functions() {
-        if let Ok(lifted) = lift(&image, function) {
+        if let Ok(lifted) = lift(&image, function, &Imports::new()) {
             if lifted.code.contains("(ctx, base); return;") {
                 found = true;
             }
@@ -227,11 +228,11 @@ fn other_functions_still_lift() {
 
     let lifted = program
         .functions()
-        .filter(|function| lift(&image, function).is_ok())
+        .filter(|function| lift(&image, function, &Imports::new()).is_ok())
         .count();
     let refused = program
         .functions()
-        .filter(|function| lift(&image, function).is_err())
+        .filter(|function| lift(&image, function, &Imports::new()).is_err())
         .count();
 
     assert!(lifted > 0, "the sound function should still be emitted");
@@ -266,7 +267,7 @@ fn a_real_title_lifts_and_compiles() {
     let mut emitted = String::new();
 
     for function in program.functions() {
-        match lift(&image, function) {
+        match lift(&image, function, &Imports::new()) {
             Ok(result) => {
                 lifted += 1;
                 referenced.extend(result.calls);
@@ -316,4 +317,61 @@ fn a_real_title_lifts_and_compiles() {
         let head: String = complaint.lines().take(30).collect::<Vec<_>>().join("\n");
         panic!("emitted C did not compile:\n{head}");
     }
+}
+
+/// A thunk stands for a function the console provided, so the only thing that
+/// can be emitted for it is a call naming what the container says it is.
+#[test]
+fn an_import_thunk_becomes_a_call() {
+    // The two placeholder words the loader overwrites, then mtctr r11; bctr.
+    const WORDS: [u32; 4] = [0x0100_028b, 0x0200_028b, 0x7d69_03a6, 0x4e80_0420];
+
+    let image = image_of(&WORDS);
+    let program = analyze(&image, &[]);
+    let function = program
+        .functions()
+        .find(|function| function.start == BASE)
+        .expect("the entry point should be discovered");
+
+    let mut imports = Imports::new();
+    imports.insert(
+        BASE,
+        Imported {
+            library: "xam.xex".to_owned(),
+            ordinal: 651,
+        },
+    );
+
+    let lifted = lift(&image, function, &imports).expect("a thunk should lift");
+
+    assert!(
+        lifted
+            .code
+            .contains("xenolith_import(ctx, base, \"xam.xex\", 651);"),
+        "the call was not emitted: {}",
+        lifted.code
+    );
+    assert!(
+        lifted.code.contains("import: xam.xex ordinal 651"),
+        "what it stands for was not stated: {}",
+        lifted.code
+    );
+    assert!(
+        lifted.calls.is_empty(),
+        "a thunk calls no lifted function: {:?}",
+        lifted.calls
+    );
+    assert_eq!(compiles("import_thunk", &lifted.code), Ok(()));
+}
+
+/// Without the container saying so, the same words are what they look like,
+/// which is not an instruction.
+#[test]
+fn a_thunk_with_no_import_behind_it_does_not_lift() {
+    const WORDS: [u32; 4] = [0x0100_028b, 0x0200_028b, 0x7d69_03a6, 0x4e80_0420];
+
+    assert!(
+        lift_entry(&WORDS).is_err(),
+        "placeholder words are not instructions"
+    );
 }
