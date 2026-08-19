@@ -583,6 +583,23 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             writeln!(out, "    xenolith_trap(ctx, base, 0x{address:08x}u);").ok()?;
         }
 
+        // Storing a float as an integer word takes the low half of the register
+        // as it stands rather than converting it, which is what makes it the
+        // way an integer gets out of the floating bank.
+        Opcode::Stfiwx => {
+            let base = if ra == 0 {
+                "0".to_owned()
+            } else {
+                format!("(uint32_t)ctx->r[{ra}]")
+            };
+            writeln!(out, "    address = {base} + (uint32_t)ctx->r[{rb}];").ok()?;
+            writeln!(
+                out,
+                "    xenolith_store32(base, address, (uint32_t)ctx->f[{rt}].u64);"
+            )
+            .ok()?;
+        }
+
         Opcode::Fmr => {
             writeln!(out, "    ctx->f[{rt}] = ctx->f[{rb}];").ok()?;
         }
