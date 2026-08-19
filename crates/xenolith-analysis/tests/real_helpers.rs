@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use xenolith_analysis::{HelperDirection, HelperKind, detect};
-use xenolith_xex::{Image, PageKind, Section};
+use xenolith_xex::{Container, Image, KeyMaterial, PageKind, Section};
 
 /// Returns the image path and base address, if both were supplied.
 fn supplied_source() -> Option<(PathBuf, u32)> {
@@ -36,27 +36,56 @@ fn image_of(bytes: Vec<u8>, base: u32) -> Image {
 }
 
 /// Loads the supplied image, or skips the enclosing test.
+///
+/// A container is preferred when one was given, because it describes itself.
 macro_rules! supplied_image {
     () => {
-        match supplied_source() {
-            Some((path, base)) => {
-                let bytes = std::fs::read(&path).expect("reading the analysis image");
-                image_of(bytes, base)
+        match std::env::var_os("XENOLITH_ANALYSIS_XEX") {
+            Some(path) => {
+                // A container carries its own section layout and entry point,
+                // so neither has to be described by hand and neither can be
+                // described wrongly. Decoding one needs key material, supplied
+                // through the environment rather than embedded.
+                let bytes = std::fs::read(&path).expect("reading the analysis container");
+                let container = Container::parse(&bytes).expect("parsing the container");
+                let key = std::env::var("XENOLITH_XEX_KEY")
+                    .ok()
+                    .map(|text| KeyMaterial::from_hex(text.trim()).expect("the supplied key"));
+                container.load(key.as_ref()).expect("decoding the image")
             }
-            None => {
-                eprintln!("skipping: XENOLITH_ANALYSIS_IMAGE is not set");
-                return;
-            }
+            None => match supplied_source() {
+                Some((path, base)) => {
+                    let bytes = std::fs::read(&path).expect("reading the analysis image");
+                    image_of(bytes, base)
+                }
+                None => {
+                    eprintln!("skipping: no analysis image was supplied");
+                    return;
+                }
+            },
         }
     };
 }
 
-/// Reads the expected helper addresses, if they were supplied.
-fn expected_addresses() -> Option<Vec<u32>> {
+/// Reads the hand recorded helper addresses, if they were supplied.
+///
+/// A bare address is where a helper begins. An address written `0x...@N` is
+/// where the helper is entered to cover registers N upward, which is how these
+/// are recorded when someone worked out one entry rather than the whole run.
+/// Both forms are checked against a detected helper, so a title with only a
+/// single entry recorded still tests something.
+fn expected_addresses() -> Option<Vec<(u32, Option<u8>)>> {
     let text = std::env::var("XENOLITH_ANALYSIS_HELPERS").ok()?;
     Some(
         text.split(',')
-            .filter_map(|part| u32::from_str_radix(part.trim().trim_start_matches("0x"), 16).ok())
+            .filter_map(|part| {
+                let (address, register) = match part.trim().split_once('@') {
+                    Some((address, register)) => (address, register.trim().parse().ok()),
+                    None => (part.trim(), None),
+                };
+                let address = u32::from_str_radix(address.trim().trim_start_matches("0x"), 16);
+                Some((address.ok()?, register))
+            })
             .collect(),
     )
 }
@@ -87,22 +116,32 @@ fn detection_finds_the_hand_recorded_helper_addresses() {
         return;
     };
 
-    let found: Vec<u32> = helpers.all().iter().map(|helper| helper.start).collect();
     let mut absent = Vec::new();
-    for address in &expected {
-        if !found.contains(address) {
-            absent.push(*address);
+    for (address, register) in &expected {
+        // A helper covering registers N upward is entered one instruction per
+        // register past its start, because that is what the run is: one save or
+        // restore each, in order.
+        let matched = helpers.all().iter().any(|helper| match register {
+            None => helper.start == *address,
+            Some(register) => {
+                let steps = u32::from(register.saturating_sub(helper.first_register));
+                *register >= helper.first_register
+                    && *register <= helper.last_register
+                    && helper.start.saturating_add(steps * 4) == *address
+            }
+        });
+        if !matched {
+            absent.push(match register {
+                None => format!("{address:#010x}"),
+                Some(register) => format!("{address:#010x} (register {register})"),
+            });
         }
     }
 
     assert!(
         absent.is_empty(),
-        "detection did not find these hand recorded addresses: {}",
-        absent
-            .iter()
-            .map(|a| format!("{a:#010x}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        "detection did not account for these hand recorded addresses: {}",
+        absent.join(", ")
     );
 }
 

@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use xenolith_analysis::{JumpTable, Origin, analyze};
-use xenolith_xex::{Image, PageKind, Section};
+use xenolith_xex::{Container, Image, KeyMaterial, PageKind, Section};
 
 /// Returns the image path, base address, and entry point, if all were supplied.
 fn supplied_source() -> Option<(PathBuf, u32, Option<u32>)> {
@@ -87,19 +87,37 @@ fn executable_words(image: &Image) -> u64 {
 }
 
 /// Loads the supplied image, or skips the enclosing test.
+///
+/// A container is preferred when one was given, because it describes itself.
 macro_rules! supplied_image {
     () => {
-        match supplied_source() {
-            Some((path, base, entry)) => {
-                let bytes = std::fs::read(&path).expect("reading the analysis image");
-                let image = image_of(bytes, base, entry);
+        match std::env::var_os("XENOLITH_ANALYSIS_XEX") {
+            Some(path) => {
+                // A container carries its own section layout and entry point,
+                // so neither has to be described by hand and neither can be
+                // described wrongly. Decoding one needs key material, supplied
+                // through the environment rather than embedded.
+                let bytes = std::fs::read(&path).expect("reading the analysis container");
+                let container = Container::parse(&bytes).expect("parsing the container");
+                let key = std::env::var("XENOLITH_XEX_KEY")
+                    .ok()
+                    .map(|text| KeyMaterial::from_hex(text.trim()).expect("the supplied key"));
+                let image = container.load(key.as_ref()).expect("decoding the image");
                 let words = executable_words(&image);
                 (image, words)
             }
-            None => {
-                eprintln!("skipping: XENOLITH_ANALYSIS_IMAGE is not set");
-                return;
-            }
+            None => match supplied_source() {
+                Some((path, base, entry)) => {
+                    let bytes = std::fs::read(&path).expect("reading the analysis image");
+                    let image = image_of(bytes, base, entry);
+                    let words = executable_words(&image);
+                    (image, words)
+                }
+                None => {
+                    eprintln!("skipping: no analysis image was supplied");
+                    return;
+                }
+            },
         }
     };
 }
@@ -223,6 +241,38 @@ fn reports_graph_shape() {
 /// Reading the first entry by hand gives `0x82109408 + 0x73 * 4`, which lands
 /// four bytes below the default. That is what a switch looks like, and it is
 /// the arithmetic recovery has to reproduce.
+/// A table someone worked out by hand, supplied per title.
+struct Expected {
+    branch: u32,
+    index_register: u8,
+    table: u32,
+    entries: usize,
+    default: u32,
+    first_target: u32,
+}
+
+/// Reads the hand worked table, if one was supplied for this title.
+///
+/// Given as colon separated hexadecimal fields: the branch, the index register,
+/// the table address, the entry count, the default, and the first target. It is
+/// supplied rather than written in, because the harness serves more than one
+/// title and an address from one of them means nothing to another.
+fn expected_table() -> Option<Expected> {
+    let text = std::env::var("XENOLITH_ANALYSIS_TABLE").ok()?;
+    let mut fields = text.split(':');
+    let mut number =
+        || u32::from_str_radix(fields.next()?.trim().trim_start_matches("0x"), 16).ok();
+
+    Some(Expected {
+        branch: number()?,
+        index_register: u8::try_from(number()?).ok()?,
+        table: number()?,
+        entries: usize::try_from(number()?).ok()?,
+        default: number()?,
+        first_target: number()?,
+    })
+}
+
 #[test]
 fn reports_jump_table_recovery() {
     let (image, _) = supplied_image!();
@@ -252,10 +302,15 @@ fn reports_jump_table_recovery() {
         );
     }
 
+    let Some(expected) = expected_table() else {
+        eprintln!("skipping the worked example: XENOLITH_ANALYSIS_TABLE is not set");
+        return;
+    };
+
     let table = all
         .recovered()
         .iter()
-        .find(|table| table.branch == 0x8210_9404)
+        .find(|table| table.branch == expected.branch)
         .expect("the hand worked example was not recovered");
 
     eprintln!("\nthe hand worked example at {:#010x}", table.branch);
@@ -264,11 +319,11 @@ fn reports_jump_table_recovery() {
     eprintln!("  entries         {}", table.entries());
     eprintln!("  default         {:#010x}", table.default.unwrap_or(0));
 
-    assert_eq!(table.index_register, 10);
-    assert_eq!(table.table, Some(0x820a_2948));
-    assert_eq!(table.entries(), 16);
-    assert_eq!(table.default, Some(0x8210_95d8));
-    assert_eq!(table.targets.first(), Some(&0x8210_95d4));
+    assert_eq!(table.index_register, expected.index_register);
+    assert_eq!(table.table, Some(expected.table));
+    assert_eq!(table.entries(), expected.entries);
+    assert_eq!(table.default, Some(expected.default));
+    assert_eq!(table.targets.first(), Some(&expected.first_target));
 }
 
 /// A table read out of the reference file.
