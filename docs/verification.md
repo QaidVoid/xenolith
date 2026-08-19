@@ -100,6 +100,11 @@ VMX128 and no emulator implements it. Those instructions have the emitted corpus
 and careful reading behind them, and nothing more. A coverage figure that folded
 them in would imply more than it means.
 
+Its permute forms are refused outright rather than modelled. Their control
+fields sit in bits this project has no independent reading of, and a permute
+built from the wrong bits produces a plausible vector rather than an obvious
+mistake, which is the worst kind of thing to guess at.
+
 **The emulator is a generic POWER, not a Xenon.** Where the two differ, the
 harness would report the model wrong when it is right. That is a real limit and
 the reason a disagreement is read before it is believed. Two of the first three

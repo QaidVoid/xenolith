@@ -37,7 +37,7 @@ make -C ./lifted -j
 ```
 
 The larger of the two test titles builds in about two and a half minutes wall
-clock on a machine with enough cores, from 90 units, at `-O2` with `-Wall
+clock on a machine with enough cores, from 91 units, at `-O2` with `-Wall
 -Wextra`, with no warnings.
 
 The makefile stops at `liblifted.a` rather than attempting a link. Nothing
@@ -83,12 +83,12 @@ the emitter is.
 
 ```
 functions               27447
-  lifted                27195  (99.081 percent)
+  lifted                27297  (99.453 percent)
     import thunks         156
-  not lifted              252
+  not lifted              150
 declarations            27570
-units                      90
-  largest             5205690 bytes
+units                      91
+  largest             6015615 bytes
 ```
 
 **functions** is what discovery found. **lifted** is how many were emitted.
@@ -109,11 +109,11 @@ xenolith lift default.xex --out ./lifted --blockers
 
 ```
 instructions blocking the most functions
-  lvsl                 56
-  vspltisw             49
-  lvlx                 40
-  vspltish             21
-  vspltisb             18
+  vadduwm               8
+  vpermwi128            7
+  vupkhsh               7
+  vsubshs               6
+  vupkd3d128            6
 ```
 
 This is the instruction that stopped the most functions, not the instruction

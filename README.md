@@ -20,17 +20,19 @@ Measured against two retail titles:
 |---|---|---|
 | functions discovered | 27,447 | 11,903 |
 | executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 27,195 (99.1%) | 11,282 (94.8%) |
+| functions lifted to C | 27,297 (99.5%) | 11,624 (97.7%) |
 | of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
 
-Every instruction still blocking a function on either title is a vector one. The
-scalar instruction set is modelled as far as these two titles exercise it.
+The scalar instruction set is modelled as far as these two titles exercise it,
+and so are the vector families they lean on. What is left is a tail of a few
+instructions each, most of them the console's own forms whose operand fields
+this project has no independent reading of.
 
 What that leaves out is the part that matters for running anything. The emitted C
 is written against a runtime interface this project declares and does not
 implement: no guest memory is mapped, no import does anything, no threads exist.
-Around 1,090 addresses are declared without a definition, mostly functions that
+Around 700 addresses are declared without a definition, mostly functions that
 could not be lifted plus the register save and restore helpers. So it compiles
 and it does not link, which is an honest description of how far this has got.
 
@@ -41,7 +43,7 @@ Both are stated in the runtime interface beside their declaration rather than
 left to be discovered.
 
 The output is a directory of translation units and a makefile that builds them.
-The larger title emits 88 units and takes two and a half minutes to compile with
+The larger title emits 91 units and takes a few minutes to compile with
 `make -j`, which is the shape the output has to be in for a build to use more
 than one core.
 
@@ -168,10 +170,14 @@ Stated plainly, because a coverage figure implies more than it means:
   against an emitted corpus and by reading, and nothing more.
 - **Compressed containers using LZX are not supported**, nor are title update
   patches. Both are implemented up to the point where a sample was needed.
-- **Between 1 and 5 percent of functions do not lift**, blocked by vector
-  instructions the model does not yet describe. Every remaining blocker on
-  either title is one. The `lift` subcommand ranks them by how many functions
-  each blocks, which is the list to work from.
+- **Between 0.5 and 2.3 percent of functions do not lift**, blocked by vector
+  instructions the model does not yet describe. The `lift` subcommand ranks
+  them by how many functions each blocks, which is the list to work from.
+- **The console's vector extension is modelled without an execution oracle.**
+  No assembler accepts it and no emulator implements it, so those instructions
+  are checked against the emitted corpus and by reading and nothing else. Its
+  permute forms are refused outright, because a permute built from the wrong
+  bits produces a plausible vector rather than an obvious mistake.
 - **Two registers round trip without doing anything.** A program that depends on
   interrupts actually being masked, or on a rounding mode actually changing,
   compiles and is wrong.

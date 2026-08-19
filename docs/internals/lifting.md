@@ -82,6 +82,35 @@ load and store, so that a program which one day has threads has somewhere to put
 real atomicity. The time base is a counter, and what it counts at is the
 environment's decision. None of them exist.
 
+## How a vector lane is reached
+
+A vector register is 128 bits the instruction set reads as bytes, halfwords,
+words, doublewords, or floats, and the guest reads every one of those big end
+first. On a host of the other byte order there is no layout in memory that makes
+all of those views right at once. Keeping the guest's bytes means a word read
+directly comes back reversed; keeping each lane in host order means the bytes
+come back in the wrong lane order.
+
+The bytes are kept, which is the same decision guest memory already takes, and
+every lane is assembled by an accessor the interface states:
+
+```c
+static inline uint32_t xenolith_vector_u32(const xenolith_vector *v, unsigned lane);
+static inline void xenolith_vector_set_u32(xenolith_vector *v, unsigned lane, uint32_t value);
+```
+
+The register type is a byte array and nothing else. A union holding a word array
+beside it would invite reading the word array, which is exactly the mistake the
+accessors exist to prevent, and it would pass every test on the machine it was
+written on.
+
+Every lane operation builds its result in a temporary and copies it over the
+destination at the end. That is not something to optimize away: an instruction
+may name its destination as one of its sources, and a merge or a permute reads
+lanes the loop has already passed. Building the result elsewhere makes the
+aliasing impossible rather than making it depend on the order the lanes happen
+to be visited in.
+
 ## What is approximated, and why
 
 The rule is that an instruction with no semantics is admitted rather than
@@ -95,6 +124,12 @@ written. Every use of it in either title is the save and restore pair around a
 reservation, where the round trip is consistent and the masking is what is being
 skipped. Refusing it would have cost 273 functions over an effect that cannot
 exist in the emitted program.
+
+**The vector estimates give more precision than the hardware does.** The
+reciprocal, reciprocal square root, exponent, and logarithm instructions are
+estimates: the console produces a few significant bits and this produces all of
+them. Two implementations of an estimate are allowed to differ, so the
+differential cannot compare them exactly, and it does not pretend to.
 
 **The floating point status register is storage on the same terms.** A rounding
 mode written into it does not change how a later operation rounds, because the

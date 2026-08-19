@@ -11,7 +11,7 @@ about.
 
 The emitted C is written against a runtime interface this project declares and
 does not implement. No guest memory is mapped, no import does anything, no
-threads exist. Around 1,090 addresses are declared without a definition, mostly
+threads exist. Around 700 addresses are declared without a definition, mostly
 functions that could not be lifted plus the register save and restore helpers.
 So it compiles, and it does not link.
 
@@ -25,11 +25,12 @@ Measured against two retail titles:
 |---|---|---|
 | functions discovered | 27,447 | 11,903 |
 | executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 27,195 (99.1%) | 11,282 (94.8%) |
+| functions lifted to C | 27,297 (99.5%) | 11,624 (97.7%) |
 | of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
 
-Every instruction still blocking a function on either title is a vector one.
+What is left is a tail of a few instructions each, most of them the console's
+own vector forms whose operand fields this project has no independent reading of.
 
 ## The point of it
 
