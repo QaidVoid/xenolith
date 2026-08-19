@@ -108,19 +108,26 @@ fn print_layout(container: &Container<'_>, file_size: usize) {
         }
     );
 
-    let compression = match container.compression() {
-        CompressionType::None => "none".to_owned(),
+    let compression = container.compression();
+    let detail = match compression {
         CompressionType::Basic => {
             let blocks = container
                 .file_format_info()
                 .map_or(0, |info| info.basic_blocks().len());
-            format!("basic ({blocks} blocks)")
+            format!(" ({blocks} blocks)")
         }
-        CompressionType::Normal => "normal (lzx)".to_owned(),
-        CompressionType::Delta => "delta".to_owned(),
-        CompressionType::Unknown(value) => format!("unrecognized ({value})"),
+        CompressionType::Unknown(value) => format!(" ({value})"),
+        _ => String::new(),
     };
-    println!("  compression       {compression}");
+    let support = if compression.is_supported() {
+        ""
+    } else {
+        "   [NOT SUPPORTED YET, decoding this file will fail]"
+    };
+    println!(
+        "  compression       {}{detail}{support}",
+        compression.name()
+    );
 }
 
 /// Prints the section table with its address ranges and permissions.

@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use xenolith_xex::{
-    CompressionType, Container, EncryptionType, Error, Format, OptionalHeaderValue,
+    CompressionType, Container, EncryptionType, Error, Format, KeyMaterial, OptionalHeaderValue,
 };
 
 /// Returns the path named by `XENOLITH_TEST_XEX`, or `None` when it is unset.
@@ -224,5 +224,57 @@ fn decoding_an_encrypted_title_without_a_key_is_refused() {
     assert!(
         matches!(container.image(None), Err(Error::KeyMaterialRequired)),
         "an encrypted title decoded without key material"
+    );
+}
+
+/// Compares the decoded image against a reference produced by an independent
+/// implementation, named by `XENOLITH_TEST_IMAGE`.
+///
+/// This is the only check that covers decryption and reconstruction together
+/// against ground truth rather than against our own expectations. It needs key
+/// material, so it skips when the image cannot be decoded.
+///
+/// The reference is expected to cover only what the blocks describe. Our own
+/// reconstruction zero fills out to the declared image size, because the page
+/// descriptors cover that whole range and a section must not claim addresses
+/// the byte buffer cannot serve.
+#[test]
+fn the_decoded_image_matches_an_independent_reference() {
+    let bytes = container_bytes!();
+
+    let Some(reference_path) = std::env::var_os("XENOLITH_TEST_IMAGE") else {
+        eprintln!("skipping: XENOLITH_TEST_IMAGE is not set");
+        return;
+    };
+    let reference = std::fs::read(&reference_path).expect("reading the reference image");
+
+    let container = Container::parse(&bytes).expect("real container should parse");
+    let key = std::env::var("XENOLITH_XEX_KEY")
+        .ok()
+        .map(|text| KeyMaterial::from_hex(&text).expect("parsing XENOLITH_XEX_KEY"));
+
+    if container.encryption() == EncryptionType::Encrypted && key.is_none() {
+        eprintln!("skipping: title is encrypted and XENOLITH_XEX_KEY is not set");
+        return;
+    }
+
+    let image = container.image(key.as_ref()).expect("decoding the image");
+
+    assert!(
+        image.len() >= reference.len(),
+        "decoded {} bytes, reference holds {}",
+        image.len(),
+        reference.len()
+    );
+
+    let overlap = reference.len();
+    assert_eq!(
+        &image[..overlap],
+        &reference[..],
+        "decoded image differs from the reference within the described range"
+    );
+    assert!(
+        image[overlap..].iter().all(|byte| *byte == 0),
+        "the zero filled tail is not zero"
     );
 }

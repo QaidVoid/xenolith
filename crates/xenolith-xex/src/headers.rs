@@ -95,6 +95,29 @@ pub enum CompressionType {
     Unknown(u16),
 }
 
+impl CompressionType {
+    /// Returns a readable name for the scheme.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Basic => "basic",
+            Self::Normal => "normal (lzx)",
+            Self::Delta => "delta",
+            Self::Unknown(_) => "unrecognized",
+        }
+    }
+
+    /// Returns whether this crate can reconstruct an image stored this way.
+    ///
+    /// Useful for reporting what a file needs before trying to decode it, so a
+    /// gap is discovered by looking rather than by failing.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::None | Self::Basic)
+    }
+}
+
 /// One block of a basic scheme image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BasicBlock {
@@ -463,6 +486,27 @@ mod tests {
             })
         );
         assert!(info.basic_blocks().is_empty());
+    }
+
+    #[test]
+    fn names_every_compression_scheme() {
+        assert_eq!(CompressionType::None.name(), "none");
+        assert_eq!(CompressionType::Basic.name(), "basic");
+        assert_eq!(CompressionType::Normal.name(), "normal (lzx)");
+        assert_eq!(CompressionType::Delta.name(), "delta");
+        assert_eq!(CompressionType::Unknown(9).name(), "unrecognized");
+    }
+
+    /// Only the schemes with a reconstruction report as supported, so a caller
+    /// can tell a file it cannot handle from one it can before trying.
+    #[test]
+    fn only_reconstructed_schemes_report_as_supported() {
+        assert!(CompressionType::None.is_supported());
+        assert!(CompressionType::Basic.is_supported());
+
+        assert!(!CompressionType::Normal.is_supported());
+        assert!(!CompressionType::Delta.is_supported());
+        assert!(!CompressionType::Unknown(9).is_supported());
     }
 
     #[test]

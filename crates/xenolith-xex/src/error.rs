@@ -93,11 +93,22 @@ pub enum Error {
         len: usize,
     },
 
-    /// The container uses a compression scheme this crate does not reconstruct.
-    #[error("unsupported compression scheme {scheme}")]
-    UnsupportedCompression {
+    /// The container uses a scheme this crate recognizes but cannot yet apply.
+    ///
+    /// Distinct from [`Error::UnrecognizedCompression`] on purpose. This says
+    /// the file is well formed and the gap is ours, which is the difference
+    /// between a file worth reporting and a file worth discarding.
+    #[error("the image uses {scheme} compression, which is recognized but not reconstructed yet")]
+    CompressionNotImplemented {
         /// Name of the scheme that is not yet reconstructed.
-        scheme: String,
+        scheme: &'static str,
+    },
+
+    /// The container declares a compression scheme this crate cannot identify.
+    #[error("the image declares compression scheme {value}, which is not recognized")]
+    UnrecognizedCompression {
+        /// The raw scheme value the container held.
+        value: u16,
     },
 
     /// A read fell outside the mapped image.

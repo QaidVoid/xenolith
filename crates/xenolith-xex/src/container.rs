@@ -292,8 +292,9 @@ impl<'a> Container<'a> {
                     .map_or(&[][..], FileFormatInfo::basic_blocks);
                 reconstruct_basic(&body, blocks, image_size)
             }
-            scheme => Err(Error::UnsupportedCompression {
-                scheme: format!("{scheme:?}"),
+            CompressionType::Unknown(value) => Err(Error::UnrecognizedCompression { value }),
+            scheme => Err(Error::CompressionNotImplemented {
+                scheme: scheme.name(),
             }),
         }
     }
@@ -976,9 +977,47 @@ mod tests {
         assert!(
             matches!(
                 container.image(None).unwrap_err(),
-                Error::UnsupportedCompression { .. }
+                Error::CompressionNotImplemented { scheme: "delta" }
             ),
-            "delta should not reconstruct yet"
+            "delta should report itself as not implemented yet"
+        );
+    }
+
+    /// A recognized but unbuilt scheme and an unrecognized one are different
+    /// situations. The first says the gap is ours and the file is worth
+    /// reporting, the second says the file declares something meaningless.
+    #[test]
+    fn distinguishes_an_unbuilt_scheme_from_an_unrecognized_one() {
+        let normal = ContainerBuilder::new()
+            .file_format(0, 2, &[0u8; 28])
+            .body(vec![0u8; 16])
+            .build();
+        let nonsense = ContainerBuilder::new()
+            .file_format(0, 9, &[])
+            .body(vec![0u8; 16])
+            .build();
+
+        let normal = Container::parse(&normal).unwrap().image(None).unwrap_err();
+        let nonsense = Container::parse(&nonsense)
+            .unwrap()
+            .image(None)
+            .unwrap_err();
+
+        assert_eq!(
+            normal,
+            Error::CompressionNotImplemented {
+                scheme: "normal (lzx)"
+            }
+        );
+        assert!(
+            normal.to_string().contains("not reconstructed yet"),
+            "the message should say the gap is ours: {normal}"
+        );
+
+        assert_eq!(nonsense, Error::UnrecognizedCompression { value: 9 });
+        assert!(
+            nonsense.to_string().contains("not recognized"),
+            "the message should say the file is wrong: {nonsense}"
         );
     }
 
