@@ -503,6 +503,20 @@ fn reports_the_largest_unclaimed_ranges() {
     eprintln!("unclaimed runs   {:>10}", runs.len());
     eprintln!("unclaimed words  {total:>10}");
 
+    // A recovered table names addresses control actually reaches. One that no
+    // function claims is code discovery could have walked and did not, which
+    // says the shortfall is reachable rather than merely undiscovered.
+    let mut targets = std::collections::BTreeSet::new();
+    for function in program.functions() {
+        for table in xenolith_analysis::recover(&image, function).recovered() {
+            targets.extend(table.targets.iter().copied());
+            targets.extend(table.default);
+        }
+    }
+    let unclaimed_targets = targets.iter().filter(|t| !claimed.contains(t)).count();
+    eprintln!("table targets    {:>10}", targets.len());
+    eprintln!("  unclaimed      {unclaimed_targets:>10}");
+
     runs.sort_by_key(|(start, end)| std::cmp::Reverse(end - start));
 
     eprintln!("\nlargest unclaimed runs");
