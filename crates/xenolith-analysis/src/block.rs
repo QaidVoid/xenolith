@@ -219,7 +219,14 @@ fn split(leaders: &BTreeSet<u32>, ends: &BTreeMap<u32, (u32, Terminator)>) -> Ve
     let mut blocks = Vec::with_capacity(ends.len());
 
     for (&start, &(end, terminator)) in ends {
-        let cut = leaders.range((start + 1)..end).next().copied();
+        // A walk that decoded nothing produces no block. This happens when the
+        // address turns out not to hold code at all, which a call target landing
+        // on data does, and the range below would be backwards without it.
+        if end <= start {
+            continue;
+        }
+
+        let cut = leaders.range(start.saturating_add(1)..end).next().copied();
 
         match cut {
             Some(next) => blocks.push(Block {
@@ -387,6 +394,30 @@ mod tests {
             "the skipped instruction is not reached"
         );
         assert!(blocks.iter().any(|b| b.start == 0x8200_0008));
+    }
+
+    /// A call target can land on something that is not code, and walking from
+    /// there decodes nothing. Real code does this and no synthetic test had.
+    #[test]
+    fn walking_from_a_word_that_does_not_decode_produces_no_block() {
+        let image = ImageBuilder::new(0x8200_0000)
+            .code(&[0x17ff_ffff, encode::blr()])
+            .build();
+
+        assert!(blocks_from(&image, 0x8200_0000).is_empty());
+    }
+
+    /// The same, reached the way it actually arises: by branching to it.
+    #[test]
+    fn a_branch_to_a_word_that_does_not_decode_yields_no_block_for_it() {
+        let image = ImageBuilder::new(0x8200_0000)
+            .code(&[encode::b(8), encode::blr(), 0x17ff_ffff])
+            .build();
+
+        let blocks = blocks_from(&image, 0x8200_0000);
+
+        assert_eq!(blocks.len(), 1, "only the branch itself is a block");
+        assert_eq!(blocks[0].start, 0x8200_0000);
     }
 
     #[test]
