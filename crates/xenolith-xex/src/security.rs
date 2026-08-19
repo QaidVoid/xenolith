@@ -50,6 +50,15 @@ impl PageKind {
     pub const fn is_executable(self) -> bool {
         matches!(self, Self::Code)
     }
+
+    /// Returns whether the image may write to pages of this kind.
+    ///
+    /// Anything a compiler fixed at build time lands somewhere this is false, so
+    /// a constant found in writable memory was not put there by the compiler.
+    #[must_use]
+    pub const fn is_writable(self) -> bool {
+        matches!(self, Self::Data)
+    }
 }
 
 /// A run of consecutive image pages sharing one kind and one digest.
@@ -274,6 +283,14 @@ mod tests {
 
         assert_eq!(descriptor.kind, PageKind::Unknown(9));
         assert!(!descriptor.kind.is_executable());
+    }
+
+    #[test]
+    fn only_data_pages_are_writable() {
+        assert!(PageKind::Data.is_writable());
+        assert!(!PageKind::Code.is_writable());
+        assert!(!PageKind::ReadOnlyData.is_writable());
+        assert!(!PageKind::Unknown(0).is_writable());
     }
 
     #[test]

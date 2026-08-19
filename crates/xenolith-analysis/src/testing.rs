@@ -127,6 +127,49 @@ pub(crate) mod encode {
         (37 << 26) | (rs << 21) | (ra << 16) | (displacement & 0xffff)
     }
 
+    /// Adds an immediate to the upper half of a register.
+    pub(crate) const fn addis(rt: u32, ra: u32, imm: u32) -> u32 {
+        (15 << 26) | (rt << 21) | (ra << 16) | (imm & 0xffff)
+    }
+
+    /// Compares a register against an immediate without sign, which is how a
+    /// switch checks that its index is in range.
+    pub(crate) const fn cmpli(ra: u32, imm: u32) -> u32 {
+        (10 << 26) | (ra << 16) | (imm & 0xffff)
+    }
+
+    /// Loads a byte, offset by a register.
+    pub(crate) const fn lbzx(rt: u32, ra: u32, rb: u32) -> u32 {
+        (31 << 26) | (rt << 21) | (ra << 16) | (rb << 11) | (87 << 1)
+    }
+
+    /// Loads a word, offset by a register.
+    pub(crate) const fn lwzx(rt: u32, ra: u32, rb: u32) -> u32 {
+        (31 << 26) | (rt << 21) | (ra << 16) | (rb << 11) | (23 << 1)
+    }
+
+    /// Adds two registers.
+    pub(crate) const fn add(rt: u32, ra: u32, rb: u32) -> u32 {
+        (31 << 26) | (rt << 21) | (ra << 16) | (rb << 11) | (266 << 1)
+    }
+
+    /// Rotates a word left and masks it, naming its destination where most
+    /// other forms name a source.
+    pub(crate) const fn rlwinm(ra: u32, rs: u32, sh: u32, mb: u32, me: u32) -> u32 {
+        (21 << 26) | (rs << 21) | (ra << 16) | (sh << 11) | (mb << 6) | (me << 1)
+    }
+
+    /// Shifts a register left, which is how an index is scaled to address a
+    /// table of words.
+    pub(crate) const fn slwi(ra: u32, rs: u32, places: u32) -> u32 {
+        rlwinm(ra, rs, places, 0, 31 - places)
+    }
+
+    /// Writes a register into the count register, which a branch then reads.
+    pub(crate) const fn mtctr(rs: u32) -> u32 {
+        (31 << 26) | (rs << 21) | (9 << 16) | (467 << 1)
+    }
+
     /// Returns the displacement that branches `bytes` backward.
     ///
     /// Displacements are signed, and writing the two's complement value out is
@@ -169,6 +212,50 @@ mod tests {
             Instruction::decode(encode::bctr()).flow(0).kind,
             FlowKind::Indirect
         );
+    }
+
+    /// The switch encoders decide what recovery reads, so a mistake in one would
+    /// make a test agree with a bug rather than with the architecture.
+    #[test]
+    fn the_switch_encoders_produce_what_the_decoder_reads_back() {
+        let addis = Instruction::decode(encode::addis(12, 0, 0x8200));
+        assert_eq!(addis.opcode().mnemonic(), "addis");
+        assert_eq!(
+            (addis.rt(), addis.ra(), addis.displacement()),
+            (12, 0, -0x7e00)
+        );
+
+        let compare = Instruction::decode(encode::cmpli(10, 3));
+        assert_eq!(compare.opcode().mnemonic(), "cmpli");
+        assert_eq!((compare.ra(), compare.immediate()), (10, 3));
+
+        let byte = Instruction::decode(encode::lbzx(0, 12, 10));
+        assert_eq!(byte.opcode().mnemonic(), "lbzx");
+        assert_eq!((byte.rt(), byte.ra(), byte.rb()), (0, 12, 10));
+
+        let word = Instruction::decode(encode::lwzx(0, 12, 11));
+        assert_eq!(word.opcode().mnemonic(), "lwzx");
+        assert_eq!((word.rt(), word.ra(), word.rb()), (0, 12, 11));
+
+        let sum = Instruction::decode(encode::add(12, 12, 0));
+        assert_eq!(sum.opcode().mnemonic(), "add");
+        assert_eq!((sum.rt(), sum.ra(), sum.rb()), (12, 12, 0));
+
+        // A shift left by two is a rotate left by two keeping bits zero to
+        // twenty nine, which is how a multiply by four is written.
+        let shift = Instruction::decode(encode::slwi(0, 11, 2));
+        assert_eq!(shift.opcode().mnemonic(), "rlwinm");
+        assert_eq!(shift.ra(), 0, "the destination is named in the ra field");
+        assert_eq!(shift.rt(), 11, "the source is named where others name it");
+        assert_eq!(
+            (shift.shift_amount(), shift.mask_begin(), shift.mask_end()),
+            (2, 0, 29)
+        );
+
+        let count = Instruction::decode(encode::mtctr(12));
+        assert_eq!(count.opcode().mnemonic(), "mtspr");
+        assert_eq!(count.rt(), 12);
+        assert_eq!(count.spr(), 9, "the count register is number nine");
     }
 
     #[test]

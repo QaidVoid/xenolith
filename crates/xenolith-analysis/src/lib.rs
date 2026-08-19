@@ -18,9 +18,11 @@
 mod block;
 mod function;
 mod helper;
+mod jumptable;
 #[cfg(test)]
 mod testing;
 
 pub use block::{Block, Terminator, blocks_from, blocks_within};
 pub use function::{Edge, Function, Origin, Program, analyze};
 pub use helper::{Helper, HelperDirection, HelperKind, Helpers, detect};
+pub use jumptable::{JumpTable, JumpTables, recover};

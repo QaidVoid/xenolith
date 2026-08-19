@@ -116,6 +116,40 @@ impl Instruction {
         low_half(self.word)
     }
 
+    /// Returns how far a word rotate rotates left.
+    #[must_use]
+    pub fn shift_amount(self) -> u8 {
+        ((self.word >> 11) & 0x1f) as u8
+    }
+
+    /// Returns the first bit of the mask a word rotate keeps.
+    ///
+    /// Bits are numbered from the most significant, so a mask beginning at zero
+    /// keeps the top of the result.
+    #[must_use]
+    pub fn mask_begin(self) -> u8 {
+        ((self.word >> 6) & 0x1f) as u8
+    }
+
+    /// Returns the last bit of the mask a word rotate keeps.
+    ///
+    /// A rotate left by `n` whose mask runs from zero to `31 - n` is a shift
+    /// left by `n`, because every bit the rotate wrapped around is discarded.
+    ///
+    /// ```
+    /// use xenolith_ppc::Instruction;
+    ///
+    /// // rlwinm r0, r0, 2, 0, 29, which multiplies by four
+    /// let instruction = Instruction::decode(0x5400_103a);
+    /// assert_eq!(instruction.shift_amount(), 2);
+    /// assert_eq!(instruction.mask_begin(), 0);
+    /// assert_eq!(instruction.mask_end(), 29);
+    /// ```
+    #[must_use]
+    pub fn mask_end(self) -> u8 {
+        ((self.word >> 1) & 0x1f) as u8
+    }
+
     /// Returns the displacement field, sign extended.
     ///
     /// Displacements are signed in the architecture, so a load from a negative
