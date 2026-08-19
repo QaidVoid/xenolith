@@ -1,0 +1,22 @@
+[package]
+name = "xenolith-analysis-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+xenolith-analysis = { version = "0.1.0", path = ".." }
+xenolith-xex = { version = "0.1.0", path = "../../xenolith-xex" }
+
+[[bin]]
+name = "analyze"
+path = "fuzz_targets/analyze.rs"
+test = false
+doc = false
+bench = false

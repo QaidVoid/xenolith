@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use xenolith_ppc::{FlowKind, Instruction, Opcode};
 use xenolith_xex::Image;
 
-use crate::block::{Block, Terminator, blocks_within};
+use crate::block::{Block, INSTRUCTION_SIZE, Terminator, blocks_within};
 use crate::helper::{HelperDirection, Helpers, detect};
 
 /// How a function came to be known about.
@@ -447,6 +447,16 @@ fn is_executable(image: &Image, address: u32) -> bool {
         .is_some_and(|section| section.kind.is_executable())
 }
 
+/// Returns whether an address could hold an instruction.
+///
+/// Instructions are four bytes and four byte aligned, so an address that is not
+/// cannot be the start of one. Walking from it decodes a stream shifted out of
+/// step with the real one, which produces output that looks plausible and is
+/// entirely wrong, and claims addresses no instruction ever sits at.
+fn is_instruction_address(image: &Image, address: u32) -> bool {
+    address % INSTRUCTION_SIZE == 0 && is_executable(image, address)
+}
+
 /// Discovers the functions of an image, along with its helpers.
 ///
 /// Seeds from the image entry point and from `roots`, which is where an export
@@ -457,12 +467,12 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
 
     let mut origins: BTreeMap<u32, Origin> = BTreeMap::new();
     if let Some(entry) = image.entry_point() {
-        if is_executable(image, entry) {
+        if is_instruction_address(image, entry) {
             origins.insert(entry, Origin::EntryPoint);
         }
     }
     for &root in roots {
-        if is_executable(image, root) {
+        if is_instruction_address(image, root) {
             origins.entry(root).or_insert(Origin::Root);
         }
     }
@@ -960,6 +970,36 @@ mod tests {
 
         assert_eq!(program.count_from(Origin::EntryPoint), 1);
         assert_eq!(program.count_from(Origin::Called), 1);
+        assert_eq!(program.count_from(Origin::Root), 0);
+    }
+
+    /// An entry point that is not four byte aligned cannot be an instruction.
+    /// Walking from it decodes a stream shifted out of step with the real one,
+    /// and claims addresses no instruction sits at, which was found by fuzzing.
+    #[test]
+    fn an_unaligned_entry_point_seeds_nothing() {
+        let words = [encode::addi(3, 4, 1), encode::blr()];
+        let image = ImageBuilder::new(0x8200_0000)
+            .entry(0x8200_0002)
+            .code(&words)
+            .build();
+
+        let program = analyze(&image, &[]);
+
+        assert_eq!(program.count_from(Origin::EntryPoint), 0);
+        assert!(program.claimed_instructions() <= words.len() as u64);
+    }
+
+    /// The same for a caller supplied root, which comes from an export table and
+    /// is no more trustworthy than the entry point.
+    #[test]
+    fn an_unaligned_root_seeds_nothing() {
+        let image = ImageBuilder::new(0x8200_0000)
+            .code(&[encode::addi(3, 4, 1), encode::blr()])
+            .build();
+
+        let program = analyze(&image, &[0x8200_0001]);
+
         assert_eq!(program.count_from(Origin::Root), 0);
     }
 

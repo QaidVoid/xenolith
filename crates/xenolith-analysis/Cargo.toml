@@ -13,3 +13,6 @@ xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+proptest = "1.11.0"
