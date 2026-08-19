@@ -1068,6 +1068,16 @@ fn condition_of(instruction: Instruction) -> String {
 /// because a function that is right except in one place compiles and runs and is
 /// wrong, and nothing downstream can tell.
 pub fn lift(image: &Image, function: &Function) -> Result<Lifted, Unlifted> {
+    // A function whose walk decoded nothing has no blocks, and so no label to
+    // enter at. There is nothing to emit and saying so is the answer.
+    if function.blocks.is_empty() {
+        return Err(Unlifted {
+            function: function.start,
+            address: function.start,
+            mnemonic: "<no blocks>",
+        });
+    }
+
     let starts: std::collections::BTreeSet<u32> =
         function.blocks.iter().map(|block| block.start).collect();
 

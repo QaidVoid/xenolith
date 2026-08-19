@@ -970,6 +970,7 @@ dependencies = [
  "clap",
  "miette",
  "xenolith-analysis",
+ "xenolith-lift",
  "xenolith-ppc",
  "xenolith-xex",
 ]

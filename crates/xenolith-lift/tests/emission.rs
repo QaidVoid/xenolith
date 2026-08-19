@@ -260,12 +260,11 @@ fn a_real_title_lifts_and_compiles() {
             Ok(result) => {
                 lifted += 1;
                 referenced.extend(result.calls);
-                // Compiling every function would take longer than it is worth,
-                // so a sample large enough to meet every shape is taken.
-                if lifted <= 2000 {
-                    emitted.push_str(&result.code);
-                    emitted.push('\n');
-                }
+                // Every function is compiled rather than a sample. A sample of
+                // two thousand missed a function with no blocks at all, whose
+                // entry jumped to a label that was never written.
+                emitted.push_str(&result.code);
+                emitted.push('\n');
             }
             Err(unlifted) => {
                 refused += 1;

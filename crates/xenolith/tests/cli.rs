@@ -332,3 +332,150 @@ fn analyze_reports_a_jump_table_worked_out_by_hand() {
         assert!(stdout.contains(target), "{target} missing from: {stdout}");
     }
 }
+
+#[test]
+fn top_level_help_lists_lift() {
+    let (ok, stdout, _) = run!("--help");
+
+    assert!(ok, "help should succeed");
+    assert!(stdout.contains("lift"), "help did not list lift");
+}
+
+#[test]
+fn lift_help_documents_its_arguments() {
+    let (ok, stdout, _) = run!("lift", "--help");
+
+    assert!(ok, "lift help should succeed");
+    for flag in ["--out", "--raw", "--base", "--key-file", "--blockers"] {
+        assert!(stdout.contains(flag), "{flag} not documented: {stdout}");
+    }
+}
+
+#[test]
+fn lift_names_a_directory_it_cannot_write() {
+    let path = std::env::temp_dir().join("xenolith-lift-input.bin");
+    // A function with a prologue, so that scanning finds it without an entry
+    // point: mflr r12; stwu r1, -96(r1); addi r1, r1, 96; blr
+    let bytes: Vec<u8> = [0x7d88_02a6u32, 0x9421_ffa0, 0x3821_0060, 0x4e80_0020]
+        .iter()
+        .flat_map(|word| word.to_be_bytes())
+        .collect();
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (ok, _, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        "/proc/cannot/write/here",
+        path.to_str().unwrap()
+    );
+
+    assert!(!ok, "an unwritable directory should fail");
+    assert!(
+        stderr.contains("cannot/write/here"),
+        "the error did not name the directory: {stderr}"
+    );
+}
+
+/// A crafted image whose emitted C can be read against the instructions it came
+/// from, since there is no way to run either.
+#[test]
+fn lift_emits_c_for_a_crafted_image() {
+    // mflr r12; stwu r1, -96(r1); li r3, 7; addi r1, r1, 96; blr
+    const WORDS: [u32; 5] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x3860_0007,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let source = std::env::temp_dir().join("xenolith-lift-crafted.bin");
+    let out = std::env::temp_dir().join("xenolith-lift-crafted-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = WORDS.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let (ok, stdout, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        out.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+
+    assert!(ok, "lifting a crafted image should succeed: {stderr}");
+    assert!(
+        stdout.contains("lifted                    1"),
+        "one function should lift: {stdout}"
+    );
+
+    let emitted = std::fs::read_to_string(out.join("lifted.c")).expect("the emitted C");
+    assert!(emitted.contains("#include \"xenolith.h\""));
+    assert!(emitted.contains("void sub_82000000(xenolith_context *ctx, uint8_t *base)"));
+    assert!(
+        emitted.contains("ctx->r[12] = ctx->lr;"),
+        "reading the link register should be emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("ctx->r[3] = (uint64_t)(int64_t)(7);"),
+        "loading a constant should be emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("return;"),
+        "returning should be emitted: {emitted}"
+    );
+
+    assert!(
+        out.join("xenolith.h").is_file(),
+        "the runtime header should be written beside the code"
+    );
+}
+
+/// Functions that cannot be lifted are the expected outcome, not a failure.
+#[test]
+fn lift_succeeds_when_only_some_functions_lift() {
+    // A function with a prologue that calls a second one, which holds an
+    // instruction with no semantics.
+    const WORDS: [u32; 8] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x4800_0011,
+        0x3821_0060,
+        0x4e80_0020,
+        0x6000_0000,
+        0x1000_008c,
+        0x4e80_0020,
+    ];
+
+    let source = std::env::temp_dir().join("xenolith-lift-partial.bin");
+    let out = std::env::temp_dir().join("xenolith-lift-partial-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = WORDS.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let (ok, stdout, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        out.to_str().unwrap(),
+        "--blockers",
+        source.to_str().unwrap()
+    );
+
+    assert!(ok, "partial coverage should still succeed: {stderr}");
+    assert!(
+        stdout.contains("not lifted"),
+        "the refusal should be reported: {stdout}"
+    );
+    assert!(
+        stdout.contains("vmrghw"),
+        "what blocked it should be named: {stdout}"
+    );
+}

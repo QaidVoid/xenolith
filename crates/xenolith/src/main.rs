@@ -5,6 +5,7 @@ mod disasm;
 mod input;
 mod inspect;
 mod keys;
+mod lift;
 
 use clap::{Parser, Subcommand};
 use miette::Result;
@@ -27,6 +28,8 @@ enum Command {
     Disasm(disasm::Args),
     /// Report the functions, blocks, and jump tables of an executable.
     Analyze(analyze::Args),
+    /// Emit C for the functions of an executable.
+    Lift(lift::Args),
 }
 
 fn main() -> Result<()> {
@@ -34,5 +37,6 @@ fn main() -> Result<()> {
         Command::Inspect(args) => inspect::run(&args),
         Command::Disasm(args) => disasm::run(&args),
         Command::Analyze(args) => analyze::run(&args),
+        Command::Lift(args) => lift::run(&args),
     }
 }
