@@ -58,6 +58,41 @@ pub enum Error {
         len: usize,
     },
 
+    /// The container is encrypted but no key material was supplied.
+    ///
+    /// This crate compiles in no key constants, so decoding an encrypted image
+    /// always depends on the caller providing one.
+    #[error("the image is encrypted and no key material was supplied")]
+    KeyMaterialRequired,
+
+    /// The container declares an encryption scheme this crate cannot apply.
+    #[error("unsupported encryption scheme {value}")]
+    UnsupportedEncryption {
+        /// The scheme value that was not recognized.
+        value: u16,
+    },
+
+    /// Key material was supplied but did not hold 32 hexadecimal digits.
+    #[error("key material must hold 32 hexadecimal digits, found {digits}")]
+    KeyMaterialMalformed {
+        /// How many digits were actually present.
+        digits: usize,
+    },
+
+    /// Key material contained a character that is not a hexadecimal digit.
+    #[error("key material contains {digit:?}, which is not a hexadecimal digit")]
+    KeyMaterialInvalidDigit {
+        /// The offending character.
+        digit: char,
+    },
+
+    /// An encrypted image body was not a whole number of cipher blocks.
+    #[error("encrypted image body of {len} bytes is not a multiple of the 16 byte block size")]
+    ImageNotBlockAligned {
+        /// Length of the body that was rejected.
+        len: usize,
+    },
+
     /// The file format info declared a size that does not describe whole blocks.
     #[error("file format info declares an invalid size of {size} bytes")]
     FileFormatInfoInvalidSize {

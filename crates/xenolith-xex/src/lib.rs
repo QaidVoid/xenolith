@@ -10,13 +10,17 @@
 //! contents. Every parse is bounds checked and every rejection arrives as an
 //! [`Error`] rather than a panic. The crate contains no `unsafe` code.
 
+extern crate alloc;
+
 mod container;
+mod crypto;
 mod error;
 mod headers;
 mod reader;
 mod security;
 
 pub use container::{Container, Format, OptionalHeader, OptionalHeaderKey, OptionalHeaderValue};
+pub use crypto::KeyMaterial;
 pub use error::{Error, Result};
 pub use headers::{
     BasicBlock, CompressionType, EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary,

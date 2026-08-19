@@ -10,8 +10,13 @@
 //! kept, but their contents are not interpreted, so an unrecognized key costs
 //! nothing and is preserved for callers rather than discarded.
 
+use alloc::borrow::Cow;
+
+use crate::crypto::{KeyMaterial, decrypt_image, unwrap_session_key};
 use crate::error::{Error, Result};
-use crate::headers::{ExecutionInfo, FileFormatInfo, ImportLibrary, keys, parse_import_libraries};
+use crate::headers::{
+    EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary, keys, parse_import_libraries,
+};
 use crate::reader::Reader;
 use crate::security::SecurityInfo;
 
@@ -123,6 +128,7 @@ pub struct OptionalHeader<'a> {
 /// the header and the directory has been interpreted.
 #[derive(Debug, Clone)]
 pub struct Container<'a> {
+    bytes: &'a [u8],
     format: Format,
     module_flags: u32,
     image_offset: u32,
@@ -185,6 +191,7 @@ impl<'a> Container<'a> {
             payload(keys::IMAGE_BASE_ADDRESS).and_then(OptionalHeaderValue::inline);
 
         Ok(Self {
+            bytes,
             format,
             module_flags,
             image_offset,
@@ -197,6 +204,55 @@ impl<'a> Container<'a> {
             entry_point,
             image_base_address,
         })
+    }
+
+    /// Returns the stored image body, the bytes from the image offset onward.
+    ///
+    /// These are still encrypted and still compressed if the container says so.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the image offset lies outside the file.
+    pub fn body(&self) -> Result<&'a [u8]> {
+        let mut reader =
+            Reader::new(self.bytes).at(u64::from(self.image_offset), "image_offset")?;
+        let remaining = reader.remaining();
+        reader.take(remaining, "image_body")
+    }
+
+    /// Returns how the image body is encrypted.
+    ///
+    /// Containers carrying no file format info are treated as unencrypted,
+    /// since there is nothing to say otherwise.
+    #[must_use]
+    pub fn encryption(&self) -> EncryptionType {
+        self.file_format_info
+            .as_ref()
+            .map_or(EncryptionType::None, FileFormatInfo::encryption)
+    }
+
+    /// Returns the image body with any encryption removed.
+    ///
+    /// An unencrypted body is borrowed rather than copied. Decryption does not
+    /// decompress, so the result still follows the declared compression scheme.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KeyMaterialRequired`] when the body is encrypted and
+    /// `key` is `None`, and an error when the body is not a whole number of
+    /// cipher blocks or the encryption scheme is not recognized.
+    pub fn decrypt_body(&self, key: Option<&KeyMaterial>) -> Result<Cow<'a, [u8]>> {
+        let body = self.body()?;
+
+        match self.encryption() {
+            EncryptionType::None => Ok(Cow::Borrowed(body)),
+            EncryptionType::Encrypted => {
+                let key = key.ok_or(Error::KeyMaterialRequired)?;
+                let session = unwrap_session_key(self.security_info.encrypted_session_key(), key);
+                Ok(Cow::Owned(decrypt_image(body, &session)?))
+            }
+            EncryptionType::Unknown(value) => Err(Error::UnsupportedEncryption { value }),
+        }
     }
 
     /// Returns the security info block, which describes the image layout.
@@ -401,6 +457,8 @@ pub(crate) mod build {
         export_table: u32,
         descriptors: Vec<(u32, u8)>,
         override_descriptor_count: Option<u32>,
+        session_key: [u8; 16],
+        body: Vec<u8>,
         entries: Vec<(u32, Payload)>,
         override_count: Option<u32>,
     }
@@ -419,6 +477,8 @@ pub(crate) mod build {
                 export_table: 0,
                 descriptors: vec![(1, 1)],
                 override_descriptor_count: None,
+                session_key: [0; 16],
+                body: Vec::new(),
                 entries: Vec::new(),
                 override_count: None,
             }
@@ -484,6 +544,26 @@ pub(crate) mod build {
             self
         }
 
+        /// Sets the wrapped session key recorded in the security info.
+        pub(crate) fn session_key(mut self, key: [u8; 16]) -> Self {
+            self.session_key = key;
+            self
+        }
+
+        /// Appends an image body, and points the image offset at it.
+        pub(crate) fn body(mut self, body: Vec<u8>) -> Self {
+            self.body = body;
+            self
+        }
+
+        /// Adds a file format info entry describing encryption and compression.
+        pub(crate) fn file_format(self, encryption: u16, compression: u16, tail: &[u8]) -> Self {
+            let mut payload = encryption.to_be_bytes().to_vec();
+            payload.extend_from_slice(&compression.to_be_bytes());
+            payload.extend_from_slice(tail);
+            self.variable(0x0003, &payload)
+        }
+
         /// Adds an entry whose data is the directory value itself.
         pub(crate) fn inline(mut self, id: u32, value: u32) -> Self {
             self.entries
@@ -542,7 +622,7 @@ pub(crate) mod build {
             bytes.extend_from_slice(&self.import_table_count.to_be_bytes());
             bytes.extend_from_slice(&[0u8; 20]);
             bytes.extend_from_slice(&[0u8; 16]);
-            bytes.extend_from_slice(&[0u8; 16]);
+            bytes.extend_from_slice(&self.session_key);
             bytes.extend_from_slice(&self.export_table.to_be_bytes());
             bytes.extend_from_slice(&[0u8; 20]);
             bytes.extend_from_slice(&0u32.to_be_bytes());
@@ -586,17 +666,23 @@ pub(crate) mod build {
             let security_info_offset = self
                 .security_info_offset
                 .unwrap_or_else(|| u32::try_from(security_offset).unwrap_or(u32::MAX));
+            let image_offset = if self.body.is_empty() {
+                self.image_offset
+            } else {
+                u32::try_from(data_start + trailing.len()).unwrap_or(u32::MAX)
+            };
 
-            let mut bytes = Vec::with_capacity(data_start + trailing.len());
+            let mut bytes = Vec::with_capacity(data_start + trailing.len() + self.body.len());
             bytes.extend_from_slice(&self.magic);
             bytes.extend_from_slice(&self.module_flags.to_be_bytes());
-            bytes.extend_from_slice(&self.image_offset.to_be_bytes());
+            bytes.extend_from_slice(&image_offset.to_be_bytes());
             bytes.extend_from_slice(&0u32.to_be_bytes());
             bytes.extend_from_slice(&security_info_offset.to_be_bytes());
             bytes.extend_from_slice(&count.to_be_bytes());
             bytes.extend_from_slice(&directory);
             bytes.extend_from_slice(&security);
             bytes.extend_from_slice(&trailing);
+            bytes.extend_from_slice(&self.body);
             bytes
         }
     }
@@ -631,6 +717,104 @@ mod tests {
         assert_eq!(security.load_address(), 0x8200_0000);
         assert_eq!(security.image_size(), 0x0002_0000);
         assert_eq!(security.export_table_address(), None);
+    }
+
+    /// The static key unwraps a session key, and the session key unwraps the
+    /// body. Both steps have to line up for a round trip to succeed, so this
+    /// covers the two of them together rather than only the primitives.
+    #[test]
+    fn decrypts_an_encrypted_body() {
+        let static_key = [0x11u8; 16];
+        let session = [0x42u8; 16];
+        let wrapped: [u8; 16] = crate::crypto::encrypt(&session, &static_key)
+            .try_into()
+            .unwrap();
+        let plaintext: Vec<u8> = (0..64u8).collect();
+
+        let bytes = ContainerBuilder::new()
+            .file_format(1, 0, &[])
+            .session_key(wrapped)
+            .body(crate::crypto::encrypt(&plaintext, &session))
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+        let decrypted = container
+            .decrypt_body(Some(&KeyMaterial::new(static_key)))
+            .unwrap();
+
+        assert_eq!(decrypted.as_ref(), plaintext.as_slice());
+    }
+
+    #[test]
+    fn passes_an_unencrypted_body_through_without_copying() {
+        let body = vec![9u8, 8, 7, 6];
+        let bytes = ContainerBuilder::new()
+            .file_format(0, 0, &[])
+            .body(body.clone())
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+        let passed = container.decrypt_body(None).unwrap();
+
+        assert!(matches!(passed, Cow::Borrowed(_)), "body was copied");
+        assert_eq!(passed.as_ref(), body.as_slice());
+    }
+
+    #[test]
+    fn rejects_an_encrypted_body_without_key_material() {
+        let bytes = ContainerBuilder::new()
+            .file_format(1, 0, &[])
+            .body(vec![0u8; 16])
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+
+        assert_eq!(
+            container.decrypt_body(None).unwrap_err(),
+            Error::KeyMaterialRequired
+        );
+    }
+
+    #[test]
+    fn rejects_an_unrecognized_encryption_scheme() {
+        let bytes = ContainerBuilder::new()
+            .file_format(9, 0, &[])
+            .body(vec![0u8; 16])
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+
+        assert_eq!(
+            container.decrypt_body(None).unwrap_err(),
+            Error::UnsupportedEncryption { value: 9 }
+        );
+    }
+
+    #[test]
+    fn rejects_an_encrypted_body_that_is_not_whole_blocks() {
+        let bytes = ContainerBuilder::new()
+            .file_format(1, 0, &[])
+            .body(vec![0u8; 20])
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+
+        assert_eq!(
+            container
+                .decrypt_body(Some(&KeyMaterial::new([0; 16])))
+                .unwrap_err(),
+            Error::ImageNotBlockAligned { len: 20 }
+        );
+    }
+
+    #[test]
+    fn a_container_without_file_format_info_reads_as_unencrypted() {
+        let bytes = ContainerBuilder::new().body(vec![1u8; 16]).build();
+
+        let container = Container::parse(&bytes).unwrap();
+
+        assert_eq!(container.encryption(), EncryptionType::None);
+        assert!(container.decrypt_body(None).is_ok());
     }
 
     #[test]

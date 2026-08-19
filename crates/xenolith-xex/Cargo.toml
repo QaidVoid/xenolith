@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aes = "0.9.2"
+cbc = { version = "0.2.1", features = ["block-padding"] }
 thiserror = "2.0.20"
 
 [lints]
