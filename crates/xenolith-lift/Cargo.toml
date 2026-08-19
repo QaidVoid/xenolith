@@ -13,3 +13,6 @@ xenolith-ppc = { version = "0.1.0", path = "../xenolith-ppc" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+xenolith-xex = { path = "../xenolith-xex" }

@@ -989,6 +989,7 @@ version = "0.1.0"
 dependencies = [
  "xenolith-analysis",
  "xenolith-ppc",
+ "xenolith-xex",
 ]
 
 [[package]]

@@ -178,6 +178,13 @@ fn compared_field(instruction: Instruction) -> u8 {
 /// difference afterwards.
 #[must_use]
 pub fn effect_of(instruction: Instruction) -> Option<Effect> {
+    // Adding nothing to nothing and discarding it is how doing nothing is
+    // written. Reporting the register it names as read and written would be
+    // true of the encoding and false of the instruction.
+    if is_nothing(instruction) {
+        return Some(Effect::default());
+    }
+
     let shape = shape_of(instruction.opcode())?;
     let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
     let mut effect = Effect::default();
@@ -210,13 +217,17 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
                 effect.read(Location::General(ra));
             }
         }
+        // A compare copies the summary overflow bit into the field it writes,
+        // so it reads the exception register as well as the operands.
         Shape::CompareBoth => {
             effect.read(Location::General(ra));
             effect.read(Location::General(rb));
+            effect.read(Location::Exception);
             effect.write(Location::Condition(compared_field(instruction)));
         }
         Shape::CompareImmediate => {
             effect.read(Location::General(ra));
+            effect.read(Location::Exception);
             effect.write(Location::Condition(compared_field(instruction)));
         }
     }
@@ -224,8 +235,14 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
     // Both bits are only meaningful where the form carries them. Every other
     // form spends them on something else, so reading them unguarded would have
     // loading a constant update a condition field.
+    //
+    // Recording a result copies the summary overflow bit into the field, the
+    // same way a compare does, so it reads the exception register too.
     let form = instruction.form();
-    if form.is_some_and(Form::has_record_bit) && instruction.record_bit() {
+    let records = (form.is_some_and(Form::has_record_bit) && instruction.record_bit())
+        || always_records(instruction.opcode());
+    if records {
+        effect.read(Location::Exception);
         effect.write(Location::Condition(RECORD_FIELD));
     }
     if form.is_some_and(Form::has_overflow_bit) && instruction.overflow_enable() {
@@ -233,7 +250,7 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
     }
     // Carrying in or out is carried through the exception register, so an
     // operation that does either touches it whatever its shape.
-    if carries(instruction.opcode()) {
+    if carries(instruction.opcode()) || shifts_out_a_carry(instruction.opcode()) {
         effect.write(Location::Exception);
     }
     if extends_a_carry(instruction.opcode()) {
@@ -241,6 +258,23 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
     }
 
     Some(effect)
+}
+
+/// Returns whether an operation records a result whatever its bits say.
+///
+/// The logical immediates that test rather than compute have no record bit to
+/// set, because they always set one. Their spelling carries the dot for that
+/// reason rather than as a variant.
+fn always_records(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::Andi | Opcode::Andis)
+}
+
+/// Returns whether an operation records a carry out into the exception register.
+///
+/// The arithmetic shifts do, because a right shift of a negative value has to
+/// say whether any one bits were shifted out.
+fn shifts_out_a_carry(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::Sraw | Opcode::Srawi | Opcode::Srad)
 }
 
 /// Returns whether adding to register zero means adding to nothing.
@@ -264,6 +298,19 @@ fn carries(opcode: Opcode) -> bool {
 /// Returns whether an operation reads a carry in.
 fn extends_a_carry(opcode: Opcode) -> bool {
     matches!(opcode, Opcode::Adde | Opcode::Subfe)
+}
+
+/// Returns whether an instruction does nothing at all.
+///
+/// Only one spelling means this: adding nothing to nothing and discarding it.
+/// Combining a register with itself does write that register, with the value it
+/// already held, and is reported as such even where a timing hint is spelled
+/// that way.
+fn is_nothing(instruction: Instruction) -> bool {
+    instruction.opcode() == Opcode::Ori
+        && instruction.rt() == 0
+        && instruction.ra() == 0
+        && instruction.immediate() == 0
 }
 
 /// Returns whether an operation has semantics.
@@ -362,13 +409,54 @@ mod tests {
         );
     }
 
+    /// A compare copies the summary overflow bit into the field it writes, so
+    /// the exception register is a source. Leaving it out was found by checking
+    /// the model against an independently produced corpus.
     #[test]
-    fn a_compare_writes_the_field_it_names() {
+    fn a_compare_writes_the_field_it_names_and_reads_the_exception_register() {
         // cmplwi cr6, r11, 0
         let effect = touches(0x2b0b_0000);
 
-        assert_eq!(effect.reads(), [Location::General(11)]);
+        assert_eq!(effect.reads(), [Location::General(11), Location::Exception]);
         assert_eq!(effect.writes(), [Location::Condition(6)]);
+    }
+
+    /// Recording a result copies the same bit the same way.
+    #[test]
+    fn recording_a_result_reads_the_exception_register() {
+        // and. r11, r11, r10
+        let effect = touches(0x7d6b_5039);
+
+        assert!(effect.reads().contains(&Location::Exception));
+    }
+
+    /// An arithmetic right shift says whether any one bits were shifted out.
+    #[test]
+    fn an_arithmetic_shift_writes_a_carry() {
+        // srawi r11, r11, 2
+        let effect = touches(0x7d6b_1670);
+
+        assert!(effect.writes().contains(&Location::Exception));
+    }
+
+    /// The logical immediates that test rather than compute always record, and
+    /// have no bit to say so because they have no variant that does not.
+    #[test]
+    fn a_testing_immediate_always_records() {
+        // andi. r9, r9, 1
+        let effect = touches(0x7129_0001);
+
+        assert!(effect.writes().contains(&Location::Condition(0)));
+    }
+
+    /// Adding nothing to nothing and discarding it is how doing nothing is
+    /// written, and it touches nothing.
+    #[test]
+    fn doing_nothing_touches_nothing() {
+        let effect = touches(0x6000_0000);
+
+        assert_eq!(effect.reads(), []);
+        assert_eq!(effect.writes(), []);
     }
 
     /// Adding an immediate to register zero adds to nothing, so nothing is read.
