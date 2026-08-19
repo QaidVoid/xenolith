@@ -19,10 +19,12 @@
 
 #[cfg(test)]
 mod differential;
+mod flow;
 mod form;
 mod instruction;
 mod table;
 
+pub use flow::{Flow, FlowKind};
 pub use form::Form;
 pub use instruction::Instruction;
 pub use table::Opcode;

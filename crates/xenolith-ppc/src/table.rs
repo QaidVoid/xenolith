@@ -99,6 +99,8 @@ macro_rules! instructions {
 instructions! {
     primary {
         D {
+            2 => Tdi = "tdi";
+            3 => Twi = "twi";
             7 => Mulli = "mulli";
             8 => Subfic = "subfic";
             10 => Cmpli = "cmpli";
@@ -130,10 +132,38 @@ instructions! {
             46 => Lmw = "lmw";
             47 => Stmw = "stmw";
         }
+        I {
+            18 => B = "b";
+        }
+        B {
+            16 => Bc = "bc";
+        }
+        SC {
+            17 => Sc = "sc";
+        }
         M {
             20 => Rlwimi = "rlwimi";
             21 => Rlwinm = "rlwinm";
             23 => Rlwnm = "rlwnm";
+        }
+    }
+
+    extended 19 {
+        XL {
+            0 => Mcrf = "mcrf";
+            16 => Bclr = "bclr";
+            18 => Rfid = "rfid";
+            33 => Crnor = "crnor";
+            129 => Crandc = "crandc";
+            150 => Isync = "isync";
+            193 => Crxor = "crxor";
+            225 => Crnand = "crnand";
+            257 => Crand = "crand";
+            274 => Hrfid = "hrfid";
+            289 => Creqv = "creqv";
+            417 => Crorc = "crorc";
+            449 => Cror = "cror";
+            528 => Bcctr = "bcctr";
         }
     }
 
@@ -168,6 +198,7 @@ instructions! {
     extended 31 {
         X {
             0 => Cmp = "cmp";
+            4 => Tw = "tw";
             19 => Mfcr = "mfcr";
             20 => Lwarx = "lwarx";
             21 => Ldx = "ldx";
@@ -182,6 +213,7 @@ instructions! {
             55 => Lwzux = "lwzux";
             58 => Cntlzd = "cntlzd";
             60 => Andc = "andc";
+            68 => Td = "td";
             83 => Mfmsr = "mfmsr";
             84 => Ldarx = "ldarx";
             86 => Dcbf = "dcbf";
@@ -217,6 +249,7 @@ instructions! {
             444 => Or = "or";
             467 => Mtspr = "mtspr";
             476 => Nand = "nand";
+            512 => Mcrxr = "mcrxr";
             532 => Ldbrx = "ldbrx";
             533 => Lswx = "lswx";
             534 => Lwbrx = "lwbrx";

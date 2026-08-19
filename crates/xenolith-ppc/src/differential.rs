@@ -81,6 +81,11 @@ const EXTENDED_MNEMONICS: &[(&str, &str)] = &[
     ("clrlsldi", "rldic"),
     ("insrdi", "rldimi"),
     ("rotld", "rldcl"),
+    // Condition register logical operations with a repeated operand.
+    ("crnot", "crnor"),
+    ("crclr", "crxor"),
+    ("crset", "creqv"),
+    ("crmove", "cror"),
     // Condition register moves that target a single field. The console treats
     // these as hints over the full width forms, and reading one as the full
     // width form is the conservative direction: it moves more than was asked
@@ -228,20 +233,34 @@ const HINT_ALIASES: &[(&str, &[&str])] = &[
     ("dcbtst", &["dcbtstt", "dcbtstct"]),
     ("dcbz", &["dcbzl"]),
     ("eieio", &["mbar"]),
+    ("sc", &["scv"]),
     ("sync", &["lwsync", "ptesync", "hwsync", "msync", "waitrsv"]),
 ];
 
 /// Instructions the oracle does not implement, so it cannot check them.
 ///
 /// These are real encodings the architecture defines and this crate decodes.
-/// LLVM's PowerPC disassembler has no entry for the indexed string operations
-/// on either its 32 or 64-bit target, so there is nothing to compare against.
+/// LLVM's PowerPC disassembler has no entry for these on either its 32 or
+/// 64-bit target, so there is nothing to compare against. The indexed string
+/// operations it simply never implemented. `mcrxr` it did implement once and
+/// then dropped, because a later revision of the architecture phased the
+/// instruction out, whereas the console predates that revision and has it.
 ///
 /// Listing them keeps the coverage assertion meaningful. An instruction that
 /// silently stopped being compared for any other reason still fails, and if a
 /// later LLVM gains support the list is asserted to be stale rather than
 /// quietly excluding an instruction that could now be checked.
-const ORACLE_UNSUPPORTED: &[&str] = &["lswx", "stswx"];
+const ORACLE_UNSUPPORTED: &[&str] = &["lswx", "stswx", "mcrxr"];
+
+/// Returns whether a branch rendering names one of the register branches.
+///
+/// The conditional branch families are told apart by how their names end, since
+/// every extended mnemonic for a branch through the link or count register
+/// keeps that ending whatever condition it encodes.
+fn is_register_branch(printed: &str) -> bool {
+    let without_link = printed.trim_end_matches('l');
+    without_link.ends_with("lr") || without_link.ends_with("ctr")
+}
 
 /// Returns whether the oracle's rendering agrees with the operation we expect.
 ///
@@ -263,10 +282,23 @@ fn agrees(expected: &str, printed: &str) -> bool {
         }
     }
 
+    // A branch prediction hint is a suffix on the mnemonic rather than a
+    // different instruction.
+    let printed = printed.trim_end_matches(['+', '-']);
+
     match expected {
         "mfspr" => printed.starts_with("mf"),
         "mtspr" => printed.starts_with("mt"),
         "mftb" => printed.starts_with("mftb"),
+        // The conditional branches have far too many extended mnemonics to
+        // list, one per condition and hint combination, so the families are
+        // separated structurally instead.
+        "b" | "bc" => printed.starts_with('b') && !is_register_branch(printed),
+        "bclr" => printed.trim_end_matches('l').ends_with("lr"),
+        "bcctr" => printed.trim_end_matches('l').ends_with("ctr"),
+        // The trap conditions are spelled into the mnemonic the same way.
+        "tw" | "twi" => printed.starts_with("tw") || printed == "trap",
+        "td" | "tdi" => printed.starts_with("td"),
         _ => false,
     }
 }

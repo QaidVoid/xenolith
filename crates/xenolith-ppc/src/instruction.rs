@@ -6,6 +6,7 @@
 //! of instructions and every later stage decodes them, so that size is the
 //! difference between an analyzer holding the whole image comfortably and not.
 
+use crate::flow::{Flow, classify};
 use crate::form::Form;
 use crate::table::{Opcode, decode_opcode};
 
@@ -139,6 +140,58 @@ impl Instruction {
     #[must_use]
     pub const fn record_bit(self) -> bool {
         self.word & 1 != 0
+    }
+
+    /// Returns the branch condition field.
+    ///
+    /// Shares its position with the target register field. Meaningful only for
+    /// the branch instructions, where it says what to test before transferring.
+    #[must_use]
+    pub const fn branch_condition(self) -> u32 {
+        (self.word >> 21) & 0x1f
+    }
+
+    /// Returns the condition register bit a branch tests.
+    #[must_use]
+    pub const fn branch_condition_bit(self) -> u32 {
+        (self.word >> 16) & 0x1f
+    }
+
+    /// Returns whether the link bit is set.
+    ///
+    /// A set link bit records the following address, which is what makes a
+    /// branch a call rather than a jump. Shares its position with the record
+    /// bit, so it is only meaningful on a form that has one.
+    #[must_use]
+    pub const fn link_bit(self) -> bool {
+        self.word & 1 != 0
+    }
+
+    /// Returns whether the absolute addressing bit is set.
+    ///
+    /// A set bit means the displacement is the target rather than an offset
+    /// from here. Only the two branch forms with a displacement carry it, and
+    /// the register branches spend the same position on their extended opcode.
+    #[must_use]
+    pub fn absolute_bit(self) -> bool {
+        self.form().is_some_and(Form::has_absolute_bit) && self.word & 0b10 != 0
+    }
+
+    /// Returns what this instruction does to control flow at `address`.
+    ///
+    /// The address matters because a relative branch resolves against it.
+    ///
+    /// ```
+    /// use xenolith_ppc::{FlowKind, Instruction};
+    ///
+    /// // blr, the canonical return
+    /// let flow = Instruction::decode(0x4e80_0020).flow(0x8200_1000);
+    /// assert_eq!(flow.kind, FlowKind::Return);
+    /// assert!(!flow.falls_through);
+    /// ```
+    #[must_use]
+    pub fn flow(self, address: u32) -> Flow {
+        classify(self, address)
     }
 
     /// Returns whether the overflow enable bit is set.

@@ -26,6 +26,17 @@ pub enum Form {
     /// extended opcode, which is how the doubleword accesses fit alongside each
     /// other under one primary opcode.
     DS,
+    /// A 24-bit displacement, an absolute addressing bit, and a link bit. Used
+    /// only by the unconditional branch.
+    I,
+    /// A branch condition, a condition register bit, a 14-bit displacement, and
+    /// the absolute addressing and link bits.
+    B,
+    /// A system call, which carries only a level field.
+    SC,
+    /// A branch through a register, sharing the extended opcode layout of
+    /// [`Form::X`] but ending in a link bit rather than a record bit.
+    XL,
     /// Three register fields, a 10-bit extended opcode, and the record bit.
     X,
     /// As [`Form::X`], but the extended opcode is nine bits and the bit above it
@@ -50,8 +61,8 @@ impl Form {
     #[must_use]
     pub const fn extended_opcode_shift(self) -> u32 {
         match self {
-            Self::D | Self::M | Self::DS => 0,
-            Self::X | Self::XO | Self::MDS => 1,
+            Self::D | Self::M | Self::DS | Self::I | Self::B | Self::SC => 0,
+            Self::X | Self::XL | Self::XO | Self::MDS => 1,
             Self::XS | Self::MD => 2,
         }
     }
@@ -61,9 +72,9 @@ impl Form {
     #[must_use]
     pub const fn extended_opcode_field(self) -> u32 {
         match self {
-            Self::D | Self::M => 0,
+            Self::D | Self::M | Self::I | Self::B | Self::SC => 0,
             Self::DS => 0x3,
-            Self::X => 0x3ff,
+            Self::X | Self::XL => 0x3ff,
             Self::XO | Self::XS => 0x1ff,
             Self::MD => 0x7,
             Self::MDS => 0xf,
@@ -93,6 +104,24 @@ impl Form {
         )
     }
 
+    /// Returns whether this form has a link bit at the bottom of the word.
+    ///
+    /// A link bit turns a branch into a call. Like a record bit it selects a
+    /// variant of one instruction, so it must stay outside the identifying mask.
+    #[must_use]
+    pub const fn has_link_bit(self) -> bool {
+        matches!(self, Self::I | Self::B | Self::XL)
+    }
+
+    /// Returns whether this form carries an absolute addressing bit.
+    ///
+    /// Only the two forms with a displacement have one. The register branches
+    /// spend the same bit position on their extended opcode.
+    #[must_use]
+    pub const fn has_absolute_bit(self) -> bool {
+        matches!(self, Self::I | Self::B)
+    }
+
     /// Returns whether this form carries an extended opcode.
     #[must_use]
     pub const fn has_extended_opcode(self) -> bool {
@@ -115,6 +144,10 @@ mod tests {
         Form::D,
         Form::M,
         Form::DS,
+        Form::I,
+        Form::B,
+        Form::SC,
+        Form::XL,
         Form::X,
         Form::XO,
         Form::XS,
@@ -133,30 +166,49 @@ mod tests {
         }
     }
 
-    /// The record bit selects a variant of the same instruction, so a form that
-    /// has one must not let it identify the instruction.
+    /// A record bit and a link bit both select a variant of one instruction, so
+    /// a form carrying either must not let it identify the instruction.
     #[test]
-    fn no_mask_covers_a_record_bit_the_form_actually_has() {
+    fn no_mask_covers_a_variant_bit_the_form_actually_has() {
         for form in ALL {
-            if !form.has_record_bit() {
+            if !form.has_record_bit() && !form.has_link_bit() {
                 continue;
             }
-            assert_eq!(form.mask() & 1, 0, "{form:?} covers its record bit");
+            assert_eq!(form.mask() & 1, 0, "{form:?} covers its variant bit");
+        }
+    }
+
+    /// No form has both, since they occupy the same position.
+    #[test]
+    fn a_form_never_has_both_a_record_and_a_link_bit() {
+        for form in ALL {
+            assert!(
+                !(form.has_record_bit() && form.has_link_bit()),
+                "{form:?} claims both a record and a link bit"
+            );
+        }
+    }
+
+    /// The absolute addressing bit sits where the register branches keep part
+    /// of their extended opcode, so only the displacement forms can have one.
+    #[test]
+    fn only_displacement_forms_carry_an_absolute_bit() {
+        assert!(Form::I.has_absolute_bit());
+        assert!(Form::B.has_absolute_bit());
+
+        for form in ALL {
+            if form.has_absolute_bit() {
+                assert_eq!(form.mask() & 0b10, 0, "{form:?} covers its absolute bit");
+            }
         }
     }
 
     /// The forms without a record bit are the ones that spend the bottom of the
     /// word on something else, which is why the rule above has to be selective.
     #[test]
-    fn only_the_forms_that_spend_the_low_bits_lack_a_record_bit() {
-        assert!(!Form::D.has_record_bit());
-        assert!(!Form::DS.has_record_bit());
-
-        for form in ALL {
-            if matches!(form, Form::D | Form::DS) {
-                continue;
-            }
-            assert!(form.has_record_bit(), "{form:?} should have a record bit");
+    fn the_forms_without_a_record_bit_spend_the_low_bits_otherwise() {
+        for form in [Form::D, Form::DS, Form::I, Form::B, Form::SC, Form::XL] {
+            assert!(!form.has_record_bit(), "{form:?} should have no record bit");
         }
     }
 
@@ -222,6 +274,10 @@ mod tests {
         assert_eq!(Form::D.mask(), 0xfc00_0000);
         assert_eq!(Form::M.mask(), 0xfc00_0000);
         assert_eq!(Form::DS.mask(), 0xfc00_0003);
+        assert_eq!(Form::I.mask(), 0xfc00_0000);
+        assert_eq!(Form::B.mask(), 0xfc00_0000);
+        assert_eq!(Form::SC.mask(), 0xfc00_0000);
+        assert_eq!(Form::XL.mask(), 0xfc00_07fe);
         assert_eq!(Form::X.mask(), 0xfc00_07fe);
         assert_eq!(Form::XO.mask(), 0xfc00_03fe);
         assert_eq!(Form::XS.mask(), 0xfc00_07fc);
