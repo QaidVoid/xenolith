@@ -97,3 +97,112 @@ fn no_arguments_fails_with_usage() {
     assert!(!ok, "no arguments should fail");
     assert!(stderr.contains("Usage"), "no usage shown: {stderr}");
 }
+
+#[test]
+fn disasm_help_documents_its_arguments() {
+    let (ok, stdout, _) = run!("disasm", "--help");
+
+    assert!(ok, "disasm help should succeed");
+    for flag in ["--raw", "--base", "--start", "--length", "--end", "--sweep"] {
+        assert!(stdout.contains(flag), "{flag} not documented");
+    }
+}
+
+#[test]
+fn a_misaligned_start_is_refused() {
+    let path = std::env::temp_dir().join("xenolith-align.bin");
+    std::fs::write(&path, vec![0x60u8; 64]).unwrap();
+
+    let (ok, _, stderr) = run!(
+        "disasm",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--start",
+        "0x82000002",
+        path.to_str().unwrap()
+    );
+    let _ = std::fs::remove_file(&path);
+
+    assert!(!ok, "a misaligned start should fail");
+    assert!(
+        stderr.contains("aligned"),
+        "the error did not explain the alignment rule: {stderr}"
+    );
+}
+
+#[test]
+fn a_range_outside_the_image_is_refused() {
+    let path = std::env::temp_dir().join("xenolith-range.bin");
+    std::fs::write(&path, vec![0x60u8; 64]).unwrap();
+
+    let (ok, _, stderr) = run!(
+        "disasm",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--start",
+        "0x90000000",
+        path.to_str().unwrap()
+    );
+    let _ = std::fs::remove_file(&path);
+
+    assert!(!ok, "an unmapped range should fail");
+    assert!(!stderr.contains("panicked"), "the tool panicked: {stderr}");
+}
+
+/// A word that decodes and a word that does not must both appear, so that a
+/// sweep of a range never silently skips anything.
+#[test]
+fn disassembles_a_raw_image_marking_undecoded_words() {
+    let path = std::env::temp_dir().join("xenolith-disasm.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0x3860_0005u32.to_be_bytes()); // a load immediate
+    bytes.extend_from_slice(&0x17ff_ffffu32.to_be_bytes()); // an unassigned primary
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (ok, stdout, _) = run!(
+        "disasm",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--start",
+        "0x82000000",
+        "--length",
+        "8",
+        path.to_str().unwrap()
+    );
+    let _ = std::fs::remove_file(&path);
+
+    assert!(ok, "disassembly should succeed");
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 2, "one line per word: {stdout}");
+    assert!(lines[0].contains("0x82000000"), "{stdout}");
+    assert!(
+        lines[1].contains(".long"),
+        "the undecoded word was not marked"
+    );
+}
+
+#[test]
+fn a_sweep_reports_coverage() {
+    let path = std::env::temp_dir().join("xenolith-sweep.bin");
+    let mut bytes = Vec::new();
+    for _ in 0..16 {
+        bytes.extend_from_slice(&0x3860_0005u32.to_be_bytes());
+    }
+    bytes.extend_from_slice(&0x17ff_ffffu32.to_be_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (ok, stdout, _) = run!("disasm", "--raw", "--sweep", path.to_str().unwrap());
+    let _ = std::fs::remove_file(&path);
+
+    assert!(ok, "sweep should succeed");
+    assert!(stdout.contains("swept 17 instruction words"), "{stdout}");
+    assert!(stdout.contains("decoded"), "{stdout}");
+    assert!(stdout.contains("undecoded"), "{stdout}");
+    assert!(
+        stdout.contains("17ffffff"),
+        "the undecoded encoding was not listed: {stdout}"
+    );
+}
