@@ -339,6 +339,13 @@ const PROLOGUE_WINDOW: u32 = 4;
 /// function out of data.
 const PROLOGUE_SIGNALS: usize = 2;
 
+/// How many times scanning and walking may alternate.
+///
+/// Each round can only add function starts, and there are finitely many
+/// addresses, so the alternation settles on its own. The bound is there so that
+/// termination does not depend on that argument holding for every input.
+const MAX_SCAN_ROUNDS: usize = 16;
+
 /// Counts the signs of a function prologue at an address.
 ///
 /// The three come from reading real code. A function reads the link register
@@ -479,12 +486,23 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
 
     let mut walked = walk_to_fixed_point(image, &helpers, &mut origins);
 
-    // Discovery reaches what calls reach. This looks for what they do not, and
-    // discovery runs again from whatever it finds.
-    let scanned = scan_for_prologues(image, &helpers, &walked);
-    if !scanned.is_empty() {
-        for address in scanned {
-            origins.entry(address).or_insert(Origin::Scanned);
+    // Discovery reaches what calls reach. Scanning looks for what they do not,
+    // and discovery runs again from whatever it finds.
+    //
+    // The two alternate rather than running once each. Walking again with more
+    // boundaries can shorten a function that had covered a region, and the code
+    // that function no longer claims is code scanning skipped over precisely
+    // because it had been claimed. One pass leaves all of that unfound.
+    for _ in 0..MAX_SCAN_ROUNDS {
+        let mut added = false;
+        for address in scan_for_prologues(image, &helpers, &walked) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+                slot.insert(Origin::Scanned);
+                added = true;
+            }
+        }
+        if !added {
+            break;
         }
         walked = walk_to_fixed_point(image, &helpers, &mut origins);
     }

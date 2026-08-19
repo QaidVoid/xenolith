@@ -455,3 +455,77 @@ fn recovered_tables_agree_with_the_reference() {
         disagreed.len()
     );
 }
+
+/// Reports the largest runs of executable words no function claimed.
+///
+/// Coverage on its own says how much was missed but nothing about what. These
+/// runs are what the shortfall is made of, so classifying the largest of them
+/// is what turns a number into a reason.
+#[test]
+fn reports_the_largest_unclaimed_ranges() {
+    let (image, _) = supplied_image!();
+    let program = analyze(&image, &[]);
+
+    let mut claimed = std::collections::BTreeSet::new();
+    for function in program.functions() {
+        for block in &function.blocks {
+            let mut address = block.start;
+            while address < block.end {
+                claimed.insert(address);
+                address = address.saturating_add(4);
+            }
+        }
+    }
+
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for section in image.executable_sections() {
+        let mut address = section.start;
+        let mut run_start = None;
+
+        while u64::from(address) < section.end() {
+            match (claimed.contains(&address), run_start) {
+                (false, None) => run_start = Some(address),
+                (true, Some(start)) => {
+                    runs.push((start, address));
+                    run_start = None;
+                }
+                _ => {}
+            }
+            address = address.saturating_add(4);
+        }
+        if let Some(start) = run_start {
+            let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+            runs.push((start, end));
+        }
+    }
+
+    let total: u64 = runs.iter().map(|(s, e)| u64::from(e - s) / 4).sum();
+    eprintln!("unclaimed runs   {:>10}", runs.len());
+    eprintln!("unclaimed words  {total:>10}");
+
+    runs.sort_by_key(|(start, end)| std::cmp::Reverse(end - start));
+
+    eprintln!("\nlargest unclaimed runs");
+    for (start, end) in runs.iter().take(12) {
+        // Classifying a run needs to know whether it decodes at all. Padding and
+        // data do not, and a missed function does.
+        let mut decodable = 0u32;
+        let mut words = 0u32;
+        let mut address = *start;
+        while address < *end {
+            if let Ok(word) = image.u32(address) {
+                words += 1;
+                if !xenolith_ppc::Instruction::decode(word).is_unknown() {
+                    decodable += 1;
+                }
+            }
+            address = address.saturating_add(4);
+        }
+
+        eprintln!(
+            "  {start:#010x}..{end:#010x}  {:>7} words, {:>3}% decode",
+            words,
+            (decodable * 100).checked_div(words).unwrap_or(0)
+        );
+    }
+}

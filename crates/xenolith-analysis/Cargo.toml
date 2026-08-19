@@ -16,3 +16,4 @@ workspace = true
 
 [dev-dependencies]
 proptest = "1.11.0"
+xenolith-ppc = { path = "../xenolith-ppc" }
