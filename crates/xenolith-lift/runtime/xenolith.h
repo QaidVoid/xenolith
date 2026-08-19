@@ -203,6 +203,35 @@ static inline void xenolith_vector_set_f32(xenolith_vector *v, unsigned lane, fl
     xenolith_vector_set_u32(v, lane, bits);
 }
 
+/* Converting a single precision value to a fixed point one, with saturation.
+ *
+ * The instruction set clamps rather than wrapping, and a value that is not a
+ * number becomes zero. Writing a cast instead would be undefined for exactly
+ * the inputs this has to get right.
+ */
+static inline int32_t xenolith_saturate_signed(float value) {
+    if (!(value == value)) {
+        return 0;
+    }
+    if (value >= 2147483648.0f) {
+        return 2147483647;
+    }
+    if (value <= -2147483648.0f) {
+        return -2147483648;
+    }
+    return (int32_t)value;
+}
+
+static inline uint32_t xenolith_saturate_unsigned(float value) {
+    if (!(value == value) || value <= 0.0f) {
+        return 0;
+    }
+    if (value >= 4294967296.0f) {
+        return 4294967295u;
+    }
+    return (uint32_t)value;
+}
+
 /* The high half of a doubleword product.
  *
  * C has no type wider than the operands to hold it in, so it is built from the

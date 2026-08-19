@@ -122,6 +122,9 @@ enum Shape {
     VectorFromThree,
     /// Writes a vector register from an immediate alone.
     VectorFromImmediate,
+    /// Writes a vector register from two of them, and a condition field when
+    /// the recording form is used.
+    VectorCompare,
     /// Touches places its fields name rather than places its form implies.
     Named,
     /// Reads or writes memory at an address built from its operands.
@@ -371,15 +374,12 @@ fn floating_shape(opcode: Opcode) -> Option<Shape> {
     })
 }
 
-/// Returns how the remaining operations map onto what they touch.
-fn other_shape(opcode: Opcode) -> Option<Shape> {
+/// Returns how a vector operation maps onto what it touches.
+///
+/// Every one of these arrives twice, once as the standard extension and once as
+/// the console's, whose forms hold their register numbers in different bits.
+fn vector_shape(opcode: Opcode) -> Option<Shape> {
     Some(match opcode {
-        Opcode::Cmp | Opcode::Cmpl => Shape::CompareBoth,
-        Opcode::Cmpi | Opcode::Cmpli => Shape::CompareImmediate,
-
-        // The vector families, which arrive twice: once as the standard
-        // extension and once as the console's, whose forms hold their register
-        // numbers in different bits.
         Opcode::Vand
         | Opcode::Vand128
         | Opcode::Vandc
@@ -404,11 +404,38 @@ fn other_shape(opcode: Opcode) -> Option<Shape> {
         | Opcode::Vmaxfp
         | Opcode::Vmaxfp128
         | Opcode::Vminfp
-        | Opcode::Vminfp128 => Shape::VectorFromBoth,
+        | Opcode::Vminfp128
+        | Opcode::Vmsum3fp128
+        | Opcode::Vmsum4fp128 => Shape::VectorFromBoth,
 
-        Opcode::Vspltb | Opcode::Vsplth | Opcode::Vspltw | Opcode::Vspltw128 => {
-            Shape::VectorFromOne
-        }
+        Opcode::Vspltb
+        | Opcode::Vsplth
+        | Opcode::Vspltw
+        | Opcode::Vspltw128
+        | Opcode::Vcfsx
+        | Opcode::Vcfux
+        | Opcode::Vcsxwfp128
+        | Opcode::Vcuxwfp128
+        | Opcode::Vctsxs
+        | Opcode::Vctuxs
+        | Opcode::Vcfpsxws128
+        | Opcode::Vcfpuxws128
+        | Opcode::Vrfin
+        | Opcode::Vrfin128
+        | Opcode::Vrfiz
+        | Opcode::Vrfiz128
+        | Opcode::Vrfip
+        | Opcode::Vrfip128
+        | Opcode::Vrfim
+        | Opcode::Vrfim128
+        | Opcode::Vrefp
+        | Opcode::Vrefp128
+        | Opcode::Vrsqrtefp
+        | Opcode::Vrsqrtefp128
+        | Opcode::Vexptefp
+        | Opcode::Vexptefp128
+        | Opcode::Vlogefp
+        | Opcode::Vlogefp128 => Shape::VectorFromOne,
 
         Opcode::Vsel
         | Opcode::Vsel128
@@ -420,6 +447,33 @@ fn other_shape(opcode: Opcode) -> Option<Shape> {
         Opcode::Vspltisb | Opcode::Vspltish | Opcode::Vspltisw | Opcode::Vspltisw128 => {
             Shape::VectorFromImmediate
         }
+
+        Opcode::Vcmpeqfp
+        | Opcode::Vcmpgtfp
+        | Opcode::Vcmpgefp
+        | Opcode::Vcmpequb
+        | Opcode::Vcmpequh
+        | Opcode::Vcmpequw
+        | Opcode::Vcmpgtub
+        | Opcode::Vcmpgtuh
+        | Opcode::Vcmpgtuw
+        | Opcode::Vcmpgtsb
+        | Opcode::Vcmpgtsh
+        | Opcode::Vcmpgtsw => Shape::VectorCompare,
+
+        _ => return None,
+    })
+}
+
+/// Returns how the remaining operations map onto what they touch.
+fn other_shape(opcode: Opcode) -> Option<Shape> {
+    if let Some(shape) = vector_shape(opcode) {
+        return Some(shape);
+    }
+
+    Some(match opcode {
+        Opcode::Cmp | Opcode::Cmpl => Shape::CompareBoth,
+        Opcode::Cmpi | Opcode::Cmpli => Shape::CompareImmediate,
 
         // These name what they touch in a way no shape describes, so each is
         // handled where the shapes are applied rather than being given one.
@@ -664,6 +718,15 @@ fn vector_effect(shape: Shape, instruction: Instruction, effect: &mut Effect) {
             effect.read(Location::Vector(b));
         }
         Shape::VectorFromOne => effect.read(Location::Vector(b)),
+        // A comparison records into the seventh field rather than the first,
+        // and only when its recording bit is set.
+        Shape::VectorCompare => {
+            effect.read(Location::Vector(a));
+            effect.read(Location::Vector(b));
+            if instruction.word() & (1 << 10) != 0 {
+                effect.write(Location::Condition(6));
+            }
+        }
         Shape::VectorFromThree => {
             effect.read(Location::Vector(a));
             effect.read(Location::Vector(b));
@@ -748,7 +811,8 @@ fn apply(shape: Shape, instruction: Instruction, effect: &mut Effect) {
         Shape::VectorFromBoth
         | Shape::VectorFromOne
         | Shape::VectorFromThree
-        | Shape::VectorFromImmediate => vector_effect(shape, instruction, effect),
+        | Shape::VectorFromImmediate
+        | Shape::VectorCompare => vector_effect(shape, instruction, effect),
         Shape::Named => named_effect(instruction, effect),
         Shape::Memory(access) => {
             // An address built on register zero is built on nothing, the same

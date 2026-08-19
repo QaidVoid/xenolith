@@ -389,6 +389,205 @@ fn vector_arrangement(instruction: Instruction) -> Option<String> {
     Some(out)
 }
 
+/// Returns the C for a vector instruction that converts, rounds, estimates, or
+/// compares in single precision.
+fn vector_convert(instruction: Instruction) -> Option<String> {
+    let (d, a, b, _) = vector_operands(instruction);
+    let mut out = String::new();
+    let scale = u32::from(instruction.ra());
+
+    let at = |register: u32, width: &str, lane: &str| {
+        format!("xenolith_vector_{width}(&ctx->v[{register}], {lane})")
+    };
+
+    match instruction.opcode() {
+        // Fixed point to single precision, divided by a power of two the
+        // encoding names.
+        Opcode::Vcfsx | Opcode::Vcfux | Opcode::Vcsxwfp128 | Opcode::Vcuxwfp128 => {
+            let signed = matches!(instruction.opcode(), Opcode::Vcfsx | Opcode::Vcsxwfp128);
+            let value = if signed {
+                format!("(float)(int32_t){}", at(b, "u32", "lane"))
+            } else {
+                format!("(float){}", at(b, "u32", "lane"))
+            };
+            let divisor = two_to_the(scale);
+            let body = format!("({value}) / {divisor}f");
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        // Single precision to fixed point, multiplied by the same and clamped
+        // rather than wrapped.
+        Opcode::Vctsxs | Opcode::Vctuxs | Opcode::Vcfpsxws128 | Opcode::Vcfpuxws128 => {
+            let signed = matches!(instruction.opcode(), Opcode::Vctsxs | Opcode::Vcfpsxws128);
+            let clamp = if signed {
+                "xenolith_saturate_signed"
+            } else {
+                "xenolith_saturate_unsigned"
+            };
+            let multiplier = two_to_the(scale);
+            let body = format!(
+                "(uint32_t){clamp}({} * {multiplier}f)",
+                at(b, "f32", "lane")
+            );
+            vector_lanes(&mut out, d, 4, "u32", &body);
+        }
+        // The roundings, each named for the direction it takes.
+        Opcode::Vrfin
+        | Opcode::Vrfin128
+        | Opcode::Vrfiz
+        | Opcode::Vrfiz128
+        | Opcode::Vrfip
+        | Opcode::Vrfip128
+        | Opcode::Vrfim
+        | Opcode::Vrfim128 => {
+            let toward = match instruction.opcode() {
+                Opcode::Vrfin | Opcode::Vrfin128 => "__builtin_nearbyintf",
+                Opcode::Vrfiz | Opcode::Vrfiz128 => "__builtin_truncf",
+                Opcode::Vrfip | Opcode::Vrfip128 => "__builtin_ceilf",
+                _ => "__builtin_floorf",
+            };
+            let body = format!("{toward}({})", at(b, "f32", "lane"));
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        // The estimates. Hardware gives a few significant bits and this gives
+        // all of them, which is a difference two implementations of an estimate
+        // are allowed to have and the differential cannot compare exactly.
+        Opcode::Vrefp
+        | Opcode::Vrefp128
+        | Opcode::Vrsqrtefp
+        | Opcode::Vrsqrtefp128
+        | Opcode::Vexptefp
+        | Opcode::Vexptefp128
+        | Opcode::Vlogefp
+        | Opcode::Vlogefp128 => {
+            let source = at(b, "f32", "lane");
+            let body = match instruction.opcode() {
+                Opcode::Vrefp | Opcode::Vrefp128 => format!("1.0f / ({source})"),
+                Opcode::Vrsqrtefp | Opcode::Vrsqrtefp128 => {
+                    format!("1.0f / __builtin_sqrtf({source})")
+                }
+                Opcode::Vexptefp | Opcode::Vexptefp128 => format!("__builtin_exp2f({source})"),
+                _ => format!("__builtin_log2f({source})"),
+            };
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        // A dot product the console added, whose result reaches every lane.
+        Opcode::Vmsum3fp128 | Opcode::Vmsum4fp128 => {
+            let count = if instruction.opcode() == Opcode::Vmsum3fp128 {
+                3
+            } else {
+                4
+            };
+            let terms: Vec<String> = (0..count)
+                .map(|lane| {
+                    let lane = lane.to_string();
+                    format!("{} * {}", at(a, "f32", &lane), at(b, "f32", &lane))
+                })
+                .collect();
+            let _ = writeln!(out, "    {{ float dot = {};", terms.join(" + "));
+            let _ = writeln!(out, "    xenolith_vector t;");
+            let _ = writeln!(out, "    for (unsigned lane = 0; lane < 4; lane++) {{");
+            let _ = writeln!(out, "        xenolith_vector_set_f32(&t, lane, dot);");
+            let _ = writeln!(out, "    }}");
+            let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+        }
+
+        _ => return vector_compare(instruction),
+    }
+
+    Some(out)
+}
+
+/// Returns the C for a vector comparison.
+///
+/// Each lane becomes all ones or all zeroes, and the recording form also writes
+/// the seventh condition field with whether every lane matched and whether none
+/// did. That field is what a branch after one reads, so leaving it out would
+/// produce code that compiles and takes the wrong path.
+fn vector_compare(instruction: Instruction) -> Option<String> {
+    let (d, a, b, _) = vector_operands(instruction);
+    let (width, floating, test) = comparison(instruction.opcode())?;
+    let (name, count) = lane_width(width);
+    let bits = width * 8;
+
+    let read = |register: u32| {
+        if floating {
+            format!("xenolith_vector_f32(&ctx->v[{register}], lane)")
+        } else if test == ">s" {
+            format!("(int{bits}_t)xenolith_vector_{name}(&ctx->v[{register}], lane)")
+        } else {
+            format!("xenolith_vector_{name}(&ctx->v[{register}], lane)")
+        }
+    };
+    let operator = match test {
+        "==" => "==",
+        ">=" => ">=",
+        _ => ">",
+    };
+
+    let records = instruction.word() & (1 << 10) != 0;
+    let mut out = String::new();
+
+    if records {
+        let _ = writeln!(out, "    {{ xenolith_vector t; unsigned all = 1, none = 1;");
+    } else {
+        let _ = writeln!(out, "    {{ xenolith_vector t;");
+    }
+    let _ = writeln!(
+        out,
+        "    for (unsigned lane = 0; lane < {count}; lane++) {{"
+    );
+    let _ = writeln!(
+        out,
+        "        uint{bits}_t r = (({}) {operator} ({})) ? (uint{bits}_t)~(uint{bits}_t)0 : 0;",
+        read(a),
+        read(b)
+    );
+    if records {
+        let _ = writeln!(out, "        if (r) {{ none = 0; }} else {{ all = 0; }}");
+    }
+    let _ = writeln!(out, "        xenolith_vector_set_{name}(&t, lane, r);");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    ctx->v[{d}] = t;");
+    if records {
+        let _ = writeln!(out, "    ctx->cr[6].lt = (uint8_t)all;");
+        let _ = writeln!(out, "    ctx->cr[6].gt = 0;");
+        let _ = writeln!(out, "    ctx->cr[6].eq = (uint8_t)none;");
+        let _ = writeln!(out, "    ctx->cr[6].so = 0;");
+    }
+    let _ = writeln!(out, "    }}");
+
+    Some(out)
+}
+
+/// Returns the lane width, whether the lanes are floats, and which test a
+/// comparison applies.
+fn comparison(opcode: Opcode) -> Option<(u32, bool, &'static str)> {
+    Some(match opcode {
+        Opcode::Vcmpeqfp => (4, true, "=="),
+        Opcode::Vcmpgtfp => (4, true, ">"),
+        Opcode::Vcmpgefp => (4, true, ">="),
+        Opcode::Vcmpequb => (1, false, "=="),
+        Opcode::Vcmpequh => (2, false, "=="),
+        Opcode::Vcmpequw => (4, false, "=="),
+        Opcode::Vcmpgtub => (1, false, ">"),
+        Opcode::Vcmpgtuh => (2, false, ">"),
+        Opcode::Vcmpgtuw => (4, false, ">"),
+        Opcode::Vcmpgtsb => (1, false, ">s"),
+        Opcode::Vcmpgtsh => (2, false, ">s"),
+        Opcode::Vcmpgtsw => (4, false, ">s"),
+        _ => return None,
+    })
+}
+
+/// Returns `2` raised to a power, written so a compiler folds it.
+fn two_to_the(power: u32) -> String {
+    let mut value = 1.0f64;
+    for _ in 0..power.min(31) {
+        value *= 2.0;
+    }
+    format!("{value:.1}")
+}
+
 /// Returns the C for a vector instruction that computes in single precision.
 fn vector_float(instruction: Instruction) -> Option<String> {
     let (d, a, b, c) = vector_operands(instruction);
@@ -444,7 +643,7 @@ fn vector_float(instruction: Instruction) -> Option<String> {
             vector_lanes(&mut out, d, 4, "f32", &body);
         }
 
-        _ => return None,
+        _ => return vector_convert(instruction),
     }
 
     Some(out)

@@ -811,3 +811,44 @@ fn the_vector_lane_operations_lift() {
     );
     assert_eq!(compiles("vector_lanes_emitted", &emitted), Ok(()));
 }
+
+/// A comparison writes a lane mask, and the recording form also writes the
+/// field a branch after it reads.
+#[test]
+fn the_vector_comparisons_lift() {
+    // mflr r12; stwu r1, -96(r1);
+    // vcmpeqfp. v1,v2,v3; vcmpeqfp v4,v2,v3; vcfsx v1,v3,2; vctuxs v1,v3,2;
+    // addi r1, r1, 96; blr
+    const WORDS: [u32; 8] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x1022_1cc6,
+        0x1082_18c6,
+        0x1022_1b4a,
+        0x1022_1b8a,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the comparisons should lift");
+
+    assert_eq!(
+        emitted.matches("ctx->cr[6].lt = (uint8_t)all;").count(),
+        1,
+        "only the recording form should write the condition field: {emitted}"
+    );
+    assert!(
+        emitted.contains("? (uint32_t)~(uint32_t)0 : 0;"),
+        "a matching lane was not filled with ones: {emitted}"
+    );
+    // The scale divides on the way to a float and multiplies on the way back.
+    assert!(
+        emitted.contains(") / 4.0f)"),
+        "the scale did not divide: {emitted}"
+    );
+    assert!(
+        emitted.contains("xenolith_saturate_unsigned(") && emitted.contains("* 4.0f)"),
+        "the scale did not multiply, or the result was not clamped: {emitted}"
+    );
+    assert_eq!(compiles("vector_compare_emitted", &emitted), Ok(()));
+}
