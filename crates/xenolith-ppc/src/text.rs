@@ -142,6 +142,10 @@ impl fmt::Display for Rendered {
                 " v{rt}, v{ra}, v{rb}, v{}",
                 (instruction.word() >> 6) & 0x1f
             ),
+            // The extension's indexed loads and stores address memory through
+            // a pair of general purpose registers, so only the destination is a
+            // vector register. The rest of the extension forms take three.
+            Form::Vx128Ls => write!(f, " v{}, r{ra}, r{rb}", instruction.vector_d()),
             _ => write!(
                 f,
                 " v{}, v{}, v{}",
@@ -245,12 +249,12 @@ mod tests {
         assert_eq!(render(word, 0), "ori r4, r3, 5");
     }
 
+    /// The destination reaches past what standard vector encoding can name,
+    /// while the two address operands are ordinary general purpose registers.
+    /// Rendering all three as vector registers would misreport the address.
     #[test]
-    fn renders_an_extension_instruction_with_its_wide_registers() {
-        let text = render(0x100b_60cb, 0);
-
-        assert!(text.starts_with("lvx128"), "{text}");
-        assert!(text.contains("v64"), "the wide register was lost: {text}");
+    fn an_extension_load_names_a_wide_destination_and_plain_address_registers() {
+        assert_eq!(render(0x100b_60cb, 0), "lvx128 v64, r11, r12");
     }
 
     #[test]
