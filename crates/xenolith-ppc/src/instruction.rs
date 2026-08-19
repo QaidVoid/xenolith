@@ -194,6 +194,18 @@ impl Instruction {
         register_wide((high << 5) | low)
     }
 
+    /// Returns the special purpose register a move to or from one names.
+    ///
+    /// The field is ten bits stored as two halves in the opposite order to the
+    /// one they read in, which is why this is worth an accessor rather than
+    /// being extracted where it is needed.
+    #[must_use]
+    pub const fn spr(self) -> u32 {
+        let low = (self.word >> 16) & 0x1f;
+        let high = (self.word >> 11) & 0x1f;
+        (high << 5) | low
+    }
+
     /// Returns the branch condition field.
     ///
     /// Shares its position with the target register field. Meaningful only for
@@ -390,6 +402,27 @@ mod tests {
         assert_eq!(sign_extend_16(0x7fff), 32767);
         assert_eq!(sign_extend_16(0x8000), -32768);
         assert_eq!(sign_extend_16(0xffff), -1);
+    }
+
+    /// The link register is the special purpose register a prologue reads to
+    /// find where it was called from, so this is the one that has to be right.
+    #[test]
+    fn reads_a_special_purpose_register_number() {
+        // mflr r12, which the encoding stores as a move from register eight.
+        let instruction = Instruction::decode(0x7d88_02a6);
+
+        assert_eq!(instruction.opcode(), Opcode::Mfspr);
+        assert_eq!(instruction.spr(), 8);
+        assert_eq!(instruction.rt(), 12);
+    }
+
+    #[test]
+    fn a_special_purpose_register_uses_both_halves_of_its_field() {
+        // The halves are stored swapped, so a number above thirty one proves
+        // the high half is read from the right place.
+        let word = 0x7c00_02a6 | (9 << 16) | (8 << 11);
+
+        assert_eq!(Instruction::decode(word).spr(), (8 << 5) | 9);
     }
 
     #[test]

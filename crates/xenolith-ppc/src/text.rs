@@ -102,12 +102,7 @@ impl fmt::Display for Rendered {
         }
 
         let mnemonic = instruction.opcode().mnemonic();
-        let record = if instruction.record_bit() && has_record(instruction) {
-            "."
-        } else {
-            ""
-        };
-        write!(f, "{mnemonic}{record}")?;
+        write!(f, "{mnemonic}{}", suffixes(instruction))?;
 
         let Some(form) = instruction.form() else {
             return Ok(());
@@ -157,9 +152,30 @@ impl fmt::Display for Rendered {
     }
 }
 
-/// Returns whether the record bit means anything for this instruction.
-fn has_record(instruction: Instruction) -> bool {
-    instruction.form().is_some_and(Form::has_record_bit)
+/// Returns the letters a variant bit adds to a mnemonic.
+///
+/// The record bit marks an instruction that also updates a condition register
+/// field. The link bit marks a branch that records where to come back to, which
+/// is the difference between a call and a jump, so leaving it off makes a call
+/// read as something it is not.
+fn suffixes(instruction: Instruction) -> &'static str {
+    let Some(form) = instruction.form() else {
+        return "";
+    };
+
+    if form.has_record_bit() {
+        return if instruction.record_bit() { "." } else { "" };
+    }
+
+    match (
+        form.has_link_bit() && instruction.link_bit(),
+        instruction.absolute_bit(),
+    ) {
+        (true, true) => "la",
+        (true, false) => "l",
+        (false, true) => "a",
+        (false, false) => "",
+    }
 }
 
 #[cfg(test)]
@@ -200,9 +216,25 @@ mod tests {
         assert_eq!(render(0x4800_0020, 0x8200_1000), "b 0x82001020");
     }
 
+    /// The link bit is the difference between a call and a jump. Leaving it out
+    /// of the text makes a call read as something it is not, which is exactly
+    /// how a real prologue was misread while writing the analysis stage.
+    #[test]
+    fn the_link_and_absolute_bits_reach_the_mnemonic() {
+        assert_eq!(render(0x4800_0021, 0x8200_1000), "bl 0x82001020");
+        assert_eq!(render(0x4800_0022, 0x8200_1000), "ba 0x00000020");
+        assert_eq!(render(0x4800_0023, 0x8200_1000), "bla 0x00000020");
+    }
+
+    #[test]
+    fn a_register_branch_shows_its_link_bit_too() {
+        assert_eq!(render(0x4e80_0021, 0), "bclrl 20, 0");
+        assert_eq!(render(0x4e80_0421, 0), "bcctrl 20, 0");
+    }
+
     #[test]
     fn an_absolute_branch_ignores_the_instruction_address() {
-        assert_eq!(render(0x4800_0022, 0x8200_1000), "b 0x00000020");
+        assert_eq!(render(0x4800_0022, 0x8200_1000), "ba 0x00000020");
     }
 
     /// A branch through a register has no target to show, and inventing one
