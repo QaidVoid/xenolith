@@ -97,6 +97,17 @@ enum Shape {
     CompareBoth,
     /// Reads `ra` and an immediate and writes a condition field.
     CompareImmediate,
+    /// Writes a floating register from two of them.
+    FloatFromBoth,
+    /// Writes a floating register from one of them.
+    FloatFromOne,
+    /// Writes a floating register from three of them, which is a multiply and
+    /// an add taken together.
+    FloatFromThree,
+    /// Writes a floating register from one of them and the third operand.
+    FloatMultiply,
+    /// Reads two floating registers and writes a condition field.
+    FloatCompare,
     /// Touches places its fields name rather than places its form implies.
     Named,
     /// Reads or writes memory at an address built from its operands.
@@ -121,6 +132,7 @@ struct Access {
 enum Bank {
     General,
     Floating,
+    Vector,
 }
 
 impl Bank {
@@ -129,6 +141,7 @@ impl Bank {
         match self {
             Self::General => Location::General(register),
             Self::Floating => Location::Floating(register),
+            Self::Vector => Location::Vector(register),
         }
     }
 }
@@ -191,6 +204,19 @@ fn access_of(opcode: Opcode) -> Option<Access> {
         Opcode::Lfsx | Opcode::Lfdx => floating(true, true, false),
         Opcode::Lfsux | Opcode::Lfdux => floating(true, true, true),
         Opcode::Stfsx | Opcode::Stfdx | Opcode::Stfiwx => floating(false, true, false),
+
+        Opcode::Lvx | Opcode::Lvxl | Opcode::Lvx128 => Access {
+            loading: true,
+            bank: Bank::Vector,
+            indexed: true,
+            updating: false,
+        },
+        Opcode::Stvx | Opcode::Stvxl | Opcode::Stvx128 => Access {
+            loading: false,
+            bank: Bank::Vector,
+            indexed: true,
+            updating: false,
+        },
         Opcode::Stfsux | Opcode::Stfdux => floating(false, true, true),
 
         _ => return None,
@@ -202,6 +228,14 @@ fn access_of(opcode: Opcode) -> Option<Access> {
 /// An operation absent from here has no semantics yet, which is a normal
 /// outcome and is reported rather than approximated.
 fn shape_of(opcode: Opcode) -> Option<Shape> {
+    integer_shape(opcode)
+        .or_else(|| floating_shape(opcode))
+        .or_else(|| other_shape(opcode))
+}
+
+/// Returns how an integer or logical operation's fields map onto what it
+/// touches.
+fn integer_shape(opcode: Opcode) -> Option<Shape> {
     Some(match opcode {
         Opcode::Add
         | Opcode::Addc
@@ -227,7 +261,12 @@ fn shape_of(opcode: Opcode) -> Option<Shape> {
         | Opcode::Addic
         | Opcode::Mulli
         | Opcode::Subfic
-        | Opcode::Neg => Shape::TargetFromFirst,
+        | Opcode::Neg
+        | Opcode::AddicRc
+        | Opcode::Addze
+        | Opcode::Addme
+        | Opcode::Subfze
+        | Opcode::Subfme => Shape::TargetFromFirst,
 
         Opcode::And
         | Opcode::Andc
@@ -269,6 +308,56 @@ fn shape_of(opcode: Opcode) -> Option<Shape> {
 
         opcode if access_of(opcode).is_some() => Shape::Memory(access_of(opcode)?),
 
+        _ => return None,
+    })
+}
+
+/// Returns how a floating point operation's fields map onto what it touches.
+fn floating_shape(opcode: Opcode) -> Option<Shape> {
+    Some(match opcode {
+        // Floating point arithmetic reads and writes the floating bank, and
+        // is otherwise shaped like the integer arithmetic it mirrors.
+        Opcode::Fadd
+        | Opcode::Fadds
+        | Opcode::Fsub
+        | Opcode::Fsubs
+        | Opcode::Fdiv
+        | Opcode::Fdivs => Shape::FloatFromBoth,
+        Opcode::Fmr
+        | Opcode::Fneg
+        | Opcode::Fabs
+        | Opcode::Fnabs
+        | Opcode::Frsp
+        | Opcode::Fcfid
+        | Opcode::Fctiw
+        | Opcode::Fctiwz
+        | Opcode::Fctid
+        | Opcode::Fctidz
+        | Opcode::Fsqrt
+        | Opcode::Fsqrts
+        | Opcode::Fres
+        | Opcode::Frsqrte => Shape::FloatFromOne,
+        Opcode::Fmadd
+        | Opcode::Fmadds
+        | Opcode::Fmsub
+        | Opcode::Fmsubs
+        | Opcode::Fnmadd
+        | Opcode::Fnmadds
+        | Opcode::Fnmsub
+        | Opcode::Fnmsubs
+        | Opcode::Fsel => Shape::FloatFromThree,
+        // Multiplying takes its second operand from the field the fused forms
+        // put their third in, not from the one the rest of the arithmetic uses.
+        Opcode::Fmul | Opcode::Fmuls => Shape::FloatMultiply,
+        Opcode::Fcmpu | Opcode::Fcmpo => Shape::FloatCompare,
+
+        _ => return None,
+    })
+}
+
+/// Returns how the remaining operations map onto what they touch.
+fn other_shape(opcode: Opcode) -> Option<Shape> {
+    Some(match opcode {
         Opcode::Cmp | Opcode::Cmpl => Shape::CompareBoth,
         Opcode::Cmpi | Opcode::Cmpli => Shape::CompareImmediate,
 
@@ -295,6 +384,11 @@ fn shape_of(opcode: Opcode) -> Option<Shape> {
         | Opcode::Sync
         | Opcode::Isync
         | Opcode::Eieio
+        | Opcode::Dcbt
+        | Opcode::Dcbtst
+        | Opcode::Dcbf
+        | Opcode::Dcbst
+        | Opcode::Icbi
         | Opcode::Tw
         | Opcode::Twi
         | Opcode::Td
@@ -411,6 +505,14 @@ fn special(number: u32) -> Option<Location> {
     }
 }
 
+/// Returns the third operand of a fused arithmetic instruction.
+///
+/// It sits where no other form puts an operand, which is why the forms that
+/// take three are the only ones that read it.
+fn third_operand(instruction: Instruction) -> u8 {
+    u8::try_from((instruction.word() >> 6) & 0x1f).unwrap_or(0)
+}
+
 /// Returns the condition field a compare writes.
 ///
 /// The field number sits above the bit that selects a doubleword comparison,
@@ -419,24 +521,9 @@ fn compared_field(instruction: Instruction) -> u8 {
     instruction.rt() >> 2
 }
 
-/// Returns what an instruction reads and writes, if it is modelled.
-///
-/// Returns `None` for an instruction with no semantics, which is a normal
-/// outcome. Nothing approximate is ever returned: a description that is nearly
-/// right produces code that is nearly right, and there is no way to tell the
-/// difference afterwards.
-#[must_use]
-pub fn effect_of(instruction: Instruction) -> Option<Effect> {
-    // Adding nothing to nothing and discarding it is how doing nothing is
-    // written. Reporting the register it names as read and written would be
-    // true of the encoding and false of the instruction.
-    if is_nothing(instruction) {
-        return Some(Effect::default());
-    }
-
-    let shape = shape_of(instruction.opcode())?;
+/// Writes what a shape says an instruction touches.
+fn apply(shape: Shape, instruction: Instruction, effect: &mut Effect) {
     let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
-    let mut effect = Effect::default();
 
     match shape {
         Shape::TargetFromBoth => {
@@ -479,7 +566,32 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
             effect.read(Location::Exception);
             effect.write(Location::Condition(compared_field(instruction)));
         }
-        Shape::Named => named_effect(instruction, &mut effect),
+        Shape::FloatFromBoth => {
+            effect.read(Location::Floating(ra));
+            effect.read(Location::Floating(rb));
+            effect.write(Location::Floating(rt));
+        }
+        Shape::FloatFromOne => {
+            effect.read(Location::Floating(rb));
+            effect.write(Location::Floating(rt));
+        }
+        Shape::FloatFromThree => {
+            effect.read(Location::Floating(ra));
+            effect.read(Location::Floating(rb));
+            effect.read(Location::Floating(third_operand(instruction)));
+            effect.write(Location::Floating(rt));
+        }
+        Shape::FloatMultiply => {
+            effect.read(Location::Floating(ra));
+            effect.read(Location::Floating(third_operand(instruction)));
+            effect.write(Location::Floating(rt));
+        }
+        Shape::FloatCompare => {
+            effect.read(Location::Floating(ra));
+            effect.read(Location::Floating(rb));
+            effect.write(Location::Condition(compared_field(instruction)));
+        }
+        Shape::Named => named_effect(instruction, effect),
         Shape::Memory(access) => {
             // An address built on register zero is built on nothing, the same
             // way adding to it is. Only the forms that write the address
@@ -491,16 +603,47 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
             if access.indexed {
                 effect.read(Location::General(rb));
             }
-            if access.loading {
-                effect.write(access.bank.at(rt));
+            // The console's extension numbers its vector registers past what
+            // the field the other banks use can hold, and reads the number from
+            // a wider one split across the word. The instructions it extends
+            // still use the ordinary field.
+            let extended = instruction.form().is_some_and(Form::is_console_extension);
+            let moved = if access.bank == Bank::Vector && extended {
+                access.bank.at(instruction.vector_d())
             } else {
-                effect.read(access.bank.at(rt));
+                access.bank.at(rt)
+            };
+            if access.loading {
+                effect.write(moved);
+            } else {
+                effect.read(moved);
             }
             if access.updating {
                 effect.write(Location::General(ra));
             }
         }
     }
+}
+
+/// Returns what an instruction reads and writes, if it is modelled.
+///
+/// Returns `None` for an instruction with no semantics, which is a normal
+/// outcome. Nothing approximate is ever returned: a description that is nearly
+/// right produces code that is nearly right, and there is no way to tell the
+/// difference afterwards.
+#[must_use]
+pub fn effect_of(instruction: Instruction) -> Option<Effect> {
+    // Adding nothing to nothing and discarding it is how doing nothing is
+    // written. Reporting the register it names as read and written would be
+    // true of the encoding and false of the instruction.
+    if is_nothing(instruction) {
+        return Some(Effect::default());
+    }
+
+    let shape = shape_of(instruction.opcode())?;
+    let mut effect = Effect::default();
+
+    apply(shape, instruction, &mut effect);
 
     // Both bits are only meaningful where the form carries them. Every other
     // form spends them on something else, so reading them unguarded would have
@@ -536,7 +679,7 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
 /// set, because they always set one. Their spelling carries the dot for that
 /// reason rather than as a variant.
 fn always_records(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::Andi | Opcode::Andis)
+    matches!(opcode, Opcode::Andi | Opcode::Andis | Opcode::AddicRc)
 }
 
 /// Returns whether an operation records a carry out into the exception register.
@@ -562,15 +705,28 @@ fn carries(opcode: Opcode) -> bool {
         Opcode::Addc
             | Opcode::Adde
             | Opcode::Addic
+            | Opcode::AddicRc
+            | Opcode::Addze
+            | Opcode::Addme
             | Opcode::Subfc
             | Opcode::Subfe
             | Opcode::Subfic
+            | Opcode::Subfze
+            | Opcode::Subfme
     )
 }
 
 /// Returns whether an operation reads a carry in.
 fn extends_a_carry(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::Adde | Opcode::Subfe)
+    matches!(
+        opcode,
+        Opcode::Adde
+            | Opcode::Subfe
+            | Opcode::Addze
+            | Opcode::Addme
+            | Opcode::Subfze
+            | Opcode::Subfme
+    )
 }
 
 /// Returns whether an instruction does nothing at all.
@@ -754,8 +910,8 @@ mod tests {
 
     #[test]
     fn an_unmodelled_instruction_admits_it() {
-        // lvx128 v64, r11, r12, a console extension load
-        assert_eq!(effect_of(Instruction::decode(0x1004_60cb)), None);
+        // vmrghw v0, v0, v0, a vector arithmetic instruction
+        assert_eq!(effect_of(Instruction::decode(0x1000_008c)), None);
     }
 
     #[test]
@@ -767,8 +923,8 @@ mod tests {
             "nothing is modelled beyond a subset yet"
         );
         assert!(
-            missing.contains(&"fmuls"),
-            "the floating point arithmetic is not modelled yet"
+            missing.contains(&"vmrghw"),
+            "the vector arithmetic is not modelled yet"
         );
         assert!(
             !missing.contains(&"add"),

@@ -68,6 +68,12 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address) {
     (void)address;
 }
 
+void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+    (void)ctx;
+    (void)base;
+    (void)address;
+}
+
 int main(void) {
     xenolith_context ctx = {0};
     ctx.r[3] = 1;
@@ -90,6 +96,12 @@ fn memory_access_uses_the_guest_byte_order() {
 #include <stdlib.h>
 
 void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+    (void)ctx;
+    (void)base;
+    (void)address;
+}
+
+void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
     (void)ctx;
     (void)base;
     (void)address;

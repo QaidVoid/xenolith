@@ -32,6 +32,19 @@ typedef union xenolith_vector {
     double f64[2];
 } xenolith_vector;
 
+/* A floating point register.
+ *
+ * Held as both a value and its bits, because the instruction set reads the same
+ * register either way: the arithmetic works on the value and the conversions
+ * work on the bits. The two members are the same width, so which one was last
+ * written does not change where the bytes are.
+ */
+typedef union xenolith_float {
+    double f64;
+    uint64_t u64;
+    int64_t s64;
+} xenolith_float;
+
 /* One condition field, held as its four bits rather than packed, so that
  * setting one does not require reading the others. */
 typedef struct xenolith_condition {
@@ -49,7 +62,7 @@ typedef struct xenolith_condition {
  */
 typedef struct xenolith_context {
     uint64_t r[XENOLITH_GENERAL_REGISTERS];
-    double f[XENOLITH_FLOATING_REGISTERS];
+    xenolith_float f[XENOLITH_FLOATING_REGISTERS];
     xenolith_vector v[XENOLITH_VECTOR_REGISTERS];
     xenolith_condition cr[XENOLITH_CONDITION_FIELDS];
     uint64_t lr;
@@ -102,6 +115,14 @@ static inline void xenolith_store64(uint8_t *base, uint32_t address, uint64_t va
     xenolith_store32(base, address, (uint32_t)(value >> 32));
     xenolith_store32(base, address + 4, (uint32_t)value);
 }
+
+/* Where a trap that fired goes.
+ *
+ * A trap leaves the function it was in, so what happens next is not something
+ * emitted code can express. The environment decides. Implemented there, not
+ * here.
+ */
+void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address);
 
 /* Where a target unknown when the code was emitted becomes a function.
  *

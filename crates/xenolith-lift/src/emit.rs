@@ -78,6 +78,22 @@ fn label_of(address: u32) -> String {
     format!("loc_{address:08x}")
 }
 
+/// Returns the vector register an instruction names.
+///
+/// The console's extension reaches further than the ordinary field can hold and
+/// splits the number across the word. The instructions it extends still use the
+/// ordinary field.
+fn vector_register(instruction: Instruction) -> u8 {
+    if instruction
+        .form()
+        .is_some_and(xenolith_ppc::Form::is_console_extension)
+    {
+        instruction.vector_d()
+    } else {
+        instruction.rt()
+    }
+}
+
 /// Returns the mask a word rotate keeps, given where it begins and ends.
 ///
 /// Bits are numbered from the most significant, and a mask whose end comes
@@ -406,9 +422,9 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
 
             if floating {
                 let read = if width == 4 {
-                    "    { uint32_t bits = xenolith_load32(base, address); float value; __builtin_memcpy(&value, &bits, 4); ctx->f[RT] = (double)value; }\n"
+                    "    { uint32_t bits = xenolith_load32(base, address); float value; __builtin_memcpy(&value, &bits, 4); ctx->f[RT].f64 = (double)value; }\n"
                 } else {
-                    "    { uint64_t bits = xenolith_load64(base, address); double value; __builtin_memcpy(&value, &bits, 8); ctx->f[RT] = value; }\n"
+                    "    ctx->f[RT].u64 = xenolith_load64(base, address);\n"
                 };
                 out.push_str(&read.replace("RT", &rt.to_string()));
             } else if signed {
@@ -446,9 +462,9 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
 
             if floating {
                 let write_out = if width == 4 {
-                    "    { float value = (float)ctx->f[RT]; uint32_t bits; __builtin_memcpy(&bits, &value, 4); xenolith_store32(base, address, bits); }\n"
+                    "    { float value = (float)ctx->f[RT].f64; uint32_t bits; __builtin_memcpy(&bits, &value, 4); xenolith_store32(base, address, bits); }\n"
                 } else {
-                    "    { double value = ctx->f[RT]; uint64_t bits; __builtin_memcpy(&bits, &value, 8); xenolith_store64(base, address, bits); }\n"
+                    "    xenolith_store64(base, address, ctx->f[RT].u64);\n"
                 };
                 out.push_str(&write_out.replace("RT", &rt.to_string()));
             } else {
@@ -464,8 +480,381 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             }
         }
 
-        // Control transfer is written by the caller, which knows the graph.
-        Opcode::B | Opcode::Bc | Opcode::Bclr | Opcode::Bcctr => {}
+        Opcode::AddicRc => {
+            writeln!(
+                out,
+                "    ctx->r[{rt}] = ctx->r[{ra}] + (uint64_t)(int64_t)({displacement});"
+            )
+            .ok()?;
+        }
+        Opcode::Cntlzw => {
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = (uint32_t)ctx->r[{rt}] == 0 ? 32u : (uint32_t)__builtin_clz((uint32_t)ctx->r[{rt}]);"
+            )
+            .ok()?;
+        }
+        Opcode::Cntlzd => {
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = ctx->r[{rt}] == 0 ? 64u : (uint64_t)__builtin_clzll(ctx->r[{rt}]);"
+            )
+            .ok()?;
+        }
+        Opcode::Srawi => {
+            let places = u32::from(instruction.shift_amount());
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = (uint64_t)(int64_t)((int32_t)ctx->r[{rt}] >> {places});"
+            )
+            .ok()?;
+        }
+        Opcode::Sraw => {
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = (uint64_t)(int64_t)((int32_t)ctx->r[{rt}] >> ((ctx->r[{rb}] & 0x3f) < 32 ? (ctx->r[{rb}] & 0x3f) : 31));"
+            )
+            .ok()?;
+        }
+        Opcode::Sld => {
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = (ctx->r[{rb}] & 0x7f) < 64 ? (ctx->r[{rt}] << (ctx->r[{rb}] & 0x7f)) : 0;"
+            )
+            .ok()?;
+        }
+        Opcode::Srd => {
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = (ctx->r[{rb}] & 0x7f) < 64 ? (ctx->r[{rt}] >> (ctx->r[{rb}] & 0x7f)) : 0;"
+            )
+            .ok()?;
+        }
+        Opcode::Srad | Opcode::Sradi => {
+            let places = if instruction.opcode() == Opcode::Sradi {
+                format!("{}", instruction.long_shift_amount())
+            } else {
+                format!("((ctx->r[{rb}] & 0x7f) < 64 ? (ctx->r[{rb}] & 0x7f) : 63)")
+            };
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = (uint64_t)((int64_t)ctx->r[{rt}] >> {places});"
+            )
+            .ok()?;
+        }
+        Opcode::Rldicl | Opcode::Rldicr | Opcode::Rldic | Opcode::Rldimi => {
+            let places = u32::from(instruction.long_shift_amount());
+            let bound = u32::from(instruction.long_mask_bound());
+            // The left shifting form bounds the end of the mask and the right
+            // shifting ones bound its beginning.
+            let mask: u64 = if instruction.opcode() == Opcode::Rldicr {
+                if bound >= 63 {
+                    u64::MAX
+                } else {
+                    u64::MAX << (63 - bound)
+                }
+            } else if bound >= 64 {
+                0
+            } else {
+                u64::MAX >> bound
+            };
+            let rotated = if places == 0 {
+                format!("ctx->r[{rt}]")
+            } else {
+                format!(
+                    "((ctx->r[{rt}] << {places}) | (ctx->r[{rt}] >> {}))",
+                    64 - places
+                )
+            };
+            if instruction.opcode() == Opcode::Rldimi {
+                writeln!(
+                    out,
+                    "    ctx->r[{ra}] = (ctx->r[{ra}] & ~{mask}ull) | ({rotated} & {mask}ull);"
+                )
+                .ok()?;
+            } else {
+                writeln!(out, "    ctx->r[{ra}] = {rotated} & {mask}ull;").ok()?;
+            }
+        }
+
+        // A trap that fires leaves the function, which emitted code cannot
+        // express, so where it goes is the environment's to decide.
+        Opcode::Tw | Opcode::Twi | Opcode::Td | Opcode::Tdi => {
+            writeln!(out, "    xenolith_trap(ctx, base, 0x{address:08x}u);").ok()?;
+        }
+
+        Opcode::Fmr => {
+            writeln!(out, "    ctx->f[{rt}] = ctx->f[{rb}];").ok()?;
+        }
+        Opcode::Fneg => {
+            writeln!(out, "    ctx->f[{rt}].f64 = -ctx->f[{rb}].f64;").ok()?;
+        }
+        Opcode::Fabs => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = __builtin_fabs(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fnabs => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = -__builtin_fabs(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Frsp => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = (double)(float)ctx->f[{rb}].f64;"
+            )
+            .ok()?;
+        }
+        Opcode::Fcfid => {
+            writeln!(out, "    ctx->f[{rt}].f64 = (double)ctx->f[{rb}].s64;").ok()?;
+        }
+        Opcode::Fctid | Opcode::Fctidz => {
+            writeln!(out, "    ctx->f[{rt}].s64 = (int64_t)ctx->f[{rb}].f64;").ok()?;
+        }
+        Opcode::Fctiw | Opcode::Fctiwz => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].s64 = (int64_t)(int32_t)ctx->f[{rb}].f64;"
+            )
+            .ok()?;
+        }
+        Opcode::Fadd | Opcode::Fsub | Opcode::Fdiv => {
+            let operator = match instruction.opcode() {
+                Opcode::Fadd => "+",
+                Opcode::Fsub => "-",
+                _ => "/",
+            };
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = ctx->f[{ra}].f64 {operator} ctx->f[{rb}].f64;"
+            )
+            .ok()?;
+        }
+        Opcode::Fadds | Opcode::Fsubs | Opcode::Fdivs => {
+            let operator = match instruction.opcode() {
+                Opcode::Fadds => "+",
+                Opcode::Fsubs => "-",
+                _ => "/",
+            };
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = (double)((float)ctx->f[{ra}].f64 {operator} (float)ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fmul => {
+            let frc = (instruction.word() >> 6) & 0x1f;
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = ctx->f[{ra}].f64 * ctx->f[{frc}].f64;"
+            )
+            .ok()?;
+        }
+        Opcode::Fmuls => {
+            let frc = (instruction.word() >> 6) & 0x1f;
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = (double)((float)ctx->f[{ra}].f64 * (float)ctx->f[{frc}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fcmpu | Opcode::Fcmpo => {
+            let field = rt >> 2;
+            writeln!(
+                out,
+                "    ctx->cr[{field}].lt = ctx->f[{ra}].f64 < ctx->f[{rb}].f64;\n                     ctx->cr[{field}].gt = ctx->f[{ra}].f64 > ctx->f[{rb}].f64;\n                     ctx->cr[{field}].eq = ctx->f[{ra}].f64 == ctx->f[{rb}].f64;\n                     ctx->cr[{field}].so = !(ctx->f[{ra}].f64 == ctx->f[{ra}].f64) || !(ctx->f[{rb}].f64 == ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+
+        Opcode::Addc | Opcode::Adde | Opcode::Addze | Opcode::Addme => {
+            let addend = match instruction.opcode() {
+                Opcode::Addc => format!("ctx->r[{rb}]"),
+                Opcode::Adde => format!("ctx->r[{rb}] + ((ctx->xer >> 29) & 1)"),
+                Opcode::Addze => "((ctx->xer >> 29) & 1)".to_owned(),
+                _ => "((ctx->xer >> 29) & 1) + 0xffffffffffffffffull".to_owned(),
+            };
+            writeln!(
+                out,
+                "    {{ uint64_t left = ctx->r[{ra}]; uint64_t sum = left + ({addend});"
+            )
+            .ok()?;
+            writeln!(
+                out,
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (sum < left ? 0x20000000ull : 0);"
+            )
+            .ok()?;
+            writeln!(out, "    ctx->r[{rt}] = sum; }}").ok()?;
+        }
+        Opcode::Subfc | Opcode::Subfe | Opcode::Subfze | Opcode::Subfme => {
+            let minuend = match instruction.opcode() {
+                Opcode::Subfc | Opcode::Subfe => format!("ctx->r[{rb}]"),
+                Opcode::Subfze => "0".to_owned(),
+                _ => "0xffffffffffffffffull".to_owned(),
+            };
+            let carry = if matches!(instruction.opcode(), Opcode::Subfc) {
+                "1".to_owned()
+            } else {
+                "((ctx->xer >> 29) & 1)".to_owned()
+            };
+            writeln!(
+                out,
+                "    {{ uint64_t sum = ~ctx->r[{ra}] + ({minuend}) + ({carry});"
+            )
+            .ok()?;
+            writeln!(
+                out,
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (sum < ({minuend}) ? 0x20000000ull : 0);"
+            )
+            .ok()?;
+            writeln!(out, "    ctx->r[{rt}] = sum; }}").ok()?;
+        }
+        Opcode::Mulhw => {
+            writeln!(
+                out,
+                "    ctx->r[{rt}] = (uint64_t)(int64_t)(int32_t)(((int64_t)(int32_t)ctx->r[{ra}] * (int64_t)(int32_t)ctx->r[{rb}]) >> 32);"
+            )
+            .ok()?;
+        }
+        Opcode::Mulhwu => {
+            writeln!(
+                out,
+                "    ctx->r[{rt}] = (uint64_t)(uint32_t)(((uint64_t)(uint32_t)ctx->r[{ra}] * (uint64_t)(uint32_t)ctx->r[{rb}]) >> 32);"
+            )
+            .ok()?;
+        }
+        Opcode::Divd => {
+            writeln!(
+                out,
+                "    ctx->r[{rt}] = (uint64_t)((int64_t)ctx->r[{rb}] == 0 ? 0 : (int64_t)ctx->r[{ra}] / (int64_t)ctx->r[{rb}]);"
+            )
+            .ok()?;
+        }
+        Opcode::Divdu => {
+            writeln!(
+                out,
+                "    ctx->r[{rt}] = ctx->r[{rb}] == 0 ? 0 : ctx->r[{ra}] / ctx->r[{rb}];"
+            )
+            .ok()?;
+        }
+        Opcode::Fmadd | Opcode::Fmsub | Opcode::Fnmadd | Opcode::Fnmsub => {
+            let frc = (instruction.word() >> 6) & 0x1f;
+            let sign = if matches!(instruction.opcode(), Opcode::Fnmadd | Opcode::Fnmsub) {
+                "-"
+            } else {
+                ""
+            };
+            let operator = if matches!(instruction.opcode(), Opcode::Fmsub | Opcode::Fnmsub) {
+                "-"
+            } else {
+                "+"
+            };
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = {sign}((ctx->f[{ra}].f64 * ctx->f[{frc}].f64) {operator} ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fmadds | Opcode::Fmsubs | Opcode::Fnmadds | Opcode::Fnmsubs => {
+            let frc = (instruction.word() >> 6) & 0x1f;
+            let sign = if matches!(instruction.opcode(), Opcode::Fnmadds | Opcode::Fnmsubs) {
+                "-"
+            } else {
+                ""
+            };
+            let operator = if matches!(instruction.opcode(), Opcode::Fmsubs | Opcode::Fnmsubs) {
+                "-"
+            } else {
+                "+"
+            };
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = (double)({sign}(((float)ctx->f[{ra}].f64 * (float)ctx->f[{frc}].f64) {operator} (float)ctx->f[{rb}].f64));"
+            )
+            .ok()?;
+        }
+        Opcode::Fsel => {
+            let frc = (instruction.word() >> 6) & 0x1f;
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = ctx->f[{ra}].f64 >= 0.0 ? ctx->f[{frc}].f64 : ctx->f[{rb}].f64;"
+            )
+            .ok()?;
+        }
+        Opcode::Fsqrt | Opcode::Fsqrts => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = __builtin_sqrt(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fres => {
+            writeln!(out, "    ctx->f[{rt}].f64 = 1.0 / ctx->f[{rb}].f64;").ok()?;
+        }
+        Opcode::Frsqrte => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = 1.0 / __builtin_sqrt(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+
+        // A whole vector register moves through memory unchanged. The lanes are
+        // left in the order the guest holds them, since nothing here reads one.
+        Opcode::Lvx | Opcode::Lvxl | Opcode::Lvx128 => {
+            let register = vector_register(instruction);
+            let base = if ra == 0 {
+                "0".to_owned()
+            } else {
+                format!("(uint32_t)ctx->r[{ra}]")
+            };
+            writeln!(
+                out,
+                "    address = ({base} + (uint32_t)ctx->r[{rb}]) & ~0xfu;"
+            )
+            .ok()?;
+            writeln!(
+                out,
+                "    __builtin_memcpy(ctx->v[{register}].u8, base + address, 16);"
+            )
+            .ok()?;
+        }
+        Opcode::Stvx | Opcode::Stvxl | Opcode::Stvx128 => {
+            let register = vector_register(instruction);
+            let base = if ra == 0 {
+                "0".to_owned()
+            } else {
+                format!("(uint32_t)ctx->r[{ra}]")
+            };
+            writeln!(
+                out,
+                "    address = ({base} + (uint32_t)ctx->r[{rb}]) & ~0xfu;"
+            )
+            .ok()?;
+            writeln!(
+                out,
+                "    __builtin_memcpy(base + address, ctx->v[{register}].u8, 16);"
+            )
+            .ok()?;
+        }
+
+        // Cache hints change no register this model describes, and control
+        // transfer is written by the caller, which knows the graph. Neither
+        // contributes a statement here.
+        Opcode::Dcbt
+        | Opcode::Dcbtst
+        | Opcode::Dcbf
+        | Opcode::Dcbst
+        | Opcode::Icbi
+        | Opcode::B
+        | Opcode::Bc
+        | Opcode::Bclr
+        | Opcode::Bcctr => {}
 
         _ => return None,
     }

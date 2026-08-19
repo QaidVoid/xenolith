@@ -64,7 +64,12 @@ fn compiles(name: &str, emitted: &str) -> Result<(), String> {
         .map_err(|error| format!("writing the header: {error}"))?;
 
     let source = directory.join("lifted.c");
-    let program = format!("#include \"xenolith.h\"\n\n{emitted}");
+    let program = format!(
+        "#include \"xenolith.h\"\n\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\n\
+         {emitted}"
+    );
     std::fs::write(&source, &program).map_err(|error| format!("writing the source: {error}"))?;
 
     let output = Command::new("clang")

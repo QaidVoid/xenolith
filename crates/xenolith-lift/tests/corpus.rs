@@ -198,8 +198,14 @@ fn parse(text: &str) -> Vec<Emitted> {
 
         // A comparison writes the field it names first and reads the rest.
         let named = places(line);
-        let comparing = line.contains(".compare<") || line.contains(".setFromMask(");
-        let written = if comparing || assigns_first(line) {
+        let comparing = line.contains(".compare<")
+            || line.contains(".compare(")
+            || line.contains(".setFromMask(");
+        // A vector store writes through a pointer to its first argument, which
+        // reads like any other mention of that register unless it is known that
+        // the call stores rather than loads.
+        let storing_through_a_pointer = line.contains("_mm_store_si128((simde__m128i*)ctx.");
+        let written = if comparing || storing_through_a_pointer || assigns_first(line) {
             named.first().map(|(_, location)| *location)
         } else {
             None
