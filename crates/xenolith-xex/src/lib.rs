@@ -12,7 +12,14 @@
 
 mod container;
 mod error;
+mod headers;
 mod reader;
+mod security;
 
 pub use container::{Container, Format, OptionalHeader, OptionalHeaderKey, OptionalHeaderValue};
 pub use error::{Error, Result};
+pub use headers::{
+    BasicBlock, CompressionType, EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary,
+    NormalCompression, Version, keys,
+};
+pub use security::{PageDescriptor, PageKind, SecurityInfo};

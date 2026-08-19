@@ -11,7 +11,9 @@
 //! nothing and is preserved for callers rather than discarded.
 
 use crate::error::{Error, Result};
+use crate::headers::{ExecutionInfo, FileFormatInfo, ImportLibrary, keys, parse_import_libraries};
 use crate::reader::Reader;
+use crate::security::SecurityInfo;
 
 /// Container formats this crate recognizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,6 +128,12 @@ pub struct Container<'a> {
     image_offset: u32,
     security_info_offset: u32,
     optional_headers: Vec<OptionalHeader<'a>>,
+    security_info: SecurityInfo,
+    file_format_info: Option<FileFormatInfo>,
+    execution_info: Option<ExecutionInfo>,
+    import_libraries: Vec<ImportLibrary<'a>>,
+    entry_point: Option<u32>,
+    image_base_address: Option<u32>,
 }
 
 impl<'a> Container<'a> {
@@ -147,6 +155,34 @@ impl<'a> Container<'a> {
         let optional_header_count = reader.u32("optional_header_count")?;
 
         let optional_headers = parse_optional_headers(&mut reader, optional_header_count)?;
+        let security_info = SecurityInfo::parse(&reader, security_info_offset)?;
+
+        let payload = |key: u32| {
+            optional_headers
+                .iter()
+                .find(|header| header.key.0 == key)
+                .map(|header| header.value)
+        };
+
+        let file_format_info =
+            match payload(keys::FILE_FORMAT_INFO).and_then(OptionalHeaderValue::data) {
+                Some(data) => Some(FileFormatInfo::parse(data)?),
+                None => None,
+            };
+        let execution_info = match payload(keys::EXECUTION_INFO).and_then(OptionalHeaderValue::data)
+        {
+            Some(data) => Some(ExecutionInfo::parse(data)?),
+            None => None,
+        };
+        let import_libraries =
+            match payload(keys::IMPORT_LIBRARIES).and_then(OptionalHeaderValue::data) {
+                Some(data) => parse_import_libraries(data)?,
+                None => Vec::new(),
+            };
+
+        let entry_point = payload(keys::ENTRY_POINT).and_then(OptionalHeaderValue::inline);
+        let image_base_address =
+            payload(keys::IMAGE_BASE_ADDRESS).and_then(OptionalHeaderValue::inline);
 
         Ok(Self {
             format,
@@ -154,7 +190,55 @@ impl<'a> Container<'a> {
             image_offset,
             security_info_offset,
             optional_headers,
+            security_info,
+            file_format_info,
+            execution_info,
+            import_libraries,
+            entry_point,
+            image_base_address,
         })
+    }
+
+    /// Returns the security info block, which describes the image layout.
+    #[must_use]
+    pub const fn security_info(&self) -> &SecurityInfo {
+        &self.security_info
+    }
+
+    /// Returns how the image body is encrypted and compressed.
+    ///
+    /// Absent only for containers that declare no file format info, which no
+    /// retail title is expected to do.
+    #[must_use]
+    pub const fn file_format_info(&self) -> Option<&FileFormatInfo> {
+        self.file_format_info.as_ref()
+    }
+
+    /// Returns the title identity and version, when the container carries it.
+    #[must_use]
+    pub const fn execution_info(&self) -> Option<ExecutionInfo> {
+        self.execution_info
+    }
+
+    /// Returns the libraries the image imports from.
+    #[must_use]
+    pub fn import_libraries(&self) -> &[ImportLibrary<'a>] {
+        &self.import_libraries
+    }
+
+    /// Returns the virtual address execution begins at.
+    #[must_use]
+    pub const fn entry_point(&self) -> Option<u32> {
+        self.entry_point
+    }
+
+    /// Returns the virtual address the image loads at.
+    ///
+    /// The security info records this too, and the two agree in practice, but
+    /// this is the value the optional header states directly.
+    #[must_use]
+    pub const fn image_base_address(&self) -> Option<u32> {
+        self.image_base_address
     }
 
     /// Returns the container format identified by the magic.
@@ -294,11 +378,14 @@ pub(crate) mod build {
     /// Byte length of the fixed container header.
     pub(crate) const HEADER_SIZE: usize = 0x18;
 
+    /// Byte length of the security info block before its descriptor array.
+    pub(crate) const SECURITY_FIXED_SIZE: usize = 0x184;
+
     /// The data an entry contributes to the file.
     enum Payload {
         /// Stored in the directory entry itself.
         Inline(u32),
-        /// Appended after the directory and referenced by offset.
+        /// Appended after the security info and referenced by offset.
         Trailing(Vec<u8>),
     }
 
@@ -307,19 +394,31 @@ pub(crate) mod build {
         magic: [u8; 4],
         module_flags: u32,
         image_offset: u32,
-        security_info_offset: u32,
+        security_info_offset: Option<u32>,
+        image_size: u32,
+        load_address: u32,
+        import_table_count: u32,
+        export_table: u32,
+        descriptors: Vec<(u32, u8)>,
+        override_descriptor_count: Option<u32>,
         entries: Vec<(u32, Payload)>,
         override_count: Option<u32>,
     }
 
     impl ContainerBuilder {
-        /// Starts a well formed XEX2 container with no optional headers.
+        /// Starts a well formed XEX2 container carrying one code page.
         pub(crate) fn new() -> Self {
             Self {
                 magic: *b"XEX2",
                 module_flags: 0,
                 image_offset: 0,
-                security_info_offset: 0,
+                security_info_offset: None,
+                image_size: 0x1_0000,
+                load_address: 0x8200_0000,
+                import_table_count: 0,
+                export_table: 0,
+                descriptors: vec![(1, 1)],
+                override_descriptor_count: None,
                 entries: Vec::new(),
                 override_count: None,
             }
@@ -343,9 +442,45 @@ pub(crate) mod build {
             self
         }
 
-        /// Sets the offset of the security info block.
+        /// Points the header at a security info offset of the caller's choosing.
         pub(crate) fn security_info_offset(mut self, offset: u32) -> Self {
-            self.security_info_offset = offset;
+            self.security_info_offset = Some(offset);
+            self
+        }
+
+        /// Sets the decoded image size recorded in the security info.
+        pub(crate) fn image_size(mut self, size: u32) -> Self {
+            self.image_size = size;
+            self
+        }
+
+        /// Sets the address the image loads at.
+        pub(crate) fn load_address(mut self, address: u32) -> Self {
+            self.load_address = address;
+            self
+        }
+
+        /// Sets the declared import table count.
+        pub(crate) fn import_table_count(mut self, count: u32) -> Self {
+            self.import_table_count = count;
+            self
+        }
+
+        /// Sets the export table address, where zero means absent.
+        pub(crate) fn export_table(mut self, address: u32) -> Self {
+            self.export_table = address;
+            self
+        }
+
+        /// Replaces the page descriptors, each a page count and a kind nibble.
+        pub(crate) fn descriptors(mut self, descriptors: Vec<(u32, u8)>) -> Self {
+            self.descriptors = descriptors;
+            self
+        }
+
+        /// Writes a descriptor count that disagrees with the descriptors present.
+        pub(crate) fn declared_descriptor_count(mut self, count: u32) -> Self {
+            self.override_descriptor_count = Some(count);
             self
         }
 
@@ -376,7 +511,7 @@ pub(crate) mod build {
             self
         }
 
-        /// Adds an entry pointing at a raw offset, for testing invalid targets.
+        /// Adds an entry with an exact key and value, for testing bad targets.
         pub(crate) fn raw(mut self, key: u32, value: u32) -> Self {
             self.entries.push((key, Payload::Inline(value)));
             self
@@ -388,10 +523,46 @@ pub(crate) mod build {
             self
         }
 
+        /// Serializes the security info block.
+        fn security_bytes(&self) -> Vec<u8> {
+            let count = self
+                .override_descriptor_count
+                .unwrap_or_else(|| u32::try_from(self.descriptors.len()).unwrap_or(u32::MAX));
+            let header_size = u32::try_from(SECURITY_FIXED_SIZE + self.descriptors.len() * 24)
+                .unwrap_or(u32::MAX);
+
+            let mut bytes = Vec::with_capacity(SECURITY_FIXED_SIZE + self.descriptors.len() * 24);
+            bytes.extend_from_slice(&header_size.to_be_bytes());
+            bytes.extend_from_slice(&self.image_size.to_be_bytes());
+            bytes.extend_from_slice(&[0u8; 256]);
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            bytes.extend_from_slice(&self.load_address.to_be_bytes());
+            bytes.extend_from_slice(&[0u8; 20]);
+            bytes.extend_from_slice(&self.import_table_count.to_be_bytes());
+            bytes.extend_from_slice(&[0u8; 20]);
+            bytes.extend_from_slice(&[0u8; 16]);
+            bytes.extend_from_slice(&[0u8; 16]);
+            bytes.extend_from_slice(&self.export_table.to_be_bytes());
+            bytes.extend_from_slice(&[0u8; 20]);
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            bytes.extend_from_slice(&count.to_be_bytes());
+
+            for (page_count, kind) in &self.descriptors {
+                let packed = (page_count << 4) | u32::from(*kind);
+                bytes.extend_from_slice(&packed.to_be_bytes());
+                bytes.extend_from_slice(&[0u8; 20]);
+            }
+            bytes
+        }
+
         /// Serializes the container.
         pub(crate) fn build(self) -> Vec<u8> {
             let directory_size = self.entries.len() * 8;
-            let data_start = HEADER_SIZE + directory_size;
+            let security = self.security_bytes();
+            let security_offset = HEADER_SIZE + directory_size;
+            let data_start = security_offset + security.len();
 
             let mut directory = Vec::with_capacity(directory_size);
             let mut trailing = Vec::new();
@@ -412,15 +583,19 @@ pub(crate) mod build {
             let count = self
                 .override_count
                 .unwrap_or_else(|| u32::try_from(directory.len() / 8).unwrap_or(u32::MAX));
+            let security_info_offset = self
+                .security_info_offset
+                .unwrap_or_else(|| u32::try_from(security_offset).unwrap_or(u32::MAX));
 
             let mut bytes = Vec::with_capacity(data_start + trailing.len());
             bytes.extend_from_slice(&self.magic);
             bytes.extend_from_slice(&self.module_flags.to_be_bytes());
             bytes.extend_from_slice(&self.image_offset.to_be_bytes());
             bytes.extend_from_slice(&0u32.to_be_bytes());
-            bytes.extend_from_slice(&self.security_info_offset.to_be_bytes());
+            bytes.extend_from_slice(&security_info_offset.to_be_bytes());
             bytes.extend_from_slice(&count.to_be_bytes());
             bytes.extend_from_slice(&directory);
+            bytes.extend_from_slice(&security);
             bytes.extend_from_slice(&trailing);
             bytes
         }
@@ -437,7 +612,8 @@ mod tests {
         let bytes = ContainerBuilder::new()
             .module_flags(0x0000_0001)
             .image_offset(0x1000)
-            .security_info_offset(0x0400)
+            .load_address(0x8200_0000)
+            .image_size(0x0002_0000)
             .build();
 
         let container = Container::parse(&bytes).unwrap();
@@ -445,8 +621,34 @@ mod tests {
         assert_eq!(container.format(), Format::Xex2);
         assert_eq!(container.module_flags(), 0x0000_0001);
         assert_eq!(container.image_offset(), 0x1000);
-        assert_eq!(container.security_info_offset(), 0x0400);
+        assert_eq!(
+            container.security_info_offset(),
+            u32::try_from(HEADER_SIZE).unwrap()
+        );
         assert!(container.optional_headers().is_empty());
+
+        let security = container.security_info();
+        assert_eq!(security.load_address(), 0x8200_0000);
+        assert_eq!(security.image_size(), 0x0002_0000);
+        assert_eq!(security.export_table_address(), None);
+    }
+
+    #[test]
+    fn rejects_a_security_info_offset_outside_the_file() {
+        let bytes = ContainerBuilder::new()
+            .security_info_offset(0xffff_0000)
+            .build();
+
+        let error = Container::parse(&bytes).unwrap_err();
+
+        assert_eq!(
+            error,
+            Error::OffsetOutOfRange {
+                field: "security_info_offset",
+                target: 0xffff_0000,
+                len: bytes.len(),
+            }
+        );
     }
 
     #[test]

@@ -58,6 +58,35 @@ pub enum Error {
         len: usize,
     },
 
+    /// The file format info declared a size that does not describe whole blocks.
+    #[error("file format info declares an invalid size of {size} bytes")]
+    FileFormatInfoInvalidSize {
+        /// The size value that was rejected.
+        size: u32,
+    },
+
+    /// An import library record's declared size disagrees with its contents.
+    ///
+    /// A record is a fixed header followed by one address per import, so the
+    /// size is fully determined by the import count. A disagreement means the
+    /// record was misread and walking to the next one would compound the error.
+    #[error("import library at offset {offset:#x} declares an inconsistent size of {size} bytes")]
+    ImportLibraryInvalidSize {
+        /// Offset of the record within the payload.
+        offset: usize,
+        /// The size the record declared.
+        size: u32,
+    },
+
+    /// An import library named a string table entry that does not exist.
+    #[error("import library names entry {index}, but the string table holds {count}")]
+    ImportLibraryNameIndex {
+        /// The index the record held.
+        index: u16,
+        /// How many names the string table actually held.
+        count: usize,
+    },
+
     /// A variable length optional header declared a size that cannot be valid.
     ///
     /// The declared size covers the length field itself, so anything below four

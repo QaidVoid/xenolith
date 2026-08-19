@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use xenolith_xex::{Container, Format, OptionalHeaderValue};
+use xenolith_xex::{CompressionType, Container, Format, OptionalHeaderValue};
 
 /// Returns the path named by `XENOLITH_TEST_XEX`, or `None` when it is unset.
 fn test_xex_path() -> Option<PathBuf> {
@@ -99,4 +99,110 @@ fn fixed_size_entries_match_their_declared_word_count() {
     }
 
     assert!(checked > 0, "the container carried no fixed size entries");
+}
+
+/// The optional header and the security info record the load address
+/// independently. Disagreement means one of the two was read at the wrong
+/// offset, which no synthetic fixture can catch because the builder writes both
+/// from the same value.
+#[test]
+fn the_two_recorded_load_addresses_agree() {
+    let bytes = container_bytes!();
+    let container = Container::parse(&bytes).expect("real container should parse");
+
+    if let Some(declared) = container.image_base_address() {
+        assert_eq!(
+            declared,
+            container.security_info().load_address(),
+            "optional header and security info disagree on the load address"
+        );
+    }
+}
+
+#[test]
+fn the_descriptors_account_for_the_whole_image() {
+    let bytes = container_bytes!();
+    let container = Container::parse(&bytes).expect("real container should parse");
+    let security = container.security_info();
+
+    let pages = u64::from(security.total_pages());
+    let image_size = u64::from(security.image_size());
+
+    assert!(pages > 0, "no page descriptors");
+    assert_eq!(
+        image_size % pages,
+        0,
+        "image size {image_size:#x} does not divide evenly across {pages} pages"
+    );
+    assert_eq!(
+        image_size / pages,
+        0x1_0000,
+        "expected 64 KiB pages, got {:#x}",
+        image_size / pages
+    );
+}
+
+#[test]
+fn the_entry_point_falls_inside_the_image() {
+    let bytes = container_bytes!();
+    let container = Container::parse(&bytes).expect("real container should parse");
+    let security = container.security_info();
+
+    let Some(entry) = container.entry_point() else {
+        return;
+    };
+    let base = u64::from(security.load_address());
+    let end = base + u64::from(security.image_size());
+
+    assert!(
+        (base..end).contains(&u64::from(entry)),
+        "entry point {entry:#x} outside image {base:#x}..{end:#x}"
+    );
+}
+
+#[test]
+fn the_import_library_count_matches_the_security_info() {
+    let bytes = container_bytes!();
+    let container = Container::parse(&bytes).expect("real container should parse");
+
+    let declared = container.security_info().import_table_count();
+    let parsed = u32::try_from(container.import_libraries().len()).unwrap();
+
+    assert_eq!(declared, parsed, "declared and parsed import counts differ");
+
+    for library in container.import_libraries() {
+        assert!(
+            !library.name.is_empty(),
+            "import library with an empty name"
+        );
+    }
+}
+
+/// For a basic scheme image the stored blocks must account for exactly the
+/// bytes between the image offset and the end of the file. This is the single
+/// strongest check available without decrypting anything.
+#[test]
+fn basic_scheme_blocks_account_for_the_stored_image() {
+    let bytes = container_bytes!();
+    let container = Container::parse(&bytes).expect("real container should parse");
+
+    let Some(info) = container.file_format_info() else {
+        return;
+    };
+    if info.compression() != CompressionType::Basic {
+        eprintln!("skipping: image is not basic scheme");
+        return;
+    }
+
+    let stored: u64 = info
+        .basic_blocks()
+        .iter()
+        .map(|block| u64::from(block.data_size))
+        .sum();
+    let available = u64::try_from(bytes.len()).unwrap() - u64::from(container.image_offset());
+
+    assert_eq!(
+        stored, available,
+        "basic blocks describe {stored:#x} stored bytes, file holds {available:#x}"
+    );
 }

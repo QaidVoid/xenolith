@@ -82,13 +82,18 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
+    /// Reads a big-endian 16-bit value.
+    pub(crate) fn u16(&mut self, field: &'static str) -> Result<u16> {
+        self.take_array::<2>(field).map(u16::from_be_bytes)
+    }
+
     /// Reads a big-endian 32-bit value.
     pub(crate) fn u32(&mut self, field: &'static str) -> Result<u32> {
         self.take_array::<4>(field).map(u32::from_be_bytes)
     }
 
     /// Reads a fixed size array and advances past it.
-    fn take_array<const N: usize>(&mut self, field: &'static str) -> Result<[u8; N]> {
+    pub(crate) fn take_array<const N: usize>(&mut self, field: &'static str) -> Result<[u8; N]> {
         let start = self.offset;
         let slice = self.take(N, field)?;
 
