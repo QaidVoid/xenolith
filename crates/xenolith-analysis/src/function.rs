@@ -97,6 +97,12 @@ pub struct Function {
     /// Addresses it leaves for without expecting to come back, where the target
     /// is another function.
     pub tail_calls: Vec<u32>,
+    /// Where each resolved indirect branch inside it can go, keyed by the
+    /// address of the branch.
+    ///
+    /// A branch absent from this map was not resolved, which is a normal
+    /// outcome rather than a missing entry.
+    pub resolved: BTreeMap<u32, Vec<u32>>,
 }
 
 impl Function {
@@ -150,7 +156,7 @@ impl Function {
 
         self.blocks
             .iter()
-            .map(|block| (block.start, edges_of(block, &starts)))
+            .map(|block| (block.start, edges_of(block, &starts, &self.resolved)))
             .collect()
     }
 
@@ -282,7 +288,11 @@ impl Program {
 }
 
 /// Returns the outgoing edges of one block.
-fn edges_of(block: &Block, starts: &BTreeSet<u32>) -> Vec<Edge> {
+fn edges_of(
+    block: &Block,
+    starts: &BTreeSet<u32>,
+    resolved: &BTreeMap<u32, Vec<u32>>,
+) -> Vec<Edge> {
     let mut edges = Vec::new();
 
     match block.terminator {
@@ -297,8 +307,27 @@ fn edges_of(block: &Block, starts: &BTreeSet<u32>) -> Vec<Edge> {
                 // through below rather than an edge to the callee.
                 FlowKind::Return | FlowKind::Call | FlowKind::Continue => {}
                 // A branch through a register has no intra function successor
-                // on its taken side until a table is recovered for it.
-                FlowKind::Indirect => edges.push(Edge::Unresolved),
+                // on its taken side until a table is recovered for it. Once one
+                // is, the targets inside this function are its real successors.
+                FlowKind::Indirect => {
+                    let branch = block.end.saturating_sub(INSTRUCTION_SIZE);
+
+                    // A dense switch names the same target many times, and a
+                    // hundred identical edges say nothing the one edge does not.
+                    let mut seen = BTreeSet::new();
+                    for target in resolved.get(&branch).into_iter().flatten() {
+                        if starts.contains(target) && seen.insert(*target) {
+                            edges.push(Edge::Taken(*target));
+                        }
+                    }
+
+                    // An unresolved branch, and one whose every target lies
+                    // outside this function, both leave nothing here to point
+                    // at. Saying so is the honest answer for either.
+                    if edges.is_empty() {
+                        edges.push(Edge::Unresolved);
+                    }
+                }
                 FlowKind::Branch => match target {
                     Some(target) if starts.contains(&target) => {
                         edges.push(Edge::Taken(target));
@@ -520,6 +549,7 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
                     origin,
                     blocks,
                     tail_calls,
+                    resolved: BTreeMap::new(),
                 },
             )
         })
@@ -943,6 +973,7 @@ mod tests {
                 orphan,
             ],
             tail_calls: Vec::new(),
+            resolved: BTreeMap::new(),
         };
 
         let unreachable = function.unreachable_blocks();
@@ -950,6 +981,99 @@ mod tests {
         assert_eq!(unreachable.len(), 1);
         assert_eq!(unreachable[0].start, 0x8200_0100);
         assert_eq!(function.blocks.len(), 2, "it is still in the function");
+    }
+
+    /// Builds a function whose single block ends in a branch through a register.
+    fn switching(targets: &[u32], resolved: bool) -> Function {
+        let branch = 0x8200_0000;
+        let mut blocks = vec![Block {
+            start: branch,
+            end: branch + 4,
+            terminator: Terminator::Transfer {
+                kind: FlowKind::Indirect,
+                target: None,
+                falls_through: false,
+            },
+        }];
+        for at in 0..u32::try_from(targets.len()).unwrap_or(0) {
+            let start = 0x8200_0100 + at * 4;
+            blocks.push(Block {
+                start,
+                end: start + 4,
+                terminator: Terminator::Transfer {
+                    kind: FlowKind::Return,
+                    target: None,
+                    falls_through: false,
+                },
+            });
+        }
+
+        Function {
+            start: branch,
+            origin: Origin::Root,
+            blocks,
+            tail_calls: Vec::new(),
+            resolved: if resolved {
+                BTreeMap::from([(branch, targets.to_vec())])
+            } else {
+                BTreeMap::new()
+            },
+        }
+    }
+
+    #[test]
+    fn a_resolved_branch_reports_an_edge_per_target() {
+        let targets = [0x8200_0100, 0x8200_0104, 0x8200_0108];
+        let function = switching(&targets, true);
+
+        let edges = function.edges();
+        let from_branch = edges.get(&0x8200_0000).expect("the branch has edges");
+
+        assert_eq!(
+            from_branch,
+            &[
+                Edge::Taken(0x8200_0100),
+                Edge::Taken(0x8200_0104),
+                Edge::Taken(0x8200_0108)
+            ]
+        );
+    }
+
+    /// A dense switch names the same target many times, and repeating the edge
+    /// says nothing the one edge does not.
+    #[test]
+    fn repeated_targets_produce_one_edge_each() {
+        let targets = [0x8200_0100, 0x8200_0104, 0x8200_0100, 0x8200_0100];
+        let function = switching(&targets, true);
+
+        let edges = function.edges();
+        let from_branch = edges.get(&0x8200_0000).expect("the branch has edges");
+
+        assert_eq!(
+            from_branch,
+            &[Edge::Taken(0x8200_0100), Edge::Taken(0x8200_0104)]
+        );
+    }
+
+    #[test]
+    fn an_unresolved_branch_still_reports_one_unresolved_edge() {
+        let function = switching(&[0x8200_0100], false);
+
+        let edges = function.edges();
+
+        assert_eq!(edges.get(&0x8200_0000), Some(&vec![Edge::Unresolved]));
+    }
+
+    /// A branch every one of whose targets lies elsewhere leaves nothing in this
+    /// function to point at, which is the same situation as not knowing.
+    #[test]
+    fn a_branch_leaving_the_function_reports_unresolved() {
+        let mut function = switching(&[0x8200_0100], true);
+        function.resolved = BTreeMap::from([(0x8200_0000, vec![0x8300_0000])]);
+
+        let edges = function.edges();
+
+        assert_eq!(edges.get(&0x8200_0000), Some(&vec![Edge::Unresolved]));
     }
 
     #[test]
