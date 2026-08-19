@@ -16,22 +16,28 @@ Measured against two retail titles:
 |---|---|---|
 | functions discovered | 27,447 | 11,903 |
 | executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 26,749 (97.5%) | 11,008 (92.5%) |
+| functions lifted to C | 26,908 (98.0%) | 11,195 (94.1%) |
+| of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
 
 What that leaves out is the part that matters for running anything. The emitted C
 is written against a runtime interface this project declares and does not
-implement: no guest memory is mapped, no imports are serviced, no threads exist.
-Around 2,260 addresses are declared without a definition, mostly functions that
+implement: no guest memory is mapped, no import does anything, no threads exist.
+Around 1,460 addresses are declared without a definition, mostly functions that
 could not be lifted plus the register save and restore helpers. So it compiles
 and it does not link, which is an honest description of how far this has got.
+
+The output is a directory of translation units and a makefile that builds them.
+The larger title emits 88 units and takes two and a half minutes to compile with
+`make -j`, which is the shape the output has to be in for a build to use more
+than one core.
 
 ## What is here
 
 Four crates, each usable on its own:
 
-- `xenolith-xex` reads the container: headers, page descriptors, imports,
-  decryption, and the decompression schemes.
+- `xenolith-xex` reads the container: headers, page descriptors, imports and
+  what each one names, decryption, and the decompression schemes.
 - `xenolith-ppc` decodes the instruction set: 440 instructions covering 64 bit
   PowerPC, AltiVec, and the console's VMX128 extension.
 - `xenolith-analysis` finds functions, basic blocks, and control flow edges,
@@ -56,6 +62,9 @@ recovered, or reported as unrecovered. Nothing is guessed:
   given any of them, matched against values two other projects recorded by hand.
 - 803 of the 852 jump tables are recovered and agree exactly with what that tool
   produced, with zero disagreements.
+- Every import record is read from the image and reported as a library and an
+  ordinal, so the emitted code names each call into the operating system rather
+  than leaving it among the functions that failed.
 - An instruction the decoder does not recognize reports itself unknown, and a
   function holding an instruction the model cannot express is not emitted at all.
 
@@ -98,9 +107,11 @@ Nothing beyond a Rust toolchain is needed. Rust 1.85 or later.
 
 ```
 xenolith inspect  default.xex
+xenolith inspect  default.xex --imports
 xenolith disasm   default.xex --start 0x82090000 --length 256
 xenolith analyze  default.xex
 xenolith lift     default.xex --out ./lifted --blockers
+make -C ./lifted -j
 ```
 
 A retail XEX is encrypted, and this project ships no key. Supply one through
@@ -134,15 +145,17 @@ Run those with `--release`. In a debug build they take minutes.
 
 Stated plainly, because a coverage figure implies more than it means:
 
-- **It cannot run anything.** The runtime interface is a declaration.
+- **It cannot run anything.** The runtime interface is a declaration. An import
+  is emitted as a call naming a library and an ordinal, and nothing answers it.
 - **The console's vector extension has no execution oracle.** No assembler
   accepts VMX128 and no emulator implements it, so those instructions are checked
   against an emitted corpus and by reading, and nothing more.
 - **Compressed containers using LZX are not supported**, nor are title update
   patches. Both are implemented up to the point where a sample was needed.
-- **Around 5% of functions do not lift**, blocked by instructions the model does
-  not yet describe. The `lift` subcommand ranks them by how many functions each
-  blocks, which is the list to work from.
+- **Between 2 and 6 percent of functions do not lift**, blocked by instructions
+  the model does not yet describe, most of them vector ones. The `lift`
+  subcommand ranks them by how many functions each blocks, which is the list to
+  work from.
 
 ## Licence
 
