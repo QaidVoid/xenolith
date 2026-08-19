@@ -1,0 +1,281 @@
+//! A decoded instruction and the accessors that read its operands.
+//!
+//! A decoded instruction is its operation and the original word, and nothing
+//! else. Operands are extracted when they are asked for rather than up front,
+//! which keeps the value eight bytes and copyable. A full title runs to millions
+//! of instructions and every later stage decodes them, so that size is the
+//! difference between an analyzer holding the whole image comfortably and not.
+
+use crate::form::Form;
+use crate::table::{Opcode, decode_opcode};
+
+/// A decoded instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Instruction {
+    opcode: Opcode,
+    word: u32,
+}
+
+const _: () = assert!(
+    size_of::<Instruction>() <= 8,
+    "a decoded instruction must stay small enough to hold millions of"
+);
+
+impl Instruction {
+    /// Decodes a 32-bit instruction word.
+    ///
+    /// Always succeeds. A word encoding nothing this crate recognizes yields
+    /// [`Opcode::Unknown`], with the word preserved so a caller can report or
+    /// investigate it.
+    ///
+    /// ```
+    /// use xenolith_ppc::{Instruction, Opcode};
+    ///
+    /// let add = Instruction::decode(0x7c62_1a14);
+    /// assert_eq!(add.opcode(), Opcode::Add);
+    /// assert_eq!((add.rt(), add.ra(), add.rb()), (3, 2, 3));
+    /// ```
+    #[must_use]
+    pub const fn decode(word: u32) -> Self {
+        Self {
+            opcode: decode_opcode(word),
+            word,
+        }
+    }
+
+    /// Returns the operation this instruction encodes.
+    #[must_use]
+    pub const fn opcode(self) -> Opcode {
+        self.opcode
+    }
+
+    /// Returns the original instruction word.
+    #[must_use]
+    pub const fn word(self) -> u32 {
+        self.word
+    }
+
+    /// Returns whether the word encodes nothing this crate recognizes.
+    #[must_use]
+    pub const fn is_unknown(self) -> bool {
+        matches!(self.opcode, Opcode::Unknown)
+    }
+
+    /// Returns the encoding form, if the operation has one.
+    #[must_use]
+    pub fn form(self) -> Option<Form> {
+        self.opcode.form()
+    }
+
+    /// Returns the primary opcode field.
+    #[must_use]
+    pub const fn primary_opcode(self) -> u32 {
+        self.word >> 26
+    }
+
+    /// Returns the extended opcode, if this instruction's form carries one.
+    #[must_use]
+    pub fn extended_opcode(self) -> Option<u32> {
+        let form = self.form()?;
+        if !form.has_extended_opcode() {
+            return None;
+        }
+        let width = form.extended_opcode_bits();
+        Some((self.word >> 1) & ((1 << width) - 1))
+    }
+
+    /// Returns the target register field.
+    #[must_use]
+    pub const fn rt(self) -> u8 {
+        register(self.word >> 21)
+    }
+
+    /// Returns the source register field, which shares its position with
+    /// [`Instruction::rt`].
+    #[must_use]
+    pub const fn rs(self) -> u8 {
+        register(self.word >> 21)
+    }
+
+    /// Returns the first operand register field.
+    #[must_use]
+    pub const fn ra(self) -> u8 {
+        register(self.word >> 16)
+    }
+
+    /// Returns the second operand register field.
+    #[must_use]
+    pub const fn rb(self) -> u8 {
+        register(self.word >> 11)
+    }
+
+    /// Returns the 16-bit immediate field without sign extension.
+    #[must_use]
+    pub const fn immediate(self) -> u16 {
+        low_half(self.word)
+    }
+
+    /// Returns the 16-bit displacement field, sign extended.
+    ///
+    /// Displacements are signed in the architecture, so a load from a negative
+    /// offset off a base register reads as negative rather than as a very large
+    /// positive number.
+    ///
+    /// ```
+    /// use xenolith_ppc::Instruction;
+    ///
+    /// // stw r14, -152(r1)
+    /// assert_eq!(Instruction::decode(0x91c1_ff68).displacement(), -152);
+    /// ```
+    #[must_use]
+    pub const fn displacement(self) -> i32 {
+        sign_extend_16(low_half(self.word))
+    }
+
+    /// Returns whether the record bit is set.
+    ///
+    /// A set record bit means the instruction updates a condition register
+    /// field as a side effect, which is what distinguishes `add.` from `add`.
+    #[must_use]
+    pub const fn record_bit(self) -> bool {
+        self.word & 1 != 0
+    }
+
+    /// Returns whether the overflow enable bit is set.
+    ///
+    /// Only meaningful for forms that carry it, which is why the bit sits
+    /// outside the mask that identifies such an instruction.
+    #[must_use]
+    pub const fn overflow_enable(self) -> bool {
+        self.word & (1 << 10) != 0
+    }
+}
+
+/// Extracts a five-bit register number from a shifted word.
+const fn register(shifted: u32) -> u8 {
+    (shifted & 0x1f) as u8
+}
+
+/// Extracts the low sixteen bits of a word.
+const fn low_half(word: u32) -> u16 {
+    (word & 0xffff) as u16
+}
+
+/// Sign extends a sixteen-bit value to a full signed integer.
+const fn sign_extend_16(value: u16) -> i32 {
+    let widened = value as i32;
+    if value & 0x8000 == 0 {
+        widened
+    } else {
+        widened - 0x1_0000
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decoded_instruction_is_eight_bytes() {
+        assert_eq!(size_of::<Instruction>(), 8);
+        assert!(size_of::<Opcode>() <= 2);
+    }
+
+    #[test]
+    fn decoding_is_total_over_arbitrary_words() {
+        for word in [0u32, 1, 0xffff_ffff, 0x4e80_0020, 0x6000_0000] {
+            let instruction = Instruction::decode(word);
+            assert_eq!(instruction.word(), word);
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_word_keeps_its_bits() {
+        let instruction = Instruction::decode(0xffff_ffff);
+
+        assert!(instruction.is_unknown());
+        assert_eq!(instruction.opcode(), Opcode::Unknown);
+        assert_eq!(instruction.word(), 0xffff_ffff);
+        assert_eq!(instruction.form(), None);
+        assert_eq!(instruction.extended_opcode(), None);
+    }
+
+    #[test]
+    fn reads_register_operands_of_a_three_register_instruction() {
+        // add r3, r2, r3
+        let instruction = Instruction::decode(0x7c62_1a14);
+
+        assert_eq!(instruction.opcode(), Opcode::Add);
+        assert_eq!(instruction.rt(), 3);
+        assert_eq!(instruction.ra(), 2);
+        assert_eq!(instruction.rb(), 3);
+    }
+
+    #[test]
+    fn register_fields_never_exceed_five_bits() {
+        for word in [0u32, 0xffff_ffff, 0x7fff_ffff, 0x8000_0000] {
+            let instruction = Instruction::decode(word);
+            assert!(instruction.rt() < 32);
+            assert!(instruction.ra() < 32);
+            assert!(instruction.rb() < 32);
+        }
+    }
+
+    #[test]
+    fn sign_extends_a_negative_displacement() {
+        // stw r14, -152(r1)
+        let instruction = Instruction::decode(0x91c1_ff68);
+
+        assert_eq!(instruction.opcode(), Opcode::Stw);
+        assert_eq!(instruction.rs(), 14);
+        assert_eq!(instruction.ra(), 1);
+        assert_eq!(instruction.displacement(), -152);
+        assert_eq!(instruction.immediate(), 0xff68);
+    }
+
+    #[test]
+    fn sign_extension_covers_the_whole_range() {
+        assert_eq!(sign_extend_16(0), 0);
+        assert_eq!(sign_extend_16(0x7fff), 32767);
+        assert_eq!(sign_extend_16(0x8000), -32768);
+        assert_eq!(sign_extend_16(0xffff), -1);
+    }
+
+    #[test]
+    fn reads_the_record_bit() {
+        // add r3, r2, r3 and its recording variant
+        assert!(!Instruction::decode(0x7c62_1a14).record_bit());
+        assert!(Instruction::decode(0x7c62_1a15).record_bit());
+    }
+
+    /// The record bit selects a variant, so it must not change which
+    /// instruction was decoded.
+    #[test]
+    fn the_record_bit_does_not_change_the_opcode() {
+        assert_eq!(
+            Instruction::decode(0x7c62_1a14).opcode(),
+            Instruction::decode(0x7c62_1a15).opcode()
+        );
+    }
+
+    /// The same holds for the overflow enable bit on the forms that carry it.
+    #[test]
+    fn the_overflow_bit_does_not_change_the_opcode() {
+        let plain = Instruction::decode(0x7c62_1a14);
+        let overflowing = Instruction::decode(0x7c62_1a14 | (1 << 10));
+
+        assert_eq!(plain.opcode(), overflowing.opcode());
+        assert!(!plain.overflow_enable());
+        assert!(overflowing.overflow_enable());
+    }
+
+    #[test]
+    fn reports_the_extended_opcode_width_of_each_form() {
+        assert_eq!(
+            Instruction::decode(0x7c62_1a14).extended_opcode(),
+            Some(266)
+        );
+        assert_eq!(Instruction::decode(0x7c62_1838).extended_opcode(), Some(28));
+        assert_eq!(Instruction::decode(0x3862_0001).extended_opcode(), None);
+    }
+}

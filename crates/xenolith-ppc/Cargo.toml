@@ -1,0 +1,13 @@
+[package]
+name = "xenolith-ppc"
+description = "Disassembler for the PowerPC instruction set of the Xbox 360 CPU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
