@@ -38,6 +38,7 @@ fn inspect_help_documents_its_arguments() {
     assert!(ok, "inspect help should succeed");
     assert!(stdout.contains("--key-file"), "key file not documented");
     assert!(stdout.contains("--decode"), "decode not documented");
+    assert!(stdout.contains("--imports"), "imports not documented");
 }
 
 #[test]

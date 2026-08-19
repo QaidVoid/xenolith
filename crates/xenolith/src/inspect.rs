@@ -4,11 +4,15 @@
 //! title with no key available. Decoding the image is a separate opt in, since
 //! that is the only part that actually needs one.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
-use xenolith_xex::{CompressionType, Container, EncryptionType, ExecutionInfo, PageKind, Section};
+use xenolith_xex::{
+    CompressionType, Container, EncryptionType, ExecutionInfo, Image, ImportKind, PageKind,
+    Section, imports,
+};
 
 use crate::keys;
 
@@ -25,6 +29,13 @@ pub(crate) struct Args {
     /// Decode the image as well as reading its headers.
     #[arg(long)]
     pub(crate) decode: bool,
+
+    /// List every import, with its address, library, ordinal, and kind.
+    ///
+    /// What a record names is written in the image rather than in the headers,
+    /// so this decodes the image and needs whatever key material that takes.
+    #[arg(long)]
+    pub(crate) imports: bool,
 }
 
 /// Runs the inspect subcommand.
@@ -48,8 +59,14 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     print_sections(&container.sections());
     print_imports(&container);
 
-    if args.decode {
-        decode(args, &container)?;
+    if args.decode || args.imports {
+        let image = decode(args, &container)?;
+        if args.decode {
+            print_decoded(&image);
+        }
+        if args.imports {
+            print_import_records(&container, &image)?;
+        }
     }
 
     Ok(())
@@ -179,8 +196,8 @@ fn print_imports(container: &Container<'_>) {
     }
 }
 
-/// Decodes the image and reports what came out.
-fn decode(args: &Args, container: &Container<'_>) -> Result<()> {
+/// Decodes the image.
+fn decode(args: &Args, container: &Container<'_>) -> Result<Image> {
     let key = keys::resolve(args.key_file.as_deref())?;
 
     if container.encryption() == EncryptionType::Encrypted && key.is_none() {
@@ -191,11 +208,14 @@ fn decode(args: &Args, container: &Container<'_>) -> Result<()> {
         ));
     }
 
-    let image = container
+    container
         .load(key.as_ref())
         .into_diagnostic()
-        .wrap_err_with(|| format!("decoding the image of {}", args.file.display()))?;
+        .wrap_err_with(|| format!("decoding the image of {}", args.file.display()))
+}
 
+/// Reports what came out of decoding.
+fn print_decoded(image: &Image) {
     println!("\n  decoded");
     println!(
         "    size            {}",
@@ -206,6 +226,39 @@ fn decode(args: &Args, container: &Container<'_>) -> Result<()> {
         "    executable      {} sections",
         image.executable_sections().count()
     );
+}
+
+/// Lists what every import record names.
+fn print_import_records(container: &Container<'_>, image: &Image) -> Result<()> {
+    let found = imports(image, container.import_libraries())
+        .into_diagnostic()
+        .wrap_err("reading the import records")?;
+
+    let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for import in &found {
+        let entry = counts.entry(import.library).or_default();
+        match import.kind {
+            ImportKind::Thunk => entry.0 += 1,
+            ImportKind::Slot => entry.1 += 1,
+        }
+    }
+
+    println!("\n  import records ({})", found.len());
+    for (library, (thunks, slots)) in &counts {
+        println!("    {library:<16} {thunks:>4} thunks   {slots:>4} slots");
+    }
+
+    println!();
+    for import in &found {
+        let kind = match import.kind {
+            ImportKind::Thunk => "thunk",
+            ImportKind::Slot => "slot",
+        };
+        println!(
+            "    {:#010x}  {kind:<6} {:<16} ordinal {}",
+            import.address, import.library, import.ordinal
+        );
+    }
 
     Ok(())
 }
