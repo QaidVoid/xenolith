@@ -73,7 +73,17 @@ fn compiles(name: &str, emitted: &str) -> Result<(), String> {
     std::fs::write(&source, &program).map_err(|error| format!("writing the source: {error}"))?;
 
     let output = Command::new("clang")
-        .args(["-std=c17", "-Wall", "-Wextra", "-Werror", "-c"])
+        // A guest function that recurses on every path is a statement about
+        // the program that was translated, not about the translation. That
+        // warning reads intent, and lifted code has none to read.
+        .args([
+            "-std=c17",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wno-infinite-recursion",
+            "-c",
+        ])
         .arg("-o")
         .arg(directory.join("lifted.o"))
         .arg(&source)

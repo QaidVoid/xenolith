@@ -100,7 +100,17 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     // Everything the emitted code names is declared, which is more than the
     // discovered functions: a call into a register save helper lands partway
     // through one, and discovery does not claim those.
-    let mut source = String::from("#include \"xenolith.h\"\n\n");
+    let mut source = String::from(
+        "/* Emitted by xenolith. Every function is written under the\n\
+         \x20* instructions it came from, so the two can be read against each\n\
+         \x20* other.\n\
+         \x20*\n\
+         \x20* A guest function that recurses on every path is a statement about\n\
+         \x20* the program that was translated rather than about the\n\
+         \x20* translation, so a compiler warning that reads intent has none to\n\
+         \x20* read here. Build with -Wno-infinite-recursion.\n\
+         \x20*/\n\n#include \"xenolith.h\"\n\n",
+    );
     for address in &referenced {
         source.push_str(&declaration_of(*address));
     }

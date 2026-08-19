@@ -343,7 +343,10 @@ fn underlying(spelling: &str) -> &str {
 /// Loads the image the corpus was produced from, if one was supplied.
 macro_rules! supplied_image {
     () => {
-        match std::env::var_os("XENOLITH_ANALYSIS_XEX") {
+        // The corpus is one title's, so it needs that title's image. A separate
+        // name keeps it from being pointed at whichever image the analysis
+        // tests happen to be using.
+        match std::env::var_os("XENOLITH_LIFT_IMAGE") {
             Some(path) => {
                 let bytes = std::fs::read(&path).expect("reading the analysis container");
                 let container = Container::parse(&bytes).expect("parsing the container");
@@ -353,7 +356,7 @@ macro_rules! supplied_image {
                 container.load(key.as_ref()).expect("decoding the image")
             }
             None => {
-                eprintln!("skipping: XENOLITH_ANALYSIS_XEX is not set");
+                eprintln!("skipping: XENOLITH_LIFT_IMAGE is not set");
                 return;
             }
         }
@@ -382,6 +385,37 @@ macro_rules! supplied_corpus {
             }
         }
     };
+}
+
+/// Prints what the comparison found and returns how many instructions
+/// disagreed.
+fn report(
+    disagreements: &BTreeMap<&'static str, (u64, String)>,
+    misnamed: u64,
+    misnamed_example: &str,
+    naming: &BTreeMap<(String, &'static str), u64>,
+    checked: u64,
+) -> u64 {
+    eprintln!("instructions checked  {checked:>10}");
+    eprintln!("named differently     {misnamed:>10}");
+    if !misnamed_example.is_empty() {
+        eprintln!("  first: {misnamed_example}");
+    }
+
+    let mut named: Vec<(&(String, &str), &u64)> = naming.iter().collect();
+    named.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
+    for ((theirs, ours), count) in named.iter().take(15) {
+        eprintln!("  corpus {theirs:<12} we decode {ours:<12} {count:>8}");
+    }
+
+    eprintln!("mnemonics disagreeing {:>10}", disagreements.len());
+    let mut ranked: Vec<(&&str, &(u64, String))> = disagreements.iter().collect();
+    ranked.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
+    for (mnemonic, (count, example)) in ranked.iter().take(40) {
+        eprintln!("\n  {mnemonic} disagreed {count} times, first at\n      {example}");
+    }
+
+    ranked.iter().map(|(_, (count, _))| count).sum()
 }
 
 /// Returns whether the corpus can say anything useful about an instruction.
@@ -615,23 +649,23 @@ fn the_model_agrees_with_the_corpus_about_what_is_touched() {
         }
     }
 
-    eprintln!("instructions checked  {checked:>10}");
-    eprintln!("named differently     {misnamed:>10}");
-    if !misnamed_example.is_empty() {
-        eprintln!("  first: {misnamed_example}");
-    }
-    let mut named: Vec<((String, &str), u64)> = naming.into_iter().collect();
-    named.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-    for ((theirs, ours), count) in named.iter().take(15) {
-        eprintln!("  corpus {theirs:<12} we decode {ours:<12} {count:>8}");
-    }
-    eprintln!("mnemonics disagreeing {:>10}", disagreements.len());
+    // A corpus read against the wrong title disagrees about almost every
+    // instruction, which would read as a catastrophic model failure. Saying so
+    // outright is more useful than a hundred thousand disagreements.
+    let looked_at = checked + misnamed;
+    assert!(
+        misnamed * 20 <= looked_at,
+        "the corpus and the image disagree about {misnamed} of {looked_at} instructions, \
+         which means they are probably not the same title"
+    );
 
-    let mut ranked: Vec<(&str, (u64, String))> = disagreements.into_iter().collect();
-    ranked.sort_by_key(|(_, (count, _))| std::cmp::Reverse(*count));
-    for (mnemonic, (count, example)) in ranked.iter().take(40) {
-        eprintln!("\n  {mnemonic} disagreed {count} times, first at\n      {example}");
-    }
+    let disagreeing = report(
+        &disagreements,
+        misnamed,
+        &misnamed_example,
+        &naming,
+        checked,
+    );
 
     // A handful of records survive misaligned: the corpus is another project's
     // output rather than a description of the instruction set, and where it
@@ -640,10 +674,10 @@ fn the_model_agrees_with_the_corpus_about_what_is_touched() {
     // between different instructions, which is a limit of the reading rather
     // than a claim about the model.
     //
-    // The bound is there because a real mistake in the model is not subtle. Every
-    // one found so far ran to tens of thousands of instructions, because an
-    // instruction set is regular and a wrong rule is wrong everywhere it applies.
-    let disagreeing: u64 = ranked.iter().map(|(_, (count, _))| count).sum();
+    // The bound is there because a real mistake in the model is not subtle.
+    // Every one found so far ran to tens of thousands of instructions, because
+    // an instruction set is regular and a wrong rule is wrong everywhere it
+    // applies.
     let allowed = checked / 10_000;
     eprintln!("instructions disagreeing {disagreeing:>7}  (allowed {allowed})");
 

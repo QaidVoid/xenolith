@@ -1034,6 +1034,26 @@ fn terminator_code(
     }
 }
 
+/// Writes where control goes when it continues past a block.
+///
+/// Inside the function that is a branch to a label. Outside it, control has
+/// entered another function, so that one is called and returned from. Writing
+/// nothing would let the emitted function run off its end, which loses the rest
+/// of the program quietly.
+fn continue_at(
+    out: &mut String,
+    address: u32,
+    starts: &std::collections::BTreeSet<u32>,
+    calls: &mut std::collections::BTreeSet<u32>,
+) {
+    if starts.contains(&address) {
+        writeln!(out, "    goto {};", label_of(address)).ok();
+        return;
+    }
+    calls.insert(address);
+    writeln!(out, "    {}(ctx, base);\n    return;", name_of(address)).ok();
+}
+
 /// Returns the C condition a conditional branch tests.
 fn condition_of(instruction: Instruction) -> String {
     let bo = instruction.branch_condition();
@@ -1138,8 +1158,8 @@ pub fn lift(image: &Image, function: &Function) -> Result<Lifted, Unlifted> {
                     // Where control continues afterwards is stated rather than
                     // left to the order the blocks happen to be written in,
                     // which nothing downstream should have to rely on.
-                    if instruction.flow(address).falls_through && starts.contains(&block.end) {
-                        let _ = writeln!(body, "    goto {};", label_of(block.end));
+                    if instruction.flow(address).falls_through {
+                        continue_at(&mut body, block.end, &starts, &mut calls);
                     }
                 }
             }
@@ -1149,9 +1169,7 @@ pub fn lift(image: &Image, function: &Function) -> Result<Lifted, Unlifted> {
 
         // A block that runs into the next one says so for the same reason.
         if let Terminator::FallsInto { next } = block.terminator {
-            if starts.contains(&next) {
-                let _ = writeln!(body, "    goto {};", label_of(next));
-            }
+            continue_at(&mut body, next, &starts, &mut calls);
         }
     }
 
