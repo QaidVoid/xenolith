@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 
 use xenolith_xex::{
-    CompressionType, Container, EncryptionType, Error, Format, KeyMaterial, OptionalHeaderValue,
+    CompressionType, Container, EncryptionType, Error, Format, ImportKind, KeyMaterial,
+    OptionalHeaderValue, imports,
 };
 
 /// Returns the path named by `XENOLITH_TEST_XEX`, or `None` when it is unset.
@@ -277,4 +278,70 @@ fn the_decoded_image_matches_an_independent_reference() {
         image[overlap..].iter().all(|byte| *byte == 0),
         "the zero filled tail is not zero"
     );
+}
+
+/// Reads every import record a real title declares.
+///
+/// The layout of a record is inferred from what shipped titles hold rather than
+/// taken from a specification, so this is the check that the inference holds.
+/// Three things have to be true at once: every record decodes, the library index
+/// inside each word matches the list it was found under, and slots and thunks
+/// land in the kinds of section each belongs in.
+#[test]
+fn every_import_record_reads() {
+    let bytes = container_bytes!();
+    let container = Container::parse(&bytes).expect("real container should parse");
+    let key = std::env::var("XENOLITH_XEX_KEY")
+        .ok()
+        .map(|text| KeyMaterial::from_hex(&text).expect("parsing XENOLITH_XEX_KEY"));
+
+    if container.encryption() == EncryptionType::Encrypted && key.is_none() {
+        eprintln!("skipping: title is encrypted and XENOLITH_XEX_KEY is not set");
+        return;
+    }
+
+    let libraries: Vec<(String, usize)> = container
+        .import_libraries()
+        .iter()
+        .map(|library| (library.name.to_owned(), library.imports.len()))
+        .collect();
+    let declared: usize = libraries.iter().map(|(_, count)| count).sum();
+    if declared == 0 {
+        eprintln!("skipping: the title declares no imports");
+        return;
+    }
+
+    let image = container.load(key.as_ref()).expect("decoding the image");
+    let found = imports(&image, container.import_libraries()).expect("every record should read");
+
+    assert_eq!(
+        found.len(),
+        declared,
+        "read {} records, the libraries declare {declared}",
+        found.len()
+    );
+
+    for import in &found {
+        let section = image
+            .section_at(import.address)
+            .unwrap_or_else(|| panic!("{:#010x} is in no section", import.address));
+        match import.kind {
+            ImportKind::Thunk => assert!(
+                section.kind.is_executable(),
+                "a thunk at {:#010x} is not in executable memory",
+                import.address
+            ),
+            ImportKind::Slot => assert!(
+                !section.kind.is_executable(),
+                "a slot at {:#010x} is in executable memory",
+                import.address
+            ),
+        }
+    }
+
+    let thunks = found
+        .iter()
+        .filter(|import| import.kind == ImportKind::Thunk)
+        .count();
+    assert!(thunks > 0, "no import has a thunk");
 }

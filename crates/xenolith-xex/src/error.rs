@@ -174,6 +174,54 @@ pub enum Error {
         count: usize,
     },
 
+    /// An import library listed a record address that is not in the image.
+    #[error("import record for {library} at {address:#010x} is outside the image")]
+    ImportRecordOutside {
+        /// Name of the library that listed the address.
+        library: String,
+        /// The address that was listed.
+        address: u32,
+    },
+
+    /// An import record named a library other than the one that listed it.
+    ///
+    /// The record carries the index of its own library, so the two have to
+    /// agree. A disagreement means the word is not a record, and calling the
+    /// import it appears to name would call the wrong one.
+    #[error(
+        "import record at {address:#010x} names library {found}, but {library} is library {expected}"
+    )]
+    ImportRecordLibrary {
+        /// Name of the library that listed the address.
+        library: String,
+        /// The address the record sits at.
+        address: u32,
+        /// The library index the record held.
+        found: u8,
+        /// The index of the library that listed it.
+        expected: u8,
+    },
+
+    /// An import record held a kind this crate does not recognize.
+    #[error("import record at {address:#010x} is of unknown kind {kind}")]
+    ImportRecordKind {
+        /// The address the record sits at.
+        address: u32,
+        /// The kind byte the record held.
+        kind: u8,
+    },
+
+    /// A record declared to be a thunk does not have a thunk's shape.
+    ///
+    /// A thunk is two placeholder words the loader overwrites, followed by a
+    /// jump through the count register. Anything else is not a thunk, and
+    /// emitting a call for it would be a guess.
+    #[error("import thunk at {address:#010x} does not have the shape of one")]
+    ImportThunkMalformed {
+        /// The address the record sits at.
+        address: u32,
+    },
+
     /// A variable length optional header declared a size that cannot be valid.
     ///
     /// The declared size covers the length field itself, so anything below four

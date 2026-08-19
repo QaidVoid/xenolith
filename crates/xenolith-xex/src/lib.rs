@@ -17,6 +17,7 @@ mod crypto;
 mod error;
 mod headers;
 mod image;
+mod imports;
 mod reader;
 mod security;
 
@@ -28,4 +29,5 @@ pub use headers::{
     NormalCompression, Version, keys,
 };
 pub use image::{Image, Permissions, Section};
+pub use imports::{Import, ImportKind, imports};
 pub use security::{PageDescriptor, PageKind, SecurityInfo};
