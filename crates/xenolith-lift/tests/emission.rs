@@ -746,3 +746,68 @@ fn the_vector_views_agree_about_byte_order() {
         "a lane written through one width disagrees with another"
     );
 }
+
+/// The vector families that work lane by lane, checked for where each lane
+/// comes from rather than only for compiling.
+#[test]
+fn the_vector_lane_operations_lift() {
+    // mflr r12; stwu r1, -96(r1);
+    // vand v1,v2,v3; vsel v1,v2,v3,v4; vspltisw v1,-1; vspltw v1,v3,2;
+    // vmrghw v1,v2,v3; vmrglw v1,v2,v3; vsubfp v1,v2,v3; vmaddfp v1,v2,v3,v4;
+    // addi r1, r1, 96; blr
+    const WORDS: [u32; 12] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x1022_1c04,
+        0x1022_192a,
+        0x103f_038c,
+        0x1022_1a8c,
+        0x1022_188c,
+        0x1022_198c,
+        0x1022_184a,
+        0x1022_192e,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the vector operations should lift");
+
+    assert!(
+        emitted.contains(
+            "xenolith_vector_set_u32(&t, lane, xenolith_vector_u32(&ctx->v[2], lane) & xenolith_vector_u32(&ctx->v[3], lane));"
+        ),
+        "the bitwise and was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("(uint32_t)(int32_t)(-1)"),
+        "the immediate was not sign extended: {emitted}"
+    );
+    assert!(
+        emitted.contains("xenolith_vector_u32(&ctx->v[3], 2)"),
+        "the splat did not take the lane the encoding names: {emitted}"
+    );
+    assert!(
+        emitted.contains("lane / 2 + 0") && emitted.contains("lane / 2 + 2"),
+        "the two merges did not take different halves: {emitted}"
+    );
+    assert!(
+        emitted.contains(
+            "xenolith_vector_f32(&ctx->v[2], lane) - xenolith_vector_f32(&ctx->v[3], lane)"
+        ),
+        "the float subtraction was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains(
+            "xenolith_vector_f32(&ctx->v[2], lane) * xenolith_vector_f32(&ctx->v[4], lane) + xenolith_vector_f32(&ctx->v[3], lane)"
+        ),
+        "the fused multiply took the wrong operands: {emitted}"
+    );
+    // Every lane goes into a temporary, so an instruction naming its
+    // destination as a source cannot read a lane it has already written.
+    assert_eq!(
+        emitted.matches("xenolith_vector t;").count(),
+        8,
+        "not every lane operation built its result somewhere else: {emitted}"
+    );
+    assert_eq!(compiles("vector_lanes_emitted", &emitted), Ok(()));
+}

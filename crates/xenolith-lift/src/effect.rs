@@ -113,6 +113,15 @@ enum Shape {
     FloatMultiply,
     /// Reads two floating registers and writes a condition field.
     FloatCompare,
+    /// Writes a vector register from two of them.
+    VectorFromBoth,
+    /// Writes a vector register from one of them.
+    VectorFromOne,
+    /// Writes a vector register from three of them, which is how the fused
+    /// multiplies and the select are encoded.
+    VectorFromThree,
+    /// Writes a vector register from an immediate alone.
+    VectorFromImmediate,
     /// Touches places its fields name rather than places its form implies.
     Named,
     /// Reads or writes memory at an address built from its operands.
@@ -368,6 +377,50 @@ fn other_shape(opcode: Opcode) -> Option<Shape> {
         Opcode::Cmp | Opcode::Cmpl => Shape::CompareBoth,
         Opcode::Cmpi | Opcode::Cmpli => Shape::CompareImmediate,
 
+        // The vector families, which arrive twice: once as the standard
+        // extension and once as the console's, whose forms hold their register
+        // numbers in different bits.
+        Opcode::Vand
+        | Opcode::Vand128
+        | Opcode::Vandc
+        | Opcode::Vor
+        | Opcode::Vor128
+        | Opcode::Vnor
+        | Opcode::Vxor
+        | Opcode::Vxor128
+        | Opcode::Vmrghb
+        | Opcode::Vmrghh
+        | Opcode::Vmrghw
+        | Opcode::Vmrghw128
+        | Opcode::Vmrglb
+        | Opcode::Vmrglh
+        | Opcode::Vmrglw
+        | Opcode::Vmrglw128
+        | Opcode::Vaddfp
+        | Opcode::Vaddfp128
+        | Opcode::Vsubfp
+        | Opcode::Vsubfp128
+        | Opcode::Vmulfp128
+        | Opcode::Vmaxfp
+        | Opcode::Vmaxfp128
+        | Opcode::Vminfp
+        | Opcode::Vminfp128 => Shape::VectorFromBoth,
+
+        Opcode::Vspltb | Opcode::Vsplth | Opcode::Vspltw | Opcode::Vspltw128 => {
+            Shape::VectorFromOne
+        }
+
+        Opcode::Vsel
+        | Opcode::Vsel128
+        | Opcode::Vmaddfp
+        | Opcode::Vmaddfp128
+        | Opcode::Vnmsubfp
+        | Opcode::Vnmsubfp128 => Shape::VectorFromThree,
+
+        Opcode::Vspltisb | Opcode::Vspltish | Opcode::Vspltisw | Opcode::Vspltisw128 => {
+            Shape::VectorFromImmediate
+        }
+
         // These name what they touch in a way no shape describes, so each is
         // handled where the shapes are applied rather than being given one.
         Opcode::Mtspr
@@ -557,6 +610,30 @@ fn special(number: u32) -> Option<Location> {
     }
 }
 
+/// Returns the vector registers an instruction names, as destination and three
+/// sources.
+///
+/// The console's extension scatters the extra bits of a register number across
+/// the word, so which bits hold one depends on the form rather than on the
+/// position.
+fn vector_operands(instruction: Instruction) -> (u8, u8, u8, u8) {
+    if instruction.form().is_some_and(Form::is_console_extension) {
+        (
+            instruction.vector_d(),
+            instruction.vector_a(),
+            instruction.vector_b(),
+            instruction.vector_b(),
+        )
+    } else {
+        (
+            instruction.rt(),
+            instruction.ra(),
+            instruction.rb(),
+            third_operand(instruction),
+        )
+    }
+}
+
 /// Returns the third operand of a fused arithmetic instruction.
 ///
 /// It sits where no other form puts an operand, which is why the forms that
@@ -571,6 +648,31 @@ fn third_operand(instruction: Instruction) -> u8 {
 /// inside the operand position the other forms use for a target register.
 fn compared_field(instruction: Instruction) -> u8 {
     instruction.rt() >> 2
+}
+
+/// Writes what a vector shape says an instruction touches.
+///
+/// Which bits hold a register number depends on the form, since the console's
+/// extension reaches four times as many registers by scattering the extra bits
+/// across the word.
+fn vector_effect(shape: Shape, instruction: Instruction, effect: &mut Effect) {
+    let (d, a, b, c) = vector_operands(instruction);
+
+    match shape {
+        Shape::VectorFromBoth => {
+            effect.read(Location::Vector(a));
+            effect.read(Location::Vector(b));
+        }
+        Shape::VectorFromOne => effect.read(Location::Vector(b)),
+        Shape::VectorFromThree => {
+            effect.read(Location::Vector(a));
+            effect.read(Location::Vector(b));
+            effect.read(Location::Vector(c));
+        }
+        // An immediate names no source.
+        _ => {}
+    }
+    effect.write(Location::Vector(d));
 }
 
 /// Writes what a shape says an instruction touches.
@@ -643,6 +745,10 @@ fn apply(shape: Shape, instruction: Instruction, effect: &mut Effect) {
             effect.read(Location::Floating(rb));
             effect.write(Location::Condition(compared_field(instruction)));
         }
+        Shape::VectorFromBoth
+        | Shape::VectorFromOne
+        | Shape::VectorFromThree
+        | Shape::VectorFromImmediate => vector_effect(shape, instruction, effect),
         Shape::Named => named_effect(instruction, effect),
         Shape::Memory(access) => {
             // An address built on register zero is built on nothing, the same
@@ -962,8 +1068,8 @@ mod tests {
 
     #[test]
     fn an_unmodelled_instruction_admits_it() {
-        // vmrghw v0, v0, v0, a vector arithmetic instruction
-        assert_eq!(effect_of(Instruction::decode(0x1000_008c)), None);
+        // vsl v1, v2, v3, a vector shift with no semantics here
+        assert_eq!(effect_of(Instruction::decode(0x1022_19c4)), None);
     }
 
     #[test]
@@ -975,8 +1081,8 @@ mod tests {
             "nothing is modelled beyond a subset yet"
         );
         assert!(
-            missing.contains(&"vmrghw"),
-            "the vector arithmetic is not modelled yet"
+            missing.contains(&"vsl"),
+            "the vector shifts are not modelled yet"
         );
         assert!(
             !missing.contains(&"add"),

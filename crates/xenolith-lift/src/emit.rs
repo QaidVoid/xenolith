@@ -198,6 +198,266 @@ fn indexed_address(ra: u32, rb: u32) -> String {
     }
 }
 
+/// Returns the vector registers an instruction names, as destination and three
+/// sources.
+///
+/// The console's extension reaches four times as many registers by scattering
+/// the extra bits across the word, so which bits hold a register number depends
+/// on the form rather than on the position.
+fn vector_operands(instruction: Instruction) -> (u32, u32, u32, u32) {
+    if instruction
+        .form()
+        .is_some_and(xenolith_ppc::Form::is_console_extension)
+    {
+        (
+            u32::from(instruction.vector_d()),
+            u32::from(instruction.vector_a()),
+            u32::from(instruction.vector_b()),
+            u32::from(instruction.vector_b()),
+        )
+    } else {
+        (
+            u32::from(instruction.rt()),
+            u32::from(instruction.ra()),
+            u32::from(instruction.rb()),
+            (instruction.word() >> 6) & 0x1f,
+        )
+    }
+}
+
+/// Writes a lane by lane operation through a temporary.
+///
+/// The temporary is not something to optimize away. An instruction may name its
+/// destination as one of its sources, and a merge or a splat reads lanes the
+/// loop has already passed. Building the result somewhere else makes that
+/// impossible rather than making it depend on the order the lanes are visited
+/// in.
+fn vector_lanes(out: &mut String, destination: u32, count: u32, width: &str, body: &str) {
+    let _ = writeln!(out, "    {{ xenolith_vector t;");
+    let _ = writeln!(
+        out,
+        "    for (unsigned lane = 0; lane < {count}; lane++) {{"
+    );
+    let _ = writeln!(
+        out,
+        "        xenolith_vector_set_{width}(&t, lane, {body});"
+    );
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    ctx->v[{destination}] = t; }}");
+}
+
+/// Returns the lane width a vector operation works at, as the name its
+/// accessors go by and how many of them fit in a register.
+fn lane_width(width: u32) -> (&'static str, u32) {
+    match width {
+        1 => ("u8", 16),
+        2 => ("u16", 8),
+        8 => ("u64", 2),
+        _ => ("u32", 4),
+    }
+}
+
+/// Returns the C for a vector instruction, if it can be written.
+fn vector_code(instruction: Instruction) -> Option<String> {
+    let (d, a, b, c) = vector_operands(instruction);
+    let mut out = String::new();
+
+    let at = |register: u32, width: &str, lane: &str| {
+        format!("xenolith_vector_{width}(&ctx->v[{register}], {lane})")
+    };
+
+    match instruction.opcode() {
+        // The bitwise operations are the same whatever width the lanes are
+        // read at, so they are done a word at a time.
+        Opcode::Vand | Opcode::Vand128 => {
+            let body = format!("{} & {}", at(a, "u32", "lane"), at(b, "u32", "lane"));
+            vector_lanes(&mut out, d, 4, "u32", &body);
+        }
+        Opcode::Vandc => {
+            let body = format!("{} & ~{}", at(a, "u32", "lane"), at(b, "u32", "lane"));
+            vector_lanes(&mut out, d, 4, "u32", &body);
+        }
+        Opcode::Vor | Opcode::Vor128 => {
+            let body = format!("{} | {}", at(a, "u32", "lane"), at(b, "u32", "lane"));
+            vector_lanes(&mut out, d, 4, "u32", &body);
+        }
+        Opcode::Vnor => {
+            let body = format!("~({} | {})", at(a, "u32", "lane"), at(b, "u32", "lane"));
+            vector_lanes(&mut out, d, 4, "u32", &body);
+        }
+        Opcode::Vxor | Opcode::Vxor128 => {
+            let body = format!("{} ^ {}", at(a, "u32", "lane"), at(b, "u32", "lane"));
+            vector_lanes(&mut out, d, 4, "u32", &body);
+        }
+        // Every set bit of the control takes the second source and every clear
+        // bit takes the first, which is a choice per bit rather than per lane.
+        Opcode::Vsel | Opcode::Vsel128 => {
+            let control = if instruction.opcode() == Opcode::Vsel {
+                c
+            } else {
+                // The console's form names its control where the third operand
+                // of a standard four operand instruction would not fit.
+                u32::from(instruction.vector_d())
+            };
+            let body = format!(
+                "({} & {}) | ({} & ~{})",
+                at(b, "u32", "lane"),
+                at(control, "u32", "lane"),
+                at(a, "u32", "lane"),
+                at(control, "u32", "lane")
+            );
+            vector_lanes(&mut out, d, 4, "u32", &body);
+        }
+
+        _ => return vector_arrangement(instruction),
+    }
+
+    Some(out)
+}
+
+/// Returns the C for a vector instruction that moves lanes rather than
+/// computing across them.
+fn vector_arrangement(instruction: Instruction) -> Option<String> {
+    let (d, a, b, _) = vector_operands(instruction);
+    let mut out = String::new();
+    let immediate = u32::from(instruction.ra());
+
+    let at = |register: u32, width: &str, lane: &str| {
+        format!("xenolith_vector_{width}(&ctx->v[{register}], {lane})")
+    };
+
+    match instruction.opcode() {
+        // A five bit signed immediate reaches every lane, sign extended to
+        // whatever width the lane is.
+        Opcode::Vspltisb | Opcode::Vspltish | Opcode::Vspltisw | Opcode::Vspltisw128 => {
+            let width = match instruction.opcode() {
+                Opcode::Vspltisb => 1,
+                Opcode::Vspltish => 2,
+                _ => 4,
+            };
+            let (name, count) = lane_width(width);
+            let value = sign_extended(immediate, 5);
+            let body = format!("(uint{}_t)(int{}_t)({value})", width * 8, width * 8);
+            vector_lanes(&mut out, d, count, name, &body);
+        }
+        // One lane of a source reaches every lane.
+        Opcode::Vspltb | Opcode::Vsplth | Opcode::Vspltw | Opcode::Vspltw128 => {
+            let width = match instruction.opcode() {
+                Opcode::Vspltb => 1,
+                Opcode::Vsplth => 2,
+                _ => 4,
+            };
+            let (name, count) = lane_width(width);
+            let lane = immediate % count;
+            let body = at(b, name, &lane.to_string());
+            vector_lanes(&mut out, d, count, name, &body);
+        }
+
+        // A merge interleaves one half of each source, which is entirely about
+        // which lane goes where.
+        Opcode::Vmrghb
+        | Opcode::Vmrghh
+        | Opcode::Vmrghw
+        | Opcode::Vmrghw128
+        | Opcode::Vmrglb
+        | Opcode::Vmrglh
+        | Opcode::Vmrglw
+        | Opcode::Vmrglw128 => {
+            let width = match instruction.opcode() {
+                Opcode::Vmrghb | Opcode::Vmrglb => 1,
+                Opcode::Vmrghh | Opcode::Vmrglh => 2,
+                _ => 4,
+            };
+            let (name, count) = lane_width(width);
+            let low = matches!(
+                instruction.opcode(),
+                Opcode::Vmrglb | Opcode::Vmrglh | Opcode::Vmrglw | Opcode::Vmrglw128
+            );
+            let offset = if low { count / 2 } else { 0 };
+            let source = format!("lane / 2 + {offset}");
+            let body = format!(
+                "(lane % 2 == 0) ? {} : {}",
+                at(a, name, &source),
+                at(b, name, &source)
+            );
+            vector_lanes(&mut out, d, count, name, &body);
+        }
+
+        _ => return vector_float(instruction),
+    }
+
+    Some(out)
+}
+
+/// Returns the C for a vector instruction that computes in single precision.
+fn vector_float(instruction: Instruction) -> Option<String> {
+    let (d, a, b, c) = vector_operands(instruction);
+    let mut out = String::new();
+
+    let at = |register: u32, width: &str, lane: &str| {
+        format!("xenolith_vector_{width}(&ctx->v[{register}], {lane})")
+    };
+
+    match instruction.opcode() {
+        // Four lanes of single precision, done as the host's floats.
+        Opcode::Vaddfp | Opcode::Vaddfp128 => {
+            let body = format!("{} + {}", at(a, "f32", "lane"), at(b, "f32", "lane"));
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        Opcode::Vsubfp | Opcode::Vsubfp128 => {
+            let body = format!("{} - {}", at(a, "f32", "lane"), at(b, "f32", "lane"));
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        Opcode::Vmulfp128 => {
+            let body = format!("{} * {}", at(a, "f32", "lane"), at(b, "f32", "lane"));
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        Opcode::Vmaxfp | Opcode::Vmaxfp128 | Opcode::Vminfp | Opcode::Vminfp128 => {
+            let keep = if matches!(instruction.opcode(), Opcode::Vmaxfp | Opcode::Vmaxfp128) {
+                ">"
+            } else {
+                "<"
+            };
+            let body = format!(
+                "({0} {keep} {1}) ? {0} : {1}",
+                at(a, "f32", "lane"),
+                at(b, "f32", "lane")
+            );
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        Opcode::Vmaddfp | Opcode::Vmaddfp128 => {
+            let body = format!(
+                "{} * {} + {}",
+                at(a, "f32", "lane"),
+                at(c, "f32", "lane"),
+                at(b, "f32", "lane")
+            );
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+        Opcode::Vnmsubfp | Opcode::Vnmsubfp128 => {
+            let body = format!(
+                "-({} * {} - {})",
+                at(a, "f32", "lane"),
+                at(c, "f32", "lane"),
+                at(b, "f32", "lane")
+            );
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
+
+        _ => return None,
+    }
+
+    Some(out)
+}
+
+/// Returns an immediate sign extended from `bits` wide.
+fn sign_extended(value: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    #[allow(clippy::cast_possible_wrap)]
+    let wide = value as i32;
+    (wide << shift) >> shift
+}
+
 /// Returns the C for one instruction, if it can be written.
 ///
 /// Returns `None` for anything this crate cannot express, which is a normal
@@ -1185,7 +1445,7 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         | Opcode::Bclr
         | Opcode::Bcctr => {}
 
-        _ => return None,
+        _ => out.push_str(&vector_code(instruction)?),
     }
 
     if records {
