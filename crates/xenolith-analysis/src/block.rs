@@ -115,6 +115,18 @@ fn is_executable(image: &Image, address: u32) -> bool {
 /// instruction the walk decoded.
 #[must_use]
 pub fn blocks_from(image: &Image, entry: u32) -> Vec<Block> {
+    blocks_within(image, entry, &BTreeSet::new())
+}
+
+/// Walks control flow from `entry`, stopping at any address in `boundaries`.
+///
+/// A boundary is somewhere another function begins. Without them a branch that
+/// leaves one function for another, which is how a tail call is compiled, would
+/// pull the whole of that other function in and the two would be reported as
+/// one. The entry itself is never a boundary to its own walk, so a function
+/// that loops back to its first instruction still works.
+#[must_use]
+pub fn blocks_within(image: &Image, entry: u32, boundaries: &BTreeSet<u32>) -> Vec<Block> {
     let mut leaders = BTreeSet::new();
     let mut ends = BTreeMap::new();
     let mut pending = vec![entry];
@@ -128,6 +140,13 @@ pub fn blocks_from(image: &Image, entry: u32) -> Vec<Block> {
 
         let mut address = start;
         loop {
+            // Running into another function ends this one. The transfer is
+            // still recorded, but its target belongs to somebody else.
+            if address != entry && address != start && boundaries.contains(&address) {
+                ends.insert(start, (address, Terminator::FallsInto { next: address }));
+                break;
+            }
+
             // Running into a leader means the rest of this run is another
             // block, which has been or will be walked on its own.
             if address != start && leaders.contains(&address) {
@@ -156,7 +175,12 @@ pub fn blocks_from(image: &Image, entry: u32) -> Vec<Block> {
 
             if flow.terminates_block() {
                 if let Some(target) = flow.target {
-                    if is_executable(image, target) {
+                    // A transfer into another function is recorded but not
+                    // followed, so its blocks stay with the function that owns
+                    // them.
+                    if is_executable(image, target)
+                        && !(target != entry && boundaries.contains(&target))
+                    {
                         leaders.insert(target);
                         pending.push(target);
                     }

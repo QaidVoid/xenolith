@@ -10,6 +10,7 @@ use xenolith_xex::{Image, PageKind, Section};
 /// Assembles instruction words into an image with one executable section.
 pub(crate) struct ImageBuilder {
     base: u32,
+    entry: Option<u32>,
     words: Vec<u32>,
 }
 
@@ -18,8 +19,15 @@ impl ImageBuilder {
     pub(crate) fn new(base: u32) -> Self {
         Self {
             base,
+            entry: None,
             words: Vec::new(),
         }
+    }
+
+    /// Names where execution begins.
+    pub(crate) fn entry(mut self, address: u32) -> Self {
+        self.entry = Some(address);
+        self
     }
 
     /// Appends instruction words.
@@ -42,7 +50,7 @@ impl ImageBuilder {
             kind: PageKind::Code,
         }];
 
-        Image::new(self.base, bytes, sections)
+        Image::new(self.base, bytes, sections).with_entry_point(self.entry)
     }
 }
 
