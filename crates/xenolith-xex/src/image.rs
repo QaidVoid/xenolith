@@ -226,6 +226,9 @@ mod tests {
 /// Bytes in one image page, as recorded by the page descriptors.
 pub(crate) const PAGE_SIZE: u32 = 0x1_0000;
 
+/// One past the highest address the console can form.
+const ADDRESS_SPACE_END: u64 = u32::MAX as u64 + 1;
+
 /// What a section permits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Permissions {
@@ -321,28 +324,43 @@ impl Image {
     }
 
     /// Coalesces page descriptors into sections of one kind each.
+    ///
+    /// A container can declare more pages than the 32-bit address space holds.
+    /// Each section is clamped to what remains of that space and descriptors
+    /// past its end are dropped, so no section can describe an address the
+    /// console could not form.
     pub(crate) fn sections_from_descriptors(
         base_address: u32,
         descriptors: &[PageDescriptor],
     ) -> Vec<Section> {
         let mut sections: Vec<Section> = Vec::new();
-        let mut address = base_address;
+        let mut address = u64::from(base_address);
 
         for descriptor in descriptors {
-            let size = descriptor.page_count.saturating_mul(PAGE_SIZE);
+            let available = ADDRESS_SPACE_END.saturating_sub(address);
+            if available == 0 {
+                break;
+            }
+
+            let requested = u64::from(descriptor.page_count) * u64::from(PAGE_SIZE);
+            let size = u32::try_from(requested.min(available).min(u64::from(u32::MAX)))
+                .unwrap_or(u32::MAX);
+            if size == 0 {
+                continue;
+            }
 
             match sections.last_mut() {
                 Some(last) if last.kind == descriptor.kind => {
                     last.size = last.size.saturating_add(size);
                 }
                 _ => sections.push(Section {
-                    start: address,
+                    start: u32::try_from(address).unwrap_or(u32::MAX),
                     size,
                     kind: descriptor.kind,
                 }),
             }
 
-            address = address.saturating_add(size);
+            address += u64::from(size);
         }
 
         sections
@@ -659,6 +677,81 @@ mod address_space_tests {
                 "sections overlap"
             );
         }
+    }
+
+    /// Found by fuzzing the decode path. A container can declare more pages
+    /// than the address space holds, and clamping each section to what remains
+    /// is what keeps the table describing addresses the console could form.
+    #[test]
+    fn sections_never_extend_past_the_address_space() {
+        let descriptors = [
+            PageDescriptor {
+                page_count: 0x0fff_ffff,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 0x0fff_ffff,
+                kind: PageKind::Data,
+                digest: [0; 20],
+            },
+        ];
+
+        for base in [0u32, 0x8200_0000, 0xf000_0000, 0xffff_0000] {
+            let sections = Image::sections_from_descriptors(base, &descriptors);
+
+            for section in &sections {
+                assert!(
+                    section.end() <= u64::from(u32::MAX) + 1,
+                    "base {base:#x} produced {section:?} past the address space"
+                );
+                assert!(section.start >= base, "section starts below the base");
+            }
+        }
+    }
+
+    #[test]
+    fn descriptors_beyond_the_address_space_are_dropped() {
+        let descriptors = [
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Data,
+                digest: [0; 20],
+            },
+        ];
+
+        let sections = Image::sections_from_descriptors(0xffff_0000, &descriptors);
+
+        assert_eq!(sections.len(), 1, "a section past the end survived");
+        assert_eq!(sections[0].kind, PageKind::Code);
+        assert_eq!(sections[0].end(), u64::from(u32::MAX) + 1);
+    }
+
+    #[test]
+    fn zero_page_descriptors_produce_no_section() {
+        let descriptors = [
+            PageDescriptor {
+                page_count: 0,
+                kind: PageKind::Code,
+                digest: [0; 20],
+            },
+            PageDescriptor {
+                page_count: 1,
+                kind: PageKind::Data,
+                digest: [0; 20],
+            },
+        ];
+
+        let sections = Image::sections_from_descriptors(0x8200_0000, &descriptors);
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].kind, PageKind::Data);
+        assert_eq!(sections[0].start, 0x8200_0000);
     }
 
     #[test]
