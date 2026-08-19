@@ -645,8 +645,14 @@ instructions! {
 
 impl Opcode {
     /// Returns the table entry for this opcode, if it has one.
+    ///
+    /// The macro emits variants in the same order as it emits table entries,
+    /// with the unknown variant first, so the discriminant indexes the table
+    /// directly. Searching for it instead would put a scan of the whole table
+    /// behind every operand and control flow query, which the analysis stages
+    /// make once per instruction over a whole image.
     pub(crate) fn entry(self) -> Option<&'static Entry> {
-        TABLE.iter().find(|entry| entry.opcode == self)
+        TABLE.get((self as usize).checked_sub(1)?)
     }
 
     /// Returns the mnemonic used when rendering this opcode as text.
@@ -778,6 +784,23 @@ mod tests {
                 entry.mnemonic
             );
         }
+    }
+
+    /// The direct indexing above is only sound while the two orders agree, and
+    /// nothing in the macro forces that beyond it emitting both from the same
+    /// declarations. This is what holds it.
+    #[test]
+    fn opcode_discriminants_index_the_table() {
+        for (index, entry) in TABLE.iter().enumerate() {
+            assert_eq!(
+                entry.opcode as usize,
+                index + 1,
+                "{} sits at table index {index} but has discriminant {}",
+                entry.mnemonic,
+                entry.opcode as usize
+            );
+        }
+        assert_eq!(Opcode::Unknown as usize, 0);
     }
 
     #[test]
