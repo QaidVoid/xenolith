@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
 miette = { version = "7.6.0", features = ["fancy"] }
+xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
 
 [lints]
 workspace = true

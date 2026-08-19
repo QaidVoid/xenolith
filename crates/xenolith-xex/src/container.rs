@@ -18,7 +18,7 @@ use crate::headers::{
     CompressionType, EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary, keys,
     parse_import_libraries,
 };
-use crate::image::{Image, reconstruct_basic, reconstruct_uncompressed};
+use crate::image::{Image, Section, reconstruct_basic, reconstruct_uncompressed};
 use crate::reader::Reader;
 use crate::security::SecurityInfo;
 
@@ -296,6 +296,18 @@ impl<'a> Container<'a> {
                 scheme: format!("{scheme:?}"),
             }),
         }
+    }
+
+    /// Returns the section layout described by the page descriptors.
+    ///
+    /// Derived from the headers alone, so this is available without decrypting
+    /// or decompressing anything.
+    #[must_use]
+    pub fn sections(&self) -> Vec<Section> {
+        Image::sections_from_descriptors(
+            self.security_info.load_address(),
+            self.security_info.page_descriptors(),
+        )
     }
 
     /// Decodes the container into an image addressable by virtual address.
