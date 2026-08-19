@@ -547,6 +547,50 @@ fn reports_how_much_of_the_corpus_is_modelled() {
     assert!(instructions > 0, "no corpus instruction matched the image");
 }
 
+/// Returns whether the corpus can express a place at all.
+///
+/// It names the register banks and the three special registers and nothing
+/// else, so the two registers this model holds as storage have no counterpart
+/// in it. Comparing them would report a difference in what the corpus can say
+/// rather than in what either model means.
+fn expressible(location: Location) -> bool {
+    !matches!(location, Location::Machine | Location::FloatingStatus)
+}
+
+/// Returns the places of a set that the corpus could have named.
+fn comparable(locations: &[Location]) -> BTreeSet<Location> {
+    locations
+        .iter()
+        .copied()
+        .filter(|location| expressible(*location))
+        .collect()
+}
+
+/// Returns what the corpus read, without the register it read only because a
+/// recorded result is lowered as a comparison against the register just
+/// written. That is a dependency inside the instruction rather than a register
+/// the instruction reads.
+fn without_the_recorded_read(
+    effect: &xenolith_lift::Effect,
+    theirs: &BTreeSet<Location>,
+    ours: &BTreeSet<Location>,
+) -> BTreeSet<Location> {
+    let mut reads = theirs.clone();
+    if !effect.writes().contains(&Location::Condition(0)) {
+        return reads;
+    }
+
+    for written in effect.writes() {
+        if matches!(written, Location::General(_)) {
+            reads.remove(written);
+            if theirs.contains(written) && ours.contains(written) {
+                reads.insert(*written);
+            }
+        }
+    }
+    reads
+}
+
 /// Compares what the model says an instruction touches against what the corpus
 /// says, for every instruction the model claims to describe.
 #[test]
@@ -610,23 +654,9 @@ fn the_model_agrees_with_the_corpus_about_what_is_touched() {
         };
         checked += 1;
 
-        let ours_reads: BTreeSet<Location> = effect.reads().iter().copied().collect();
-        let ours_writes: BTreeSet<Location> = effect.writes().iter().copied().collect();
-
-        // Recording a result is lowered as a comparison against the register
-        // just written, so the corpus lists that register as read. That is a
-        // dependency inside the instruction rather than a register it reads.
-        let mut theirs_reads = record.reads.clone();
-        if effect.writes().contains(&Location::Condition(0)) {
-            for written in effect.writes() {
-                if matches!(written, Location::General(_)) {
-                    theirs_reads.remove(written);
-                    if record.reads.contains(written) && ours_reads.contains(written) {
-                        theirs_reads.insert(*written);
-                    }
-                }
-            }
-        }
+        let ours_reads = comparable(effect.reads());
+        let ours_writes = comparable(effect.writes());
+        let theirs_reads = without_the_recorded_read(&effect, &record.reads, &ours_reads);
 
         if ours_reads == theirs_reads && ours_writes == record.writes {
             continue;

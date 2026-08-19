@@ -147,6 +147,20 @@ fn compare(into: &mut String, field: u8, left: &str, right: &str, less: &str) {
     );
 }
 
+/// Returns the bits a field mask selects, four per field.
+///
+/// The mask's most significant bit names the first field, which is the most
+/// significant four bits of the register it selects within.
+fn nibble_mask(mask: u8) -> u64 {
+    let mut bits = 0u64;
+    for field in 0..8u32 {
+        if mask & (1 << (7 - field)) != 0 {
+            bits |= 0xfu64 << (28 - 4 * field);
+        }
+    }
+    bits
+}
+
 /// Returns the effective address of an indexed access.
 ///
 /// Register zero names no register in this position rather than naming the
@@ -484,6 +498,58 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
                 _ => return None,
             };
             let _ = writeln!(out, "    ctx->r[{rt}] = ctx->{source};");
+        }
+
+        // The time base advances, and what it advances at is the environment's
+        // to decide. The upper form takes the high half of the same counter.
+        Opcode::Mftb => {
+            let read = match instruction.spr() {
+                268 => "xenolith_timebase()".to_owned(),
+                269 => "(xenolith_timebase() >> 32)".to_owned(),
+                _ => return None,
+            };
+            let _ = writeln!(out, "    ctx->r[{rt}] = {read};");
+        }
+
+        // Storage, and nothing more. What these registers would have done is
+        // set out in the runtime interface beside their declaration.
+        Opcode::Mfmsr => {
+            let _ = writeln!(out, "    ctx->r[{rt}] = ctx->msr;");
+        }
+        Opcode::Mtmsr | Opcode::Mtmsrd => {
+            let _ = writeln!(out, "    ctx->msr = ctx->r[{rt}];");
+        }
+        Opcode::Mffs => {
+            let _ = writeln!(out, "    ctx->f[{rt}].u64 = ctx->fpscr & 0xffffffffull;");
+        }
+        Opcode::Mtfsf => {
+            let mask = nibble_mask(instruction.status_mask());
+            let _ = writeln!(
+                out,
+                "    ctx->fpscr = (ctx->fpscr & ~{mask}ull) | ((uint64_t)(uint32_t)ctx->f[{rb}].u64 & {mask}ull);"
+            );
+        }
+        Opcode::Mtfsfi => {
+            let field = rt >> 2;
+            let value = u64::from((rb >> 1) & 0xf) << (28 - 4 * u64::from(field));
+            let mask = 0xfu64 << (28 - 4 * u64::from(field));
+            let _ = writeln!(
+                out,
+                "    ctx->fpscr = (ctx->fpscr & ~{mask}ull) | {value}ull;"
+            );
+        }
+
+        // The whole condition register moves as one word, in a bit order the
+        // runtime interface states once for both directions.
+        Opcode::Mfcr => {
+            let _ = writeln!(out, "    ctx->r[{rt}] = xenolith_condition_pack(ctx->cr);");
+        }
+        Opcode::Mtcrf => {
+            let mask = instruction.condition_mask();
+            let _ = writeln!(
+                out,
+                "    xenolith_condition_unpack(ctx->cr, (uint32_t)ctx->r[{rt}], {mask}u);"
+            );
         }
 
         opcode if load_width(opcode).is_some() => {

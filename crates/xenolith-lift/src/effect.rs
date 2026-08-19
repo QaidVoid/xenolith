@@ -35,6 +35,11 @@ pub enum Location {
     Count,
     /// The exception register, which carry and overflow live in.
     Exception,
+    /// The machine state register, held as storage whose effects are not
+    /// modelled.
+    Machine,
+    /// The floating point status register, held on the same terms.
+    FloatingStatus,
 }
 
 /// What one instruction touches.
@@ -371,6 +376,12 @@ fn other_shape(opcode: Opcode) -> Option<Shape> {
         | Opcode::Mfcr
         | Opcode::Mtcrf
         | Opcode::Mcrf
+        | Opcode::Mfmsr
+        | Opcode::Mtmsr
+        | Opcode::Mtmsrd
+        | Opcode::Mffs
+        | Opcode::Mtfsf
+        | Opcode::Mtfsfi
         | Opcode::Crand
         | Opcode::Crandc
         | Opcode::Cror
@@ -441,6 +452,29 @@ fn named_effect(instruction: Instruction, effect: &mut Effect) {
         Opcode::Mcrf => {
             effect.read(Location::Condition(ra >> 2));
             effect.write(Location::Condition(rt >> 2));
+        }
+        Opcode::Mfmsr => {
+            effect.read(Location::Machine);
+            effect.write(Location::General(rt));
+        }
+        Opcode::Mtmsr | Opcode::Mtmsrd => {
+            effect.read(Location::General(rt));
+            effect.write(Location::Machine);
+        }
+        Opcode::Mffs => {
+            effect.read(Location::FloatingStatus);
+            effect.write(Location::Floating(rt));
+        }
+        // Writing selected fields leaves the rest, so the register is read as
+        // well as written whatever the mask says.
+        Opcode::Mtfsf => {
+            effect.read(Location::Floating(rb));
+            effect.read(Location::FloatingStatus);
+            effect.write(Location::FloatingStatus);
+        }
+        Opcode::Mtfsfi => {
+            effect.read(Location::FloatingStatus);
+            effect.write(Location::FloatingStatus);
         }
         // The condition register logicals name single bits, and a bit belongs
         // to the field holding it.

@@ -421,3 +421,61 @@ fn a_reservation_retry_lifts() {
     );
     assert_eq!(compiles("reservation", &emitted), Ok(()));
 }
+
+/// Packing eight condition fields into a word and back is where a bit order
+/// mistake would live, and a mistake made in both directions would cancel out.
+#[test]
+fn the_condition_register_round_trips() {
+    // mflr r12; stwu r1, -96(r1); mfcr r3; mtcrf 255, r3;
+    // addi r1, r1, 96; blr
+    const WORDS: [u32; 6] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x7c60_0026,
+        0x7c6f_f120,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the round trip should lift");
+
+    assert!(
+        emitted.contains("ctx->r[3] = xenolith_condition_pack(ctx->cr);"),
+        "packing was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("xenolith_condition_unpack(ctx->cr, (uint32_t)ctx->r[3], 255u);"),
+        "unpacking was not emitted: {emitted}"
+    );
+    assert_eq!(compiles("condition_round_trip", &emitted), Ok(()));
+}
+
+/// The two registers held as storage, and the counter that is not.
+#[test]
+fn the_system_registers_lift() {
+    // mflr r12; stwu r1, -96(r1);
+    // mfmsr r9; mtmsrd r9, 1; mffs f0; mtfsf 255, f0; mftb r10;
+    // addi r1, r1, 96; blr
+    const WORDS: [u32; 9] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x7d20_00a6,
+        0x7d21_0164,
+        0xfc00_048e,
+        0xfdfe_058e,
+        0x7d4c_42e6,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the system registers should lift");
+
+    assert!(emitted.contains("ctx->r[9] = ctx->msr;"), "{emitted}");
+    assert!(emitted.contains("ctx->msr = ctx->r[9];"), "{emitted}");
+    assert!(emitted.contains("ctx->f[0].u64 = ctx->fpscr"), "{emitted}");
+    assert!(
+        emitted.contains("ctx->r[10] = xenolith_timebase();"),
+        "the time base was not read through the runtime: {emitted}"
+    );
+    assert_eq!(compiles("system_registers", &emitted), Ok(()));
+}

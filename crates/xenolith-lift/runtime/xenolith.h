@@ -68,6 +68,23 @@ typedef struct xenolith_context {
     uint64_t lr;
     uint64_t ctr;
     uint64_t xer;
+
+    /* The two below are storage, and their architectural effects are NOT
+     * modelled. Emitted code reads back what it wrote to either and nothing
+     * else happens.
+     *
+     * msr: masking interrupts does nothing, because emitted code has none. The
+     * only use of it in the titles this was built against is the save and
+     * restore pair around a reservation, where the round trip is consistent and
+     * the masking is what is being skipped.
+     *
+     * fpscr: a rounding mode written here does not change how a later operation
+     * rounds, and an exception enable written here arms nothing. The emitted
+     * arithmetic is the host's, in the host's default mode, which is the mode
+     * this processor starts in.
+     */
+    uint64_t msr;
+    uint64_t fpscr;
 } xenolith_context;
 
 /* A lifted function. Every one takes the machine state and the base of guest
@@ -114,6 +131,40 @@ static inline void xenolith_store32(uint8_t *base, uint32_t address, uint32_t va
 static inline void xenolith_store64(uint8_t *base, uint32_t address, uint64_t value) {
     xenolith_store32(base, address, (uint32_t)(value >> 32));
     xenolith_store32(base, address + 4, (uint32_t)value);
+}
+
+/* The condition register as one word, and back.
+ *
+ * The first field occupies the most significant four bits, and within a field
+ * the order is less than, greater than, equal, summary overflow. Both
+ * directions are written here rather than at each use, because the same bit
+ * order mistake made in both would cancel out and survive.
+ *
+ * The mask names fields from the first, so its most significant bit selects
+ * field zero.
+ */
+static inline uint32_t xenolith_condition_pack(const xenolith_condition *cr) {
+    uint32_t packed = 0;
+    for (unsigned field = 0; field < XENOLITH_CONDITION_FIELDS; field++) {
+        uint32_t bits = (cr[field].lt ? 8u : 0u) | (cr[field].gt ? 4u : 0u) |
+                        (cr[field].eq ? 2u : 0u) | (cr[field].so ? 1u : 0u);
+        packed |= bits << (28 - 4 * field);
+    }
+    return packed;
+}
+
+static inline void xenolith_condition_unpack(xenolith_condition *cr, uint32_t packed,
+                                             uint32_t mask) {
+    for (unsigned field = 0; field < XENOLITH_CONDITION_FIELDS; field++) {
+        if (!(mask & (1u << (7 - field)))) {
+            continue;
+        }
+        uint32_t bits = (packed >> (28 - 4 * field)) & 0xfu;
+        cr[field].lt = (uint8_t)((bits >> 3) & 1u);
+        cr[field].gt = (uint8_t)((bits >> 2) & 1u);
+        cr[field].eq = (uint8_t)((bits >> 1) & 1u);
+        cr[field].so = (uint8_t)(bits & 1u);
+    }
 }
 
 /* Where a trap that fired goes.

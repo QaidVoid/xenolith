@@ -122,6 +122,32 @@ impl Instruction {
         ((self.word >> 11) & 0x1f) as u8
     }
 
+    /// Returns which condition register fields a move to it writes.
+    ///
+    /// The most significant bit selects the first field, which is the order the
+    /// fields themselves sit in.
+    ///
+    /// ```
+    /// use xenolith_ppc::Instruction;
+    ///
+    /// // mtcrf 255, r11, which writes every field
+    /// let instruction = Instruction::decode(0x7d6f_f120);
+    /// assert_eq!(instruction.condition_mask(), 0xff);
+    /// ```
+    #[must_use]
+    pub const fn condition_mask(self) -> u8 {
+        ((self.word >> 12) & 0xff) as u8
+    }
+
+    /// Returns which floating point status fields a move to it writes.
+    ///
+    /// The field sits further up the word than the condition register's does,
+    /// so the two cannot share an accessor however alike they read.
+    #[must_use]
+    pub const fn status_mask(self) -> u8 {
+        ((self.word >> 17) & 0xff) as u8
+    }
+
     /// Returns the first bit of the mask a word rotate keeps.
     ///
     /// Bits are numbered from the most significant, so a mask beginning at zero
