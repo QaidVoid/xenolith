@@ -64,7 +64,6 @@ pub enum Form {
     MDS,
 
     /// mask `0xfc1f_07f0`, 10 instructions
-    Vx128Un,
     /// mask `0xfc00_07f3`, 16 instructions
     Vx128Ls,
     /// mask `0xfc00_07f0`, 7 instructions
@@ -90,7 +89,6 @@ pub enum Form {
 /// re-encode a space that general purpose decoders read as much later
 /// instructions, which is why they are named as a group.
 const CONSOLE_EXTENSION: &[Form] = &[
-    Form::Vx128Un,
     Form::Vx128Ls,
     Form::Vx128Cv,
     Form::Vx128,
@@ -118,7 +116,6 @@ impl Form {
             | Self::VX
             | Self::VC
             | Self::VA
-            | Self::Vx128Un
             | Self::Vx128Ls
             | Self::Vx128Cv
             | Self::Vx128
@@ -142,7 +139,6 @@ impl Form {
             | Self::I
             | Self::B
             | Self::SC
-            | Self::Vx128Un
             | Self::Vx128Ls
             | Self::Vx128Cv
             | Self::Vx128
@@ -169,7 +165,6 @@ impl Form {
     #[must_use]
     pub const fn mask(self) -> u32 {
         match self {
-            Self::Vx128Un => 0xfc1f_07f0,
             Self::Vx128Ls => 0xfc00_07f3,
             Self::Vx128Cv => 0xfc00_07f0,
             Self::Vx128 => 0xfc00_03d0,

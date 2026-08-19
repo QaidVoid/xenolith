@@ -559,18 +559,6 @@ instructions! {
     }
 
     extension {
-        Vx128Un {
-            0x1800_0330 => Vrfim128 = "vrfim128";
-            0x1800_0370 => Vrfin128 = "vrfin128";
-            0x1800_0380 => Vupkhsb128 = "vupkhsb128";
-            0x1800_03b0 => Vrfip128 = "vrfip128";
-            0x1800_03c0 => Vupklsb128 = "vupklsb128";
-            0x1800_03f0 => Vrfiz128 = "vrfiz128";
-            0x1800_0630 => Vrefp128 = "vrefp128";
-            0x1800_0670 => Vrsqrtefp128 = "vrsqrtefp128";
-            0x1800_06b0 => Vexptefp128 = "vexptefp128";
-            0x1800_06f0 => Vlogefp128 = "vlogefp128";
-        }
         Vx128Ls {
             0x1000_0003 => Lvsl128 = "lvsl128";
             0x1000_0043 => Lvsr128 = "lvsr128";
@@ -597,8 +585,18 @@ instructions! {
             0x1800_0730 => Vspltw128 = "vspltw128";
             0x1800_0770 => Vspltisw128 = "vspltisw128";
             0x1800_07f0 => Vupkd3d128 = "vupkd3d128";
+            0x1800_0330 => Vrfim128 = "vrfim128";
+            0x1800_0370 => Vrfin128 = "vrfin128";
+            0x1800_03b0 => Vrfip128 = "vrfip128";
+            0x1800_03f0 => Vrfiz128 = "vrfiz128";
+            0x1800_0630 => Vrefp128 = "vrefp128";
+            0x1800_0670 => Vrsqrtefp128 = "vrsqrtefp128";
+            0x1800_06b0 => Vexptefp128 = "vexptefp128";
+            0x1800_06f0 => Vlogefp128 = "vlogefp128";
         }
         Vx128 {
+            0x1800_0380 => Vupkhsb128 = "vupkhsb128";
+            0x1800_03c0 => Vupklsb128 = "vupklsb128";
             0x1400_0010 => Vaddfp128 = "vaddfp128";
             0x1400_0050 => Vsubfp128 = "vsubfp128";
             0x1400_0090 => Vmulfp128 = "vmulfp128";
