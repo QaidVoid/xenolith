@@ -6,11 +6,12 @@
 //! an arm of [`decode_opcode`], which is what actually runs. Declaring them
 //! separately would let the two drift apart.
 //!
-//! Dispatch is two dense matches. The first selects on the primary opcode, and
-//! the second on the extended opcode of the primary that has one. Within a
-//! primary the ten-bit extended opcode is tried before the nine-bit one, so the
-//! more specific form wins, which is the same precedence the ambiguity test
-//! enforces over the table.
+//! Dispatch is two levels of dense match. The first selects on the primary
+//! opcode. The second, for a primary that has extended opcodes, tries each form
+//! in the order the forms are declared. Forms are written most specific first,
+//! so a wider extended opcode is tested before a narrower one that overlaps it.
+//! Getting that order wrong is caught by the test asserting every entry decodes
+//! back to itself, rather than being left to review.
 
 use crate::form::Form;
 
@@ -32,13 +33,12 @@ pub(crate) struct Entry {
 /// Declares instructions, expanding each into a table entry and a dispatch arm.
 macro_rules! instructions {
     (
-        d {
-            $( $d_primary:literal => $d_variant:ident = $d_mnemonic:literal; )*
+        primary {
+            $( $p_form:ident { $( $p_op:literal => $p_var:ident = $p_mn:literal; )* } )*
         }
         $(
             extended $e_primary:literal {
-                x { $( $x_xo:literal => $x_variant:ident = $x_mnemonic:literal; )* }
-                xo { $( $o_xo:literal => $o_variant:ident = $o_mnemonic:literal; )* }
+                $( $e_form:ident { $( $e_xo:literal => $e_var:ident = $e_mn:literal; )* } )*
             }
         )*
     ) => {
@@ -52,47 +52,44 @@ macro_rules! instructions {
         pub enum Opcode {
             /// The word encodes no instruction this crate recognizes.
             Unknown,
-            $( #[doc = concat!("`", $d_mnemonic, "`")] $d_variant, )*
-            $( $( #[doc = concat!("`", $x_mnemonic, "`")] $x_variant, )* )*
-            $( $( #[doc = concat!("`", $o_mnemonic, "`")] $o_variant, )* )*
+            $( $( #[doc = concat!("`", $p_mn, "`")] $p_var, )* )*
+            $( $( $( #[doc = concat!("`", $e_mn, "`")] $e_var, )* )* )*
         }
 
         /// Every instruction this crate knows, in declaration order.
         pub(crate) const TABLE: &[Entry] = &[
-            $( Entry {
-                opcode: Opcode::$d_variant,
-                mnemonic: $d_mnemonic,
-                form: Form::D,
-                mask: Form::D.mask(),
-                value: $d_primary << 26,
-            }, )*
             $( $( Entry {
-                opcode: Opcode::$x_variant,
-                mnemonic: $x_mnemonic,
-                form: Form::X,
-                mask: Form::X.mask(),
-                value: ($e_primary << 26) | ($x_xo << 1),
+                opcode: Opcode::$p_var,
+                mnemonic: $p_mn,
+                form: Form::$p_form,
+                mask: Form::$p_form.mask(),
+                value: $p_op << 26,
             }, )* )*
-            $( $( Entry {
-                opcode: Opcode::$o_variant,
-                mnemonic: $o_mnemonic,
-                form: Form::XO,
-                mask: Form::XO.mask(),
-                value: ($e_primary << 26) | ($o_xo << 1),
-            }, )* )*
+            $( $( $( Entry {
+                opcode: Opcode::$e_var,
+                mnemonic: $e_mn,
+                form: Form::$e_form,
+                mask: Form::$e_form.mask(),
+                value: ($e_primary << 26)
+                    | ($e_xo << Form::$e_form.extended_opcode_shift()),
+            }, )* )* )*
         ];
 
         /// Identifies the operation a word encodes.
         pub(crate) const fn decode_opcode(word: u32) -> Opcode {
             match word >> 26 {
-                $( $d_primary => Opcode::$d_variant, )*
-                $( $e_primary => match (word >> 1) & 0x3ff {
-                    $( $x_xo => Opcode::$x_variant, )*
-                    _ => match (word >> 1) & 0x1ff {
-                        $( $o_xo => Opcode::$o_variant, )*
-                        _ => Opcode::Unknown,
-                    },
-                }, )*
+                $( $( $p_op => Opcode::$p_var, )* )*
+                $( $e_primary => {
+                    $(
+                        match (word >> Form::$e_form.extended_opcode_shift())
+                            & Form::$e_form.extended_opcode_field()
+                        {
+                            $( $e_xo => return Opcode::$e_var, )*
+                            _ => {}
+                        }
+                    )*
+                    Opcode::Unknown
+                } )*
                 _ => Opcode::Unknown,
             }
         }
@@ -100,40 +97,110 @@ macro_rules! instructions {
 }
 
 instructions! {
-    d {
-        10 => Cmpli = "cmpli";
-        11 => Cmpi = "cmpi";
-        14 => Addi = "addi";
-        15 => Addis = "addis";
-        24 => Ori = "ori";
-        25 => Oris = "oris";
-        32 => Lwz = "lwz";
-        33 => Lwzu = "lwzu";
-        34 => Lbz = "lbz";
-        36 => Stw = "stw";
-        37 => Stwu = "stwu";
-        38 => Stb = "stb";
-        40 => Lhz = "lhz";
-        44 => Sth = "sth";
+    primary {
+        D {
+            7 => Mulli = "mulli";
+            8 => Subfic = "subfic";
+            10 => Cmpli = "cmpli";
+            11 => Cmpi = "cmpi";
+            12 => Addic = "addic";
+            13 => AddicRc = "addic.";
+            14 => Addi = "addi";
+            15 => Addis = "addis";
+            24 => Ori = "ori";
+            25 => Oris = "oris";
+            26 => Xori = "xori";
+            27 => Xoris = "xoris";
+            28 => Andi = "andi.";
+            29 => Andis = "andis.";
+            32 => Lwz = "lwz";
+            33 => Lwzu = "lwzu";
+            34 => Lbz = "lbz";
+            36 => Stw = "stw";
+            37 => Stwu = "stwu";
+            38 => Stb = "stb";
+            40 => Lhz = "lhz";
+            44 => Sth = "sth";
+        }
+        M {
+            20 => Rlwimi = "rlwimi";
+            21 => Rlwinm = "rlwinm";
+            23 => Rlwnm = "rlwnm";
+        }
+    }
+
+    extended 30 {
+        MDS {
+            8 => Rldcl = "rldcl";
+            9 => Rldcr = "rldcr";
+        }
+        MD {
+            0 => Rldicl = "rldicl";
+            1 => Rldicr = "rldicr";
+            2 => Rldic = "rldic";
+            3 => Rldimi = "rldimi";
+        }
     }
 
     extended 31 {
-        x {
+        X {
             0 => Cmp = "cmp";
+            19 => Mfcr = "mfcr";
             23 => Lwzx = "lwzx";
             24 => Slw = "slw";
+            26 => Cntlzw = "cntlzw";
+            27 => Sld = "sld";
             28 => And = "and";
             32 => Cmpl = "cmpl";
+            58 => Cntlzd = "cntlzd";
+            60 => Andc = "andc";
+            83 => Mfmsr = "mfmsr";
+            124 => Nor = "nor";
+            144 => Mtcrf = "mtcrf";
+            146 => Mtmsr = "mtmsr";
             151 => Stwx = "stwx";
+            178 => Mtmsrd = "mtmsrd";
+            284 => Eqv = "eqv";
             316 => Xor = "xor";
+            339 => Mfspr = "mfspr";
+            371 => Mftb = "mftb";
+            412 => Orc = "orc";
             444 => Or = "or";
+            467 => Mtspr = "mtspr";
+            476 => Nand = "nand";
             536 => Srw = "srw";
+            539 => Srd = "srd";
+            792 => Sraw = "sraw";
+            794 => Srad = "srad";
+            824 => Srawi = "srawi";
+            922 => Extsh = "extsh";
+            954 => Extsb = "extsb";
+            986 => Extsw = "extsw";
         }
-        xo {
+        XS {
+            413 => Sradi = "sradi";
+        }
+        XO {
+            8 => Subfc = "subfc";
+            9 => Mulhdu = "mulhdu";
+            10 => Addc = "addc";
+            11 => Mulhwu = "mulhwu";
             40 => Subf = "subf";
+            73 => Mulhd = "mulhd";
             75 => Mulhw = "mulhw";
+            104 => Neg = "neg";
+            136 => Subfe = "subfe";
+            138 => Adde = "adde";
+            200 => Subfze = "subfze";
+            202 => Addze = "addze";
+            232 => Subfme = "subfme";
+            233 => Mulld = "mulld";
+            234 => Addme = "addme";
             235 => Mullw = "mullw";
             266 => Add = "add";
+            457 => Divdu = "divdu";
+            459 => Divwu = "divwu";
+            489 => Divd = "divd";
             491 => Divw = "divw";
         }
     }
@@ -189,11 +256,13 @@ mod tests {
                 assert!(
                     refines(a, b) || refines(b, a),
                     "{} and {} overlap without one refining the other \
-                     (masks {:#010x} and {:#010x})",
+                     (masks {:#010x} and {:#010x}, values {:#010x} and {:#010x})",
                     a.mnemonic,
                     b.mnemonic,
                     a.mask,
-                    b.mask
+                    b.mask,
+                    a.value,
+                    b.value
                 );
             }
         }
@@ -219,7 +288,8 @@ mod tests {
 
     /// Every entry's own canonical encoding must decode back to it. This is
     /// what binds the dispatch to the table, since the two are generated from
-    /// one declaration but are otherwise independent code.
+    /// one declaration but are otherwise independent code. It is also what
+    /// catches a form declared in the wrong order within a primary opcode.
     #[test]
     fn every_entry_decodes_back_to_itself() {
         for entry in TABLE {
