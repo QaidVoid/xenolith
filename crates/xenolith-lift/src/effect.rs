@@ -99,6 +99,102 @@ enum Shape {
     CompareImmediate,
     /// Touches places its fields name rather than places its form implies.
     Named,
+    /// Reads or writes memory at an address built from its operands.
+    Memory(Access),
+}
+
+/// Where an instruction holds the value it moves, and how it addresses memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Access {
+    /// Whether the value travels from memory or to it.
+    loading: bool,
+    /// Which bank the value lives in.
+    bank: Bank,
+    /// Whether the address adds a second register rather than a displacement.
+    indexed: bool,
+    /// Whether the address register is written back with the address used.
+    updating: bool,
+}
+
+/// Which set of registers a value moves through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bank {
+    General,
+    Floating,
+}
+
+impl Bank {
+    /// Returns the place a register of this bank names.
+    const fn at(self, register: u8) -> Location {
+        match self {
+            Self::General => Location::General(register),
+            Self::Floating => Location::Floating(register),
+        }
+    }
+}
+
+/// Returns how an operation reaches memory, if it does.
+fn access_of(opcode: Opcode) -> Option<Access> {
+    let general = |loading, indexed, updating| Access {
+        loading,
+        bank: Bank::General,
+        indexed,
+        updating,
+    };
+    let floating = |loading, indexed, updating| Access {
+        loading,
+        bank: Bank::Floating,
+        indexed,
+        updating,
+    };
+
+    Some(match opcode {
+        Opcode::Lwz | Opcode::Lbz | Opcode::Lhz | Opcode::Lha | Opcode::Ld | Opcode::Lwa => {
+            general(true, false, false)
+        }
+        Opcode::Lwzu | Opcode::Lbzu | Opcode::Lhzu | Opcode::Lhau | Opcode::Ldu => {
+            general(true, false, true)
+        }
+        Opcode::Stw | Opcode::Stb | Opcode::Sth | Opcode::Std => general(false, false, false),
+        Opcode::Stwu | Opcode::Stbu | Opcode::Sthu | Opcode::Stdu => general(false, false, true),
+
+        Opcode::Lwzx
+        | Opcode::Lbzx
+        | Opcode::Lhzx
+        | Opcode::Lhax
+        | Opcode::Ldx
+        | Opcode::Lwax
+        | Opcode::Lwbrx
+        | Opcode::Lhbrx
+        | Opcode::Ldbrx
+        | Opcode::Lwarx
+        | Opcode::Ldarx => general(true, true, false),
+        Opcode::Lwzux
+        | Opcode::Lbzux
+        | Opcode::Lhzux
+        | Opcode::Lhaux
+        | Opcode::Ldux
+        | Opcode::Lwaux => general(true, true, true),
+        Opcode::Stwx
+        | Opcode::Stbx
+        | Opcode::Sthx
+        | Opcode::Stdx
+        | Opcode::Stwbrx
+        | Opcode::Sthbrx
+        | Opcode::Stdbrx => general(false, true, false),
+        Opcode::Stwux | Opcode::Stbux | Opcode::Sthux | Opcode::Stdux => general(false, true, true),
+
+        Opcode::Lfs | Opcode::Lfd => floating(true, false, false),
+        Opcode::Lfsu | Opcode::Lfdu => floating(true, false, true),
+        Opcode::Stfs | Opcode::Stfd => floating(false, false, false),
+        Opcode::Stfsu | Opcode::Stfdu => floating(false, false, true),
+        Opcode::Lfsx | Opcode::Lfdx => floating(true, true, false),
+        Opcode::Lfsux | Opcode::Lfdux => floating(true, true, true),
+        Opcode::Stfsx | Opcode::Stfdx | Opcode::Stfiwx => floating(false, true, false),
+        Opcode::Stfsux | Opcode::Stfdux => floating(false, true, true),
+
+        _ => return None,
+    })
 }
 
 /// Returns how an operation's fields map onto what it touches.
@@ -170,6 +266,8 @@ fn shape_of(opcode: Opcode) -> Option<Shape> {
         | Opcode::Rldic
         | Opcode::Rldimi
         | Opcode::Sradi => Shape::FirstFromTarget,
+
+        opcode if access_of(opcode).is_some() => Shape::Memory(access_of(opcode)?),
 
         Opcode::Cmp | Opcode::Cmpl => Shape::CompareBoth,
         Opcode::Cmpi | Opcode::Cmpli => Shape::CompareImmediate,
@@ -382,6 +480,26 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
             effect.write(Location::Condition(compared_field(instruction)));
         }
         Shape::Named => named_effect(instruction, &mut effect),
+        Shape::Memory(access) => {
+            // An address built on register zero is built on nothing, the same
+            // way adding to it is. Only the forms that write the address
+            // register back always have one, since writing back to nothing
+            // would have nowhere to go.
+            if ra != 0 || access.updating {
+                effect.read(Location::General(ra));
+            }
+            if access.indexed {
+                effect.read(Location::General(rb));
+            }
+            if access.loading {
+                effect.write(access.bank.at(rt));
+            } else {
+                effect.read(access.bank.at(rt));
+            }
+            if access.updating {
+                effect.write(Location::General(ra));
+            }
+        }
     }
 
     // Both bits are only meaningful where the form carries them. Every other
@@ -649,8 +767,8 @@ mod tests {
             "nothing is modelled beyond a subset yet"
         );
         assert!(
-            missing.contains(&"lwz"),
-            "the loads are not modelled in this group"
+            missing.contains(&"fmuls"),
+            "the floating point arithmetic is not modelled yet"
         );
         assert!(
             !missing.contains(&"add"),
