@@ -14,11 +14,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use xenolith_ppc::FlowKind;
+use xenolith_ppc::{FlowKind, Instruction, Opcode};
 use xenolith_xex::Image;
 
 use crate::block::{Block, Terminator, blocks_within};
-use crate::helper::{Helpers, detect};
+use crate::helper::{HelperDirection, Helpers, detect};
 
 /// How a function came to be known about.
 ///
@@ -33,6 +33,12 @@ pub enum Origin {
     Root,
     /// Something calls it directly.
     Called,
+    /// Nothing reaches it directly, and it was found by recognizing the shape
+    /// of a function prologue.
+    ///
+    /// A function reached by a call is known to be one. This one is believed to
+    /// be one, which is why the two are counted apart.
+    Scanned,
 }
 
 impl Origin {
@@ -43,6 +49,7 @@ impl Origin {
             Self::EntryPoint => "entry point",
             Self::Root => "root",
             Self::Called => "called",
+            Self::Scanned => "scanned",
         }
     }
 }
@@ -319,6 +326,120 @@ fn edges_of(block: &Block, starts: &BTreeSet<u32>) -> Vec<Edge> {
     edges
 }
 
+/// The special purpose register holding where a function was called from.
+const LINK_REGISTER: u32 = 8;
+
+/// How many instructions from the start a prologue is looked for within.
+const PROLOGUE_WINDOW: u32 = 4;
+
+/// How many independent signals a prologue must show.
+///
+/// One is not enough. A table of constants will occasionally hold a word that
+/// decodes as something a prologue does, and seeding from it would invent a
+/// function out of data.
+const PROLOGUE_SIGNALS: usize = 2;
+
+/// Counts the signs of a function prologue at an address.
+///
+/// The three come from reading real code. A function reads the link register
+/// out so it can be saved, calls a shared helper to save the registers it will
+/// use, and moves the stack pointer down to make room. Any one alone is weak,
+/// and together they are not something data does by accident.
+fn prologue_signals(image: &Image, address: u32, helpers: &Helpers) -> usize {
+    let mut signals = 0;
+
+    for step in 0..PROLOGUE_WINDOW {
+        let at = address.wrapping_add(step * 4);
+        let Ok(word) = image.u32(at) else {
+            break;
+        };
+        let instruction = Instruction::decode(word);
+        if instruction.is_unknown() {
+            break;
+        }
+
+        // Reading out where the function was called from, so it survives.
+        if instruction.opcode() == Opcode::Mfspr && instruction.spr() == LINK_REGISTER {
+            signals += 1;
+        }
+
+        // Moving the stack pointer down to make room, in the one instruction
+        // that both stores through it and updates it.
+        if instruction.opcode() == Opcode::Stwu
+            && instruction.rt() == 1
+            && instruction.ra() == 1
+            && instruction.displacement() < 0
+        {
+            signals += 1;
+        }
+
+        // Calling the shared helper that saves registers.
+        let flow = instruction.flow(at);
+        let calls_a_save_helper = flow.kind == FlowKind::Call
+            && flow.target.is_some_and(|target| {
+                helpers
+                    .containing(target)
+                    .is_some_and(|helper| helper.direction == HelperDirection::Save)
+            });
+        if calls_a_save_helper {
+            signals += 1;
+        }
+    }
+
+    signals
+}
+
+/// Returns addresses that look like functions in ranges nothing claimed.
+///
+/// Discovery reaches what direct calls reach. Anything called only through a
+/// pointer, which in compiled code means everything behind a virtual table, is
+/// invisible to it, and this is the pass that goes looking.
+fn scan_for_prologues(
+    image: &Image,
+    helpers: &Helpers,
+    walked: &BTreeMap<u32, Vec<Block>>,
+) -> Vec<u32> {
+    let mut claimed = BTreeSet::new();
+    for blocks in walked.values() {
+        for block in blocks {
+            let mut address = block.start;
+            while address < block.end {
+                claimed.insert(address);
+                address = address.saturating_add(4);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    for section in image.executable_sections() {
+        let mut address = section.start;
+
+        while u64::from(address) < section.end() {
+            let next = address.saturating_add(4);
+            if next <= address {
+                break;
+            }
+
+            if claimed.contains(&address) || helpers.containing(address).is_some() {
+                address = next;
+                continue;
+            }
+
+            if prologue_signals(image, address, helpers) >= PROLOGUE_SIGNALS {
+                found.push(address);
+                // Everything this one reaches is walked before scanning
+                // resumes, so there is no point stepping through its body here.
+                address = address.saturating_add(PROLOGUE_WINDOW * 4);
+                continue;
+            }
+
+            address = next;
+        }
+    }
+
+    found
+}
+
 /// Returns whether an address is in an executable section.
 fn is_executable(image: &Image, address: u32) -> bool {
     image
@@ -346,9 +467,49 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         }
     }
 
-    // Boundaries and walks define each other, so this runs until neither
-    // changes. Each round walks with what is known and learns from what it saw.
-    let walked: BTreeMap<u32, Vec<Block>> = loop {
+    let mut walked = walk_to_fixed_point(image, &helpers, &mut origins);
+
+    // Discovery reaches what calls reach. This looks for what they do not, and
+    // discovery runs again from whatever it finds.
+    let scanned = scan_for_prologues(image, &helpers, &walked);
+    if !scanned.is_empty() {
+        for address in scanned {
+            origins.entry(address).or_insert(Origin::Scanned);
+        }
+        walked = walk_to_fixed_point(image, &helpers, &mut origins);
+    }
+
+    let starts: BTreeSet<u32> = origins.keys().copied().collect();
+    let functions = walked
+        .into_iter()
+        .map(|(start, blocks)| {
+            let origin = origins.get(&start).copied().unwrap_or(Origin::Called);
+            let tail_calls = tail_calls_of(&blocks, start, &starts);
+            (
+                start,
+                Function {
+                    start,
+                    origin,
+                    blocks,
+                    tail_calls,
+                },
+            )
+        })
+        .collect();
+
+    Program { helpers, functions }
+}
+
+/// Walks every known function until following calls turns up nothing new.
+///
+/// Boundaries and walks define each other, so this runs until neither changes.
+/// Each round walks with what is known and learns from what it saw.
+fn walk_to_fixed_point(
+    image: &Image,
+    helpers: &Helpers,
+    origins: &mut BTreeMap<u32, Origin>,
+) -> BTreeMap<u32, Vec<Block>> {
+    loop {
         let boundaries: BTreeSet<u32> = origins.keys().copied().collect();
 
         let walked: BTreeMap<u32, Vec<Block>> = boundaries
@@ -386,27 +547,7 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         for target in discovered {
             origins.entry(target).or_insert(Origin::Called);
         }
-    };
-
-    let starts: BTreeSet<u32> = origins.keys().copied().collect();
-    let functions = walked
-        .into_iter()
-        .map(|(start, blocks)| {
-            let origin = origins.get(&start).copied().unwrap_or(Origin::Called);
-            let tail_calls = tail_calls_of(&blocks, start, &starts);
-            (
-                start,
-                Function {
-                    start,
-                    origin,
-                    blocks,
-                    tail_calls,
-                },
-            )
-        })
-        .collect();
-
-    Program { helpers, functions }
+    }
 }
 
 /// Returns the branches leaving a function for the start of another one.
@@ -830,6 +971,90 @@ mod tests {
         );
 
         assert!(program.claimed_instructions() <= 4);
+    }
+
+    /// The shape a real prologue has: read the link register out, then move the
+    /// stack pointer down to make room.
+    fn prologue() -> [u32; 2] {
+        [
+            encode::mflr(12),
+            encode::stwu(1, 1, encode::back(128) & 0xffff),
+        ]
+    }
+
+    #[test]
+    fn a_function_nothing_calls_is_found_by_its_prologue() {
+        let mut words = vec![encode::blr()];
+        words.extend_from_slice(&prologue());
+        words.push(encode::blr());
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.function_count(), 2);
+        assert_eq!(
+            program.function_at(0x8200_0004).unwrap().origin,
+            Origin::Scanned
+        );
+    }
+
+    #[test]
+    fn a_function_already_reached_is_not_reported_again() {
+        let mut words = vec![encode::bl(4)];
+        words.extend_from_slice(&prologue());
+        words.push(encode::blr());
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0004).unwrap().origin,
+            Origin::Called,
+            "being called outranks being scanned for"
+        );
+        assert_eq!(program.count_from(Origin::Scanned), 0);
+    }
+
+    /// One signal is not enough. Data will occasionally hold a word that
+    /// decodes as something a prologue does, and seeding from it would invent a
+    /// function out of a table of constants.
+    #[test]
+    fn a_single_prologue_signal_does_not_seed_a_function() {
+        let words = vec![
+            encode::blr(),
+            encode::mflr(12),
+            encode::addi(3, 4, 1),
+            encode::addi(3, 5, 1),
+            encode::addi(3, 6, 1),
+            encode::blr(),
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Scanned), 0);
+    }
+
+    #[test]
+    fn a_run_of_constants_seeds_nothing() {
+        let mut words = vec![encode::blr()];
+        words.extend(std::iter::repeat_n(0x0000_0001u32, 64));
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Scanned), 0);
+    }
+
+    #[test]
+    fn counts_report_scanned_functions_apart_from_called_ones() {
+        let mut words = vec![encode::bl(16), encode::blr()];
+        words.extend_from_slice(&prologue());
+        words.push(encode::blr());
+        words.extend_from_slice(&prologue());
+        words.push(encode::blr());
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::EntryPoint), 1);
+        assert!(program.count_from(Origin::Called) >= 1);
+        assert!(program.count_from(Origin::Scanned) >= 1);
     }
 
     #[test]

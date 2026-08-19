@@ -112,6 +112,21 @@ pub(crate) mod encode {
         0x1000_01c3 | ((vd & 0x1f) << 21) | (ra << 16) | (rb << 11) | (((vd >> 5) & 3) << 2)
     }
 
+    /// Reads the link register into a general purpose register.
+    ///
+    /// The special purpose register field is split into two halves stored in
+    /// the opposite order to the one they read in, so the link register, which
+    /// is number eight, sits entirely in the lower half.
+    pub(crate) const fn mflr(rt: u32) -> u32 {
+        (31 << 26) | (rt << 21) | (8 << 16) | (339 << 1)
+    }
+
+    /// Stores a word and updates the base register, which is how a frame is
+    /// allocated when the base is the stack pointer and the offset is negative.
+    pub(crate) const fn stwu(rs: u32, ra: u32, displacement: u32) -> u32 {
+        (37 << 26) | (rs << 21) | (ra << 16) | (displacement & 0xffff)
+    }
+
     /// Returns the displacement that branches `bytes` backward.
     ///
     /// Displacements are signed, and writing the two's complement value out is
