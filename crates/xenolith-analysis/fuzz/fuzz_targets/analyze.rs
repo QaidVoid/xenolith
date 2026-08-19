@@ -10,6 +10,11 @@
 //! The invariants checked are the ones that would let a wrong answer through
 //! quietly: blocks that overlap, edges that leave the function without being
 //! marked unresolved, and a claim of more code than the image holds.
+//!
+//! Reachability is the one that matters most now that a recovered jump table
+//! decides which blocks a function holds. A block claimed because a table named
+//! it, but with no edge leading to it, is a block the graph says nothing about,
+//! and it is exactly the failure feeding tables back into discovery can cause.
 
 #![no_main]
 
@@ -86,6 +91,20 @@ fuzz_target!(|data: &[u8]| {
                     "edge to {target:#010x} leaves the function"
                 );
             }
+        }
+
+        // Every block has to be reachable from the function's first block. A
+        // block reached only through a recovered table is reachable through the
+        // edges that table produced, or it should not have been claimed.
+        assert!(
+            function.unreachable_blocks().is_empty(),
+            "a block was claimed without the edge that justifies it"
+        );
+
+        // A branch reported as resolved must name at least one target, or
+        // reporting it resolved says more than is known.
+        for targets in function.resolved.values() {
+            assert!(!targets.is_empty(), "a resolved branch names nothing");
         }
 
         let tables = recover(&image, function);

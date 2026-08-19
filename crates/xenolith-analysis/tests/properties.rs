@@ -74,6 +74,14 @@ fn check(image: &Image, words: usize) {
             "the blocks do not cover what the function claims"
         );
 
+        // A block claimed because a table named it, with no edge leading to it,
+        // is a block the graph says nothing about. That is the failure feeding
+        // tables back into discovery can cause, so it is checked everywhere.
+        assert!(
+            function.unreachable_blocks().is_empty(),
+            "a block was claimed without the edge that justifies it"
+        );
+
         for edges in function.edges().values() {
             for edge in edges {
                 let Some(target) = edge.target() else {
@@ -223,5 +231,46 @@ proptest! {
 
         let covered: u64 = spans.iter().map(|(s, e)| u64::from(e - s) / 4).sum();
         prop_assert!(covered <= words.len() as u64);
+    }
+
+    /// A recovered table can name an address inside the block that branches to
+    /// it, so following the table leads back to the branch that named it. The
+    /// alternation between walking and recovering has to settle on that rather
+    /// than feeding itself.
+    #[test]
+    fn a_table_naming_its_own_branch_terminates(
+        entries in prop::collection::vec(0u32..24, 1..8),
+    ) {
+        let mut words = vec![
+            // cmpli r10, 7
+            0x280a_0007,
+            // bc to the default, four words past the branch
+            0x4181_0028,
+            // lis r12, 0x8200 then addi to the table at 0x82000040
+            0x3d80_8200,
+            0x398c_0040,
+            // lbzx r0, r12, r10 then a shift left by two
+            0x7c0c_50ae,
+            0x5400_103a,
+            // lis r12, 0x8200 then addi to a base of 0x82000000
+            0x3d80_8200,
+            0x398c_0000,
+            // add r12, r12, r0 then move to the count register and branch
+            0x7d8c_0214,
+            0x7d89_03a6,
+            0x4e80_0420,
+        ];
+        words.resize(16, 0x6000_0000);
+
+        // The table names words of the function itself, including the ones that
+        // build and take the branch.
+        let mut table = 0u32;
+        for (at, entry) in entries.iter().enumerate().take(4) {
+            table |= entry << (24 - at * 8);
+        }
+        words.push(table);
+
+        let image = image_of(&words, Some(BASE));
+        check(&image, words.len());
     }
 }
