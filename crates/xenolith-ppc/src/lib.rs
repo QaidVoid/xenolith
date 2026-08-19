@@ -23,8 +23,10 @@ mod flow;
 mod form;
 mod instruction;
 mod table;
+mod text;
 
 pub use flow::{Flow, FlowKind};
 pub use form::Form;
 pub use instruction::Instruction;
 pub use table::Opcode;
+pub use text::Rendered;

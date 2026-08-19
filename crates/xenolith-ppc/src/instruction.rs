@@ -234,6 +234,22 @@ impl Instruction {
         classify(self, address)
     }
 
+    /// Pairs this instruction with its address for rendering as text.
+    ///
+    /// The address is needed because a relative branch only means something
+    /// once resolved against where it branches from.
+    ///
+    /// ```
+    /// use xenolith_ppc::Instruction;
+    ///
+    /// let branch = Instruction::decode(0x4800_0020);
+    /// assert_eq!(branch.render(0x8200_1000).to_string(), "b 0x82001020");
+    /// ```
+    #[must_use]
+    pub const fn render(self, address: u32) -> crate::text::Rendered {
+        crate::text::Rendered::new(self, address)
+    }
+
     /// Returns whether the overflow enable bit is set.
     ///
     /// Only meaningful for forms that carry it, which is why the bit sits
