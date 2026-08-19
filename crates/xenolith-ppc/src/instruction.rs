@@ -116,11 +116,17 @@ impl Instruction {
         low_half(self.word)
     }
 
-    /// Returns the 16-bit displacement field, sign extended.
+    /// Returns the displacement field, sign extended.
     ///
     /// Displacements are signed in the architecture, so a load from a negative
     /// offset off a base register reads as negative rather than as a very large
     /// positive number.
+    ///
+    /// The doubleword accesses spend the low two bits of the field on their
+    /// extended opcode, so those bits are masked away rather than read as part
+    /// of the offset. Reading them would put every such access two bytes off,
+    /// but only for the variants whose opcode bits are not already zero, which
+    /// is exactly the kind of error that hides.
     ///
     /// ```
     /// use xenolith_ppc::Instruction;
@@ -129,8 +135,14 @@ impl Instruction {
     /// assert_eq!(Instruction::decode(0x91c1_ff68).displacement(), -152);
     /// ```
     #[must_use]
-    pub const fn displacement(self) -> i32 {
-        sign_extend_16(low_half(self.word))
+    pub fn displacement(self) -> i32 {
+        let raw = low_half(self.word);
+        let field = if self.form() == Some(Form::DS) {
+            raw & 0xfffc
+        } else {
+            raw
+        };
+        sign_extend_16(field)
     }
 
     /// Returns whether the record bit is set.
@@ -348,6 +360,28 @@ mod tests {
         assert_eq!(instruction.ra(), 1);
         assert_eq!(instruction.displacement(), -152);
         assert_eq!(instruction.immediate(), 0xff68);
+    }
+
+    /// The doubleword accesses keep their extended opcode in the low two bits
+    /// of the displacement field, so a variant whose opcode bits are not zero
+    /// would otherwise read two bytes off.
+    #[test]
+    fn a_doubleword_displacement_excludes_the_extended_opcode() {
+        // std and stdu store the same offset, differing only in the opcode bits.
+        let std = Instruction::decode(0xf9c1_ff68);
+        let stdu = Instruction::decode(0xf9c1_ff69);
+
+        assert_eq!(std.opcode(), Opcode::Std);
+        assert_eq!(stdu.opcode(), Opcode::Stdu);
+        assert_eq!(std.displacement(), -152);
+        assert_eq!(stdu.displacement(), -152, "the opcode bits are not offset");
+    }
+
+    /// The masking must not reach instructions whose field is a full 16 bits.
+    #[test]
+    fn an_ordinary_displacement_keeps_its_low_bits() {
+        assert_eq!(Instruction::decode(0x3864_0003).displacement(), 3);
+        assert_eq!(Instruction::decode(0x8064_0002).displacement(), 2);
     }
 
     #[test]
