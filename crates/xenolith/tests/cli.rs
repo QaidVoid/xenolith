@@ -346,7 +346,14 @@ fn lift_help_documents_its_arguments() {
     let (ok, stdout, _) = run!("lift", "--help");
 
     assert!(ok, "lift help should succeed");
-    for flag in ["--out", "--raw", "--base", "--key-file", "--blockers"] {
+    for flag in [
+        "--out",
+        "--raw",
+        "--base",
+        "--key-file",
+        "--blockers",
+        "--part-size",
+    ] {
         assert!(stdout.contains(flag), "{flag} not documented: {stdout}");
     }
 }
@@ -414,8 +421,15 @@ fn lift_emits_c_for_a_crafted_image() {
         "one function should lift: {stdout}"
     );
 
-    let emitted = std::fs::read_to_string(out.join("lifted.c")).expect("the emitted C");
-    assert!(emitted.contains("#include \"xenolith.h\""));
+    let units = units_in(&out);
+    assert_eq!(units.len(), 1, "one function should fit in one unit");
+    let emitted = std::fs::read_to_string(&units[0]).expect("the emitted C");
+    assert!(emitted.contains("#include \"lifted.h\""));
+
+    let declarations = std::fs::read_to_string(out.join("lifted.h")).expect("the declarations");
+    assert!(declarations.contains("#include \"xenolith.h\""));
+    assert!(declarations.contains("void sub_82000000(xenolith_context *ctx, uint8_t *base);"));
+
     assert!(emitted.contains("void sub_82000000(xenolith_context *ctx, uint8_t *base)"));
     assert!(
         emitted.contains("ctx->r[12] = ctx->lr;"),
@@ -433,6 +447,150 @@ fn lift_emits_c_for_a_crafted_image() {
     assert!(
         out.join("xenolith.h").is_file(),
         "the runtime header should be written beside the code"
+    );
+    assert!(
+        out.join("Makefile").is_file(),
+        "a build file should be written beside the code"
+    );
+}
+
+/// Returns the translation units in an output directory, in name order.
+///
+/// A directory that cannot be read yields none, which the count every caller
+/// asserts on reports better than a panic here would.
+fn units_in(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut units: Vec<std::path::PathBuf> = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|extension| extension == "c")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("lifted."))
+        })
+        .collect();
+    units.sort();
+    units
+}
+
+/// A budget smaller than any function puts each one in its own unit, which is
+/// the strongest statement the split can make: it rolls over when it should and
+/// never inside a function.
+#[test]
+fn lift_splits_the_emitted_c_at_the_budget() {
+    // Three functions back to back, each with a prologue so that scanning
+    // finds it: mflr r12; stwu r1, -96(r1); addi r1, r1, 96; blr
+    const ONE: [u32; 4] = [0x7d88_02a6, 0x9421_ffa0, 0x3821_0060, 0x4e80_0020];
+
+    let source = std::env::temp_dir().join("xenolith-lift-split.bin");
+    let out = std::env::temp_dir().join("xenolith-lift-split-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = ONE
+        .iter()
+        .cycle()
+        .take(ONE.len() * 3)
+        .flat_map(|word| word.to_be_bytes())
+        .collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let (ok, stdout, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--part-size",
+        "1",
+        "--out",
+        out.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+
+    assert!(ok, "lifting should succeed: {stderr}");
+    assert!(
+        stdout.contains("lifted                    3"),
+        "three functions should lift: {stdout}"
+    );
+
+    let units = units_in(&out);
+    assert_eq!(
+        units.len(),
+        3,
+        "a budget of one byte should split every one"
+    );
+
+    for unit in &units {
+        let text = std::fs::read_to_string(unit).expect("a unit");
+        assert!(
+            text.contains("#include \"lifted.h\""),
+            "{} did not include the declarations: {text}",
+            unit.display()
+        );
+        assert_eq!(
+            text.matches('{').count(),
+            text.matches('}').count(),
+            "{} ends part way through a function",
+            unit.display()
+        );
+        assert_eq!(
+            text.matches("xenolith_context *ctx, uint8_t *base) {")
+                .count(),
+            1,
+            "{} should hold exactly one function",
+            unit.display()
+        );
+    }
+}
+
+/// A second run that splits differently must not leave the first run's units
+/// behind, since two units defining the same function will not build.
+#[test]
+fn lift_replaces_the_units_a_previous_run_wrote() {
+    const ONE: [u32; 4] = [0x7d88_02a6, 0x9421_ffa0, 0x3821_0060, 0x4e80_0020];
+
+    let source = std::env::temp_dir().join("xenolith-lift-restack.bin");
+    let out = std::env::temp_dir().join("xenolith-lift-restack-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = ONE
+        .iter()
+        .cycle()
+        .take(ONE.len() * 3)
+        .flat_map(|word| word.to_be_bytes())
+        .collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let arguments = |size: &'static str| {
+        vec![
+            "lift".to_owned(),
+            "--raw".to_owned(),
+            "--base".to_owned(),
+            "0x82000000".to_owned(),
+            "--part-size".to_owned(),
+            size.to_owned(),
+            "--out".to_owned(),
+            out.to_str().unwrap().to_owned(),
+            source.to_str().unwrap().to_owned(),
+        ]
+    };
+
+    for size in ["1", "1048576"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xenolith"))
+            .args(arguments(size))
+            .output()
+            .expect("the binary should run");
+        assert!(
+            output.status.success(),
+            "lifting should succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    assert_eq!(
+        units_in(&out).len(),
+        1,
+        "the split units of the first run should be gone"
     );
 }
 
