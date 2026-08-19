@@ -368,11 +368,13 @@ const PROLOGUE_WINDOW: u32 = 4;
 /// function out of data.
 const PROLOGUE_SIGNALS: usize = 2;
 
-/// How many times scanning and walking may alternate.
+/// How many times scanning, recovery, and walking may alternate.
 ///
-/// Each round can only add function starts, and there are finitely many
-/// addresses, so the alternation settles on its own. The bound is there so that
-/// termination does not depend on that argument holding for every input.
+/// Each round can only add function starts and entry addresses, and there are
+/// finitely many addresses, so the alternation settles on its own. The bound is
+/// there so that termination does not depend on that argument holding for every
+/// input, which matters more now that a recovered table can name an address
+/// that leads back to the branch that named it.
 const MAX_SCAN_ROUNDS: usize = 16;
 
 /// Counts the signs of a function prologue at an address.
@@ -513,53 +515,87 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         }
     }
 
-    // The additional addresses each function is entered at, which recovery
-    // fills in once there are functions to recover from.
-    let entries: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    // The other addresses each function is entered at, and where each of its
+    // indirect branches goes. Both are filled in by recovery, which needs
+    // functions to work from, so both start empty.
+    let mut entries: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    let mut resolved: BTreeMap<u32, BTreeMap<u32, Vec<u32>>> = BTreeMap::new();
 
     let mut walked = walk_to_fixed_point(image, &helpers, &mut origins, &entries);
 
     // Discovery reaches what calls reach. Scanning looks for what they do not,
-    // and discovery runs again from whatever it finds.
+    // recovery looks for what a switch reaches, and discovery runs again from
+    // whatever either finds.
     //
-    // The two alternate rather than running once each. Walking again with more
-    // boundaries can shorten a function that had covered a region, and the code
-    // that function no longer claims is code scanning skipped over precisely
-    // because it had been claimed. One pass leaves all of that unfound.
+    // All three alternate rather than running in a fixed order. Walking again
+    // with more boundaries can shorten a function that had covered a region,
+    // and the code it no longer claims is code scanning skipped over precisely
+    // because it had been claimed. Walking into a switch body can expose a
+    // further switch. One pass of each leaves all of that unfound.
     for _ in 0..MAX_SCAN_ROUNDS {
         let mut added = false;
+
         for address in scan_for_prologues(image, &helpers, &walked) {
             if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
                 slot.insert(Origin::Scanned);
                 added = true;
             }
         }
+
+        for function in assemble(&walked, &origins, &resolved).values() {
+            for table in crate::jumptable::recover(image, function).recovered() {
+                let targets: Vec<u32> =
+                    table.targets.iter().copied().chain(table.default).collect();
+
+                let branches = resolved.entry(function.start).or_default();
+                if branches.insert(table.branch, targets.clone()).as_deref()
+                    != Some(targets.as_slice())
+                {
+                    added = true;
+                }
+
+                let known = entries.entry(function.start).or_default();
+                for target in targets {
+                    added |= known.insert(target);
+                }
+            }
+        }
+
         if !added {
             break;
         }
         walked = walk_to_fixed_point(image, &helpers, &mut origins, &entries);
     }
 
+    let functions = assemble(&walked, &origins, &resolved);
+    Program { helpers, functions }
+}
+
+/// Builds the functions of a walk, attaching what is known about each.
+fn assemble(
+    walked: &BTreeMap<u32, Vec<Block>>,
+    origins: &BTreeMap<u32, Origin>,
+    resolved: &BTreeMap<u32, BTreeMap<u32, Vec<u32>>>,
+) -> BTreeMap<u32, Function> {
     let starts: BTreeSet<u32> = origins.keys().copied().collect();
-    let functions = walked
-        .into_iter()
-        .map(|(start, blocks)| {
+
+    walked
+        .iter()
+        .map(|(&start, blocks)| {
             let origin = origins.get(&start).copied().unwrap_or(Origin::Called);
-            let tail_calls = tail_calls_of(&blocks, start, &starts);
+            let tail_calls = tail_calls_of(blocks, start, &starts);
             (
                 start,
                 Function {
                     start,
                     origin,
-                    blocks,
+                    blocks: blocks.clone(),
                     tail_calls,
-                    resolved: BTreeMap::new(),
+                    resolved: resolved.get(&start).cloned().unwrap_or_default(),
                 },
             )
         })
-        .collect();
-
-    Program { helpers, functions }
+        .collect()
 }
 
 /// Walks every known function until following calls turns up nothing new.
@@ -1029,6 +1065,92 @@ mod tests {
                 BTreeMap::new()
             },
         }
+    }
+
+    /// Emits a switch on `index` whose table is absolute, placed so that the
+    /// branch lands where the caller laid the image out.
+    ///
+    /// The default is the first word after the branch, and the table is read
+    /// from `table`. Eight words long.
+    fn switch_on(index: u32, table: u32, default_offset: u32) -> [u32; 8] {
+        [
+            encode::cmpli(index, 1),
+            encode::bc(12, 1, default_offset),
+            encode::addis(12, 0, 0x8200),
+            encode::addi(12, 12, table & 0xffff),
+            encode::slwi(0, index, 2),
+            encode::lwzx(0, 12, 0),
+            encode::mtctr(0),
+            encode::bctr(),
+        ]
+    }
+
+    /// A switch body is reachable only by reading the table, so a walk that does
+    /// not read it leaves the whole body unclaimed.
+    #[test]
+    fn a_switch_body_is_claimed() {
+        let mut words = Vec::new();
+        words.extend(switch_on(10, 0x0030, 0x1c));
+        words.extend([encode::blr(); 4]);
+        words.extend([0x8200_0024, 0x8200_0028]);
+
+        let image = ImageBuilder::new(0x8200_0000)
+            .entry(0x8200_0000)
+            .code(&words)
+            .build();
+
+        let program = analyze(&image, &[]);
+        let function = program
+            .functions()
+            .find(|function| function.start == 0x8200_0000)
+            .expect("the entry point is a function");
+
+        for target in [0x8200_0020, 0x8200_0024, 0x8200_0028] {
+            assert!(function.contains(target), "{target:#010x} was not claimed");
+        }
+        assert!(
+            function.unreachable_blocks().is_empty(),
+            "a block was claimed without the edge that justifies it"
+        );
+    }
+
+    /// Reading one table can expose a second switch, whose table can then be
+    /// read. One round of recovery finds the first and stops.
+    #[test]
+    fn a_switch_reached_only_through_another_switch_is_claimed() {
+        let mut words = Vec::new();
+        // The first switch, its default and filler, then its table naming the
+        // second switch and one ordinary target.
+        words.extend(switch_on(10, 0x0030, 0x1c));
+        words.extend([encode::blr(); 4]);
+        words.extend([0x8200_0038, 0x8200_0024]);
+        // The second switch at 0x82000038, reachable only through that table.
+        words.extend(switch_on(11, 0x0068, 0x1c));
+        words.extend([encode::blr(); 4]);
+        words.extend([0x8200_005c, 0x8200_0060]);
+
+        let image = ImageBuilder::new(0x8200_0000)
+            .entry(0x8200_0000)
+            .code(&words)
+            .build();
+
+        let program = analyze(&image, &[]);
+        let function = program
+            .functions()
+            .find(|function| function.start == 0x8200_0000)
+            .expect("the entry point is a function");
+
+        assert!(
+            function.contains(0x8200_0038),
+            "the second switch was not reached"
+        );
+        for target in [0x8200_005c, 0x8200_0060] {
+            assert!(
+                function.contains(target),
+                "{target:#010x} is behind the second table and was not claimed"
+            );
+        }
+        assert!(function.unreachable_blocks().is_empty());
     }
 
     #[test]
