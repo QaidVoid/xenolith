@@ -16,5 +16,6 @@ xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
 workspace = true
 
 [dev-dependencies]
+proptest = "1.11.0"
 xenolith-analysis = { path = "../xenolith-analysis" }
 xenolith-xex = { path = "../xenolith-xex" }

@@ -988,6 +988,7 @@ dependencies = [
 name = "xenolith-lift"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "xenolith-analysis",
  "xenolith-ppc",
  "xenolith-xex",

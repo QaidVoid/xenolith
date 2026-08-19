@@ -1,0 +1,24 @@
+[package]
+name = "xenolith-lift-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+xenolith-analysis = { version = "0.1.0", path = "../../xenolith-analysis" }
+xenolith-lift = { version = "0.1.0", path = ".." }
+xenolith-ppc = { version = "0.1.0", path = "../../xenolith-ppc" }
+xenolith-xex = { version = "0.1.0", path = "../../xenolith-xex" }
+
+[[bin]]
+name = "lift"
+path = "fuzz_targets/lift.rs"
+test = false
+doc = false
+bench = false
