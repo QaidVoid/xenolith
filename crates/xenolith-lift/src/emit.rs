@@ -147,6 +147,18 @@ fn compare(into: &mut String, field: u8, left: &str, right: &str, less: &str) {
     );
 }
 
+/// Returns the effective address of an indexed access.
+///
+/// Register zero names no register in this position rather than naming the
+/// register numbered zero, which is why the base is dropped rather than read.
+fn indexed_address(ra: u32, rb: u32) -> String {
+    if ra == 0 {
+        format!("(uint32_t)ctx->r[{rb}]")
+    } else {
+        format!("(uint32_t)ctx->r[{ra}] + (uint32_t)ctx->r[{rb}]")
+    }
+}
+
 /// Returns the C for one instruction, if it can be written.
 ///
 /// Returns `None` for anything this crate cannot express, which is a normal
@@ -944,6 +956,38 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
                 "    __builtin_memcpy(base + address, ctx->v[{register}].u8, 16);"
             )
             .ok()?;
+        }
+
+        // A reservation is taken and redeemed through the runtime rather than
+        // becoming a load and a store, so that an environment with threads has
+        // somewhere to put real atomicity.
+        Opcode::Lwarx | Opcode::Ldarx => {
+            let width = if instruction.opcode() == Opcode::Lwarx {
+                32
+            } else {
+                64
+            };
+            let _ = writeln!(out, "    address = {};", indexed_address(ra, rb));
+            let _ = writeln!(
+                out,
+                "    ctx->r[{rt}] = xenolith_reserve{width}(base, address);"
+            );
+        }
+        Opcode::Stwcx | Opcode::Stdcx => {
+            let (width, cast) = if instruction.opcode() == Opcode::Stwcx {
+                (32, "(uint32_t)")
+            } else {
+                (64, "")
+            };
+            let _ = writeln!(out, "    address = {};", indexed_address(ra, rb));
+            // The architecture sets the field to two zero bits, whether the
+            // store happened, and the summary overflow bit, in that order.
+            let _ = writeln!(out, "    ctx->cr[0].lt = 0;\n    ctx->cr[0].gt = 0;");
+            let _ = writeln!(
+                out,
+                "    ctx->cr[0].eq = xenolith_conditional{width}(base, address, {cast}ctx->r[{rt}]);"
+            );
+            let _ = writeln!(out, "    ctx->cr[0].so = (uint8_t)(ctx->xer >> 31) & 1;");
         }
 
         // Cache hints change no register this model describes, and control

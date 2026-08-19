@@ -194,7 +194,9 @@ fn access_of(opcode: Opcode) -> Option<Access> {
         | Opcode::Stdx
         | Opcode::Stwbrx
         | Opcode::Sthbrx
-        | Opcode::Stdbrx => general(false, true, false),
+        | Opcode::Stdbrx
+        | Opcode::Stwcx
+        | Opcode::Stdcx => general(false, true, false),
         Opcode::Stwux | Opcode::Stbux | Opcode::Sthux | Opcode::Stdux => general(false, true, true),
 
         Opcode::Lfs | Opcode::Lfd => floating(true, false, false),

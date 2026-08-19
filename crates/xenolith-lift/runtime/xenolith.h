@@ -141,4 +141,26 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address);
 void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
                      uint32_t ordinal);
 
+/* Where a reservation is taken and where it is redeemed.
+ *
+ * A program with one thread and no sharing could load and store these directly
+ * and be right, which is exactly why they are not emitted that way: the
+ * assumption would sit where nothing could find it. An environment that has
+ * threads implements these with real atomics instead.
+ *
+ * The conditional store reports whether the store happened, which is what the
+ * retry branch after one reads.
+ */
+uint32_t xenolith_reserve32(const uint8_t *base, uint32_t address);
+uint64_t xenolith_reserve64(const uint8_t *base, uint32_t address);
+uint8_t xenolith_conditional32(uint8_t *base, uint32_t address, uint32_t value);
+uint8_t xenolith_conditional64(uint8_t *base, uint32_t address, uint64_t value);
+
+/* The time base, which advances.
+ *
+ * At what rate is the environment's decision. Emitting a constant would produce
+ * a program whose timing loops never finish.
+ */
+uint64_t xenolith_timebase(void);
+
 #endif /* XENOLITH_H */

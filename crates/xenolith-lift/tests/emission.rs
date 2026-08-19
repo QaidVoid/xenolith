@@ -68,7 +68,12 @@ fn compiles(name: &str, emitted: &str) -> Result<(), String> {
         "#include \"xenolith.h\"\n\n\
          void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
          void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
-         void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o) {{ (void)c; (void)b; (void)l; (void)o; }}\n\n\
+         void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o) {{ (void)c; (void)b; (void)l; (void)o; }}\n\
+         uint32_t xenolith_reserve32(const uint8_t *b, uint32_t a) {{ return xenolith_load32(b, a); }}\n\
+         uint64_t xenolith_reserve64(const uint8_t *b, uint32_t a) {{ return xenolith_load64(b, a); }}\n\
+         uint8_t xenolith_conditional32(uint8_t *b, uint32_t a, uint32_t v) {{ xenolith_store32(b, a, v); return 1; }}\n\
+         uint8_t xenolith_conditional64(uint8_t *b, uint32_t a, uint64_t v) {{ xenolith_store64(b, a, v); return 1; }}\n\
+         uint64_t xenolith_timebase(void) {{ return 0; }}\n\n\
          {emitted}"
     );
     std::fs::write(&source, &program).map_err(|error| format!("writing the source: {error}"))?;
@@ -374,4 +379,45 @@ fn a_thunk_with_no_import_behind_it_does_not_lift() {
         lift_entry(&WORDS).is_err(),
         "placeholder words are not instructions"
     );
+}
+
+/// The reference count idiom is the most common shape in either title that was
+/// unmodelled, and the branch after the conditional store is what it rests on.
+#[test]
+fn a_reservation_retry_lifts() {
+    // mflr r12; stwu r1, -96(r1);
+    // lwarx r10, r0, r11; addi r10, r10, 1; stwcx. r10, r0, r11;
+    // bc 4, 2, back to the lwarx; addi r1, r1, 96; blr
+    const WORDS: [u32; 8] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x7d40_5828,
+        0x394a_0001,
+        0x7d40_592d,
+        0x4082_fff4,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the reservation idiom should lift");
+
+    assert!(
+        emitted.contains("ctx->r[10] = xenolith_reserve32(base, address);"),
+        "the reserved load was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains(
+            "ctx->cr[0].eq = xenolith_conditional32(base, address, (uint32_t)ctx->r[10]);"
+        ),
+        "the conditional store was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("ctx->cr[0].lt = 0;"),
+        "the field's leading bits were not cleared: {emitted}"
+    );
+    assert!(
+        emitted.contains("if (!ctx->cr[0].eq)"),
+        "the retry did not read the bit the store set: {emitted}"
+    );
+    assert_eq!(compiles("reservation", &emitted), Ok(()));
 }
