@@ -479,3 +479,75 @@ fn the_system_registers_lift() {
     );
     assert_eq!(compiles("system_registers", &emitted), Ok(()));
 }
+
+/// A logical between condition bits writes one bit and leaves the rest, and a
+/// field move takes the whole field.
+#[test]
+fn the_condition_register_logicals_lift() {
+    // mflr r12; stwu r1, -96(r1);
+    // cror 2, 0, 1; crand 6, 4, 5; crnot-shaped crnor 10, 8, 9; mcrf cr1, cr7;
+    // addi r1, r1, 96; blr
+    const WORDS: [u32; 8] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x4c40_0b82,
+        0x4cc4_2a02,
+        0x4d48_4842,
+        0x4c9c_0000,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the logicals should lift");
+
+    assert!(
+        emitted.contains("ctx->cr[0].eq = (uint8_t)(ctx->cr[0].lt | ctx->cr[0].gt) & 1;"),
+        "the or was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("ctx->cr[1].eq = (uint8_t)(ctx->cr[1].lt & ctx->cr[1].gt) & 1;"),
+        "the and was not emitted: {emitted}"
+    );
+    assert!(
+        emitted
+            .contains("ctx->cr[2].eq = (uint8_t)((uint8_t)!(ctx->cr[2].lt | ctx->cr[2].gt)) & 1;"),
+        "the nor was not emitted: {emitted}"
+    );
+    assert!(
+        emitted.contains("ctx->cr[1] = ctx->cr[7];"),
+        "the field move was not emitted: {emitted}"
+    );
+    assert_eq!(compiles("condition_logicals", &emitted), Ok(()));
+}
+
+/// Byte order is what these are for, so the emitted code has to assemble the
+/// bytes in the order the instruction names rather than swap after the fact.
+#[test]
+fn the_byte_reversed_accesses_lift() {
+    // mflr r12; stwu r1, -96(r1);
+    // lwbrx r3, 0, r4; sthbrx r3, 0, r4; lhbrx r5, 0, r4; stwbrx r5, 0, r4;
+    // addi r1, r1, 96; blr
+    const WORDS: [u32; 8] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x7c60_242c,
+        0x7c60_272c,
+        0x7ca0_262c,
+        0x7ca0_252c,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let emitted = lift_entry(&WORDS).expect("the byte reversed accesses should lift");
+
+    assert!(
+        emitted.contains("(uint32_t)xenolith_load8(base, address + 0) << 0")
+            && emitted.contains("(uint32_t)xenolith_load8(base, address + 3) << 24"),
+        "the word load did not assemble its bytes in reverse: {emitted}"
+    );
+    assert!(
+        emitted.contains("xenolith_store8(base, address + 0, (uint8_t)(ctx->r[3] >> 0));"),
+        "the halfword store did not write its low byte first: {emitted}"
+    );
+    assert_eq!(compiles("byte_reversed", &emitted), Ok(()));
+}

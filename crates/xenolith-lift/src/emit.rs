@@ -161,6 +161,31 @@ fn nibble_mask(mask: u8) -> u64 {
     bits
 }
 
+/// Returns how many bytes a byte reversed access moves.
+fn byte_reversed_width(opcode: Opcode) -> Option<u32> {
+    Some(match opcode {
+        Opcode::Lhbrx | Opcode::Sthbrx => 2,
+        Opcode::Lwbrx | Opcode::Stwbrx => 4,
+        Opcode::Ldbrx | Opcode::Stdbrx => 8,
+        _ => return None,
+    })
+}
+
+/// Returns the condition register bit a number names.
+///
+/// Bits are numbered across the whole register rather than within a field, so
+/// the field is the number divided by four and the bit within it the remainder,
+/// in the order less than, greater than, equal, summary overflow.
+fn condition_bit(number: u32) -> String {
+    let name = match number & 3 {
+        0 => "lt",
+        1 => "gt",
+        2 => "eq",
+        _ => "so",
+    };
+    format!("ctx->cr[{}].{name}", number >> 2)
+}
+
 /// Returns the effective address of an indexed access.
 ///
 /// Register zero names no register in this position rather than naming the
@@ -537,6 +562,35 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
                 out,
                 "    ctx->fpscr = (ctx->fpscr & ~{mask}ull) | {value}ull;"
             );
+        }
+
+        // A logical between two condition bits writes the single bit its
+        // encoding names and leaves every other one alone.
+        Opcode::Crand
+        | Opcode::Crandc
+        | Opcode::Cror
+        | Opcode::Crorc
+        | Opcode::Crxor
+        | Opcode::Crnand
+        | Opcode::Crnor
+        | Opcode::Creqv => {
+            let left = condition_bit(ra);
+            let right = condition_bit(rb);
+            let value = match instruction.opcode() {
+                Opcode::Crand => format!("{left} & {right}"),
+                Opcode::Crandc => format!("{left} & (uint8_t)!{right}"),
+                Opcode::Cror => format!("{left} | {right}"),
+                Opcode::Crorc => format!("{left} | (uint8_t)!{right}"),
+                Opcode::Crxor => format!("{left} ^ {right}"),
+                Opcode::Crnand => format!("(uint8_t)!({left} & {right})"),
+                Opcode::Crnor => format!("(uint8_t)!({left} | {right})"),
+                _ => format!("(uint8_t)!({left} ^ {right})"),
+            };
+            let _ = writeln!(out, "    {} = (uint8_t)({value}) & 1;", condition_bit(rt));
+        }
+        Opcode::Mcrf => {
+            let (to, from) = (rt >> 2, ra >> 2);
+            let _ = writeln!(out, "    ctx->cr[{to}] = ctx->cr[{from}];");
         }
 
         // The whole condition register moves as one word, in a bit order the
@@ -1022,6 +1076,37 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
                 "    __builtin_memcpy(base + address, ctx->v[{register}].u8, 16);"
             )
             .ok()?;
+        }
+
+        // These read and write the guest's least significant byte first, which
+        // is the opposite of every other access. The bytes are assembled here
+        // rather than swapped after loading, so what happens is visible without
+        // knowing which end either machine keeps its numbers at.
+        Opcode::Lwbrx | Opcode::Lhbrx | Opcode::Ldbrx => {
+            let width = byte_reversed_width(instruction.opcode())?;
+            let _ = writeln!(out, "    address = {};", indexed_address(ra, rb));
+            let value = (0..width)
+                .map(|byte| {
+                    format!(
+                        "((uint{width2}_t)xenolith_load8(base, address + {byte}) << {shift})",
+                        width2 = width * 8,
+                        shift = byte * 8
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let _ = writeln!(out, "    ctx->r[{rt}] = {value};");
+        }
+        Opcode::Stwbrx | Opcode::Sthbrx | Opcode::Stdbrx => {
+            let width = byte_reversed_width(instruction.opcode())?;
+            let _ = writeln!(out, "    address = {};", indexed_address(ra, rb));
+            for byte in 0..width {
+                let _ = writeln!(
+                    out,
+                    "    xenolith_store8(base, address + {byte}, (uint8_t)(ctx->r[{rt}] >> {}));",
+                    byte * 8
+                );
+            }
         }
 
         // A reservation is taken and redeemed through the runtime rather than
