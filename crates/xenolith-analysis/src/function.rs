@@ -513,7 +513,11 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         }
     }
 
-    let mut walked = walk_to_fixed_point(image, &helpers, &mut origins);
+    // The additional addresses each function is entered at, which recovery
+    // fills in once there are functions to recover from.
+    let entries: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+
+    let mut walked = walk_to_fixed_point(image, &helpers, &mut origins, &entries);
 
     // Discovery reaches what calls reach. Scanning looks for what they do not,
     // and discovery runs again from whatever it finds.
@@ -533,7 +537,7 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         if !added {
             break;
         }
-        walked = walk_to_fixed_point(image, &helpers, &mut origins);
+        walked = walk_to_fixed_point(image, &helpers, &mut origins, &entries);
     }
 
     let starts: BTreeSet<u32> = origins.keys().copied().collect();
@@ -566,13 +570,19 @@ fn walk_to_fixed_point(
     image: &Image,
     helpers: &Helpers,
     origins: &mut BTreeMap<u32, Origin>,
+    entries: &BTreeMap<u32, BTreeSet<u32>>,
 ) -> BTreeMap<u32, Vec<Block>> {
+    let none = BTreeSet::new();
+
     loop {
         let boundaries: BTreeSet<u32> = origins.keys().copied().collect();
 
         let walked: BTreeMap<u32, Vec<Block>> = boundaries
             .iter()
-            .map(|&start| (start, blocks_within(image, start, &boundaries)))
+            .map(|&start| {
+                let also = entries.get(&start).unwrap_or(&none);
+                (start, blocks_within(image, start, &boundaries, also))
+            })
             .collect();
 
         let mut discovered = Vec::new();

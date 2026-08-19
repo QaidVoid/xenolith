@@ -11,8 +11,10 @@
 //! is exactly the shape that makes a fixpoint loop forever, and none of it is
 //! unusual in a real title.
 
+use std::collections::BTreeSet;
+
 use proptest::prelude::*;
-use xenolith_analysis::{Edge, analyze, detect, recover};
+use xenolith_analysis::{Edge, analyze, blocks_within, detect, recover};
 use xenolith_xex::{Image, PageKind, Section};
 
 /// The address images are placed at, matching where a title loads.
@@ -190,5 +192,36 @@ proptest! {
 
         let image = image_of(&words, Some(BASE));
         check(&image, words.len());
+    }
+
+    /// Naming extra entries must never make blocks overlap, and must never make
+    /// the same instruction belong to two of them, however the addresses fall.
+    #[test]
+    fn additional_entries_never_overlap_or_double_count(
+        words in prop::collection::vec(any::<u32>(), 1..128),
+        picks in prop::collection::vec(0u32..128, 0..8),
+    ) {
+        let image = image_of(&words, Some(BASE));
+        let also: BTreeSet<u32> = picks
+            .iter()
+            .map(|pick| BASE + pick * 4)
+            .collect();
+
+        let blocks = blocks_within(&image, BASE, &BTreeSet::new(), &also);
+
+        let mut spans: Vec<(u32, u32)> = blocks.iter().map(|b| (b.start, b.end)).collect();
+        spans.sort_unstable();
+        for (start, end) in &spans {
+            prop_assert!(end > start, "a block must hold at least one instruction");
+        }
+        for pair in spans.windows(2) {
+            let [(_, first_end), (second_start, _)] = pair else {
+                continue;
+            };
+            prop_assert!(first_end <= second_start, "blocks overlap: {spans:?}");
+        }
+
+        let covered: u64 = spans.iter().map(|(s, e)| u64::from(e - s) / 4).sum();
+        prop_assert!(covered <= words.len() as u64);
     }
 }

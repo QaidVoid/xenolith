@@ -115,23 +115,41 @@ fn is_executable(image: &Image, address: u32) -> bool {
 /// instruction the walk decoded.
 #[must_use]
 pub fn blocks_from(image: &Image, entry: u32) -> Vec<Block> {
-    blocks_within(image, entry, &BTreeSet::new())
+    blocks_within(image, entry, &BTreeSet::new(), &BTreeSet::new())
 }
 
-/// Walks control flow from `entry`, stopping at any address in `boundaries`.
+/// Walks control flow from `entry` and from `also`, stopping at any address in
+/// `boundaries`.
 ///
 /// A boundary is somewhere another function begins. Without them a branch that
 /// leaves one function for another, which is how a tail call is compiled, would
 /// pull the whole of that other function in and the two would be reported as
 /// one. The entry itself is never a boundary to its own walk, so a function
 /// that loops back to its first instruction still works.
+///
+/// `also` holds the other addresses this function is known to be entered at,
+/// which is where the targets recovered from an indirect branch go. They are
+/// walked exactly as the entry is, except that a boundary among them belongs to
+/// another function and is left alone: a recovered target does not outrank the
+/// rule that decides who claims an instruction.
 #[must_use]
-pub fn blocks_within(image: &Image, entry: u32, boundaries: &BTreeSet<u32>) -> Vec<Block> {
+pub fn blocks_within(
+    image: &Image,
+    entry: u32,
+    boundaries: &BTreeSet<u32>,
+    also: &BTreeSet<u32>,
+) -> Vec<Block> {
     let mut leaders = BTreeSet::new();
     let mut ends = BTreeMap::new();
     let mut pending = vec![entry];
 
     leaders.insert(entry);
+    for &address in also {
+        if address != entry && !boundaries.contains(&address) && is_executable(image, address) {
+            leaders.insert(address);
+            pending.push(address);
+        }
+    }
 
     while let Some(start) = pending.pop() {
         if ends.contains_key(&start) || !is_executable(image, start) {
@@ -474,5 +492,112 @@ mod tests {
                 ..
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod additional_entry_tests {
+    use super::*;
+    use crate::testing::{ImageBuilder, encode};
+
+    /// Three returns in a row. Only the first is reachable by walking, so the
+    /// others are only ever reached by being named.
+    fn three_returns() -> Image {
+        ImageBuilder::new(0x8200_0000)
+            .code(&[encode::blr(), encode::blr(), encode::blr()])
+            .build()
+    }
+
+    #[test]
+    fn an_additional_entry_is_walked() {
+        let image = three_returns();
+
+        let blocks = blocks_within(
+            &image,
+            0x8200_0000,
+            &BTreeSet::new(),
+            &BTreeSet::from([0x8200_0008]),
+        );
+
+        let starts: Vec<u32> = blocks.iter().map(|block| block.start).collect();
+        assert_eq!(starts, [0x8200_0000, 0x8200_0008]);
+    }
+
+    /// A recovered target does not outrank the rule that decides who claims an
+    /// instruction, so one that begins another function is left to it.
+    #[test]
+    fn an_additional_entry_inside_another_function_is_left_alone() {
+        let image = three_returns();
+
+        let blocks = blocks_within(
+            &image,
+            0x8200_0000,
+            &BTreeSet::from([0x8200_0008]),
+            &BTreeSet::from([0x8200_0008]),
+        );
+
+        let starts: Vec<u32> = blocks.iter().map(|block| block.start).collect();
+        assert_eq!(starts, [0x8200_0000]);
+    }
+
+    #[test]
+    fn an_additional_entry_outside_the_image_is_refused() {
+        let image = three_returns();
+
+        let blocks = blocks_within(
+            &image,
+            0x8200_0000,
+            &BTreeSet::new(),
+            &BTreeSet::from([0x9000_0000]),
+        );
+
+        let starts: Vec<u32> = blocks.iter().map(|block| block.start).collect();
+        assert_eq!(starts, [0x8200_0000]);
+    }
+
+    /// Naming the entry again must not make it a second block.
+    #[test]
+    fn an_additional_entry_equal_to_the_entry_changes_nothing() {
+        let image = three_returns();
+
+        let blocks = blocks_within(
+            &image,
+            0x8200_0000,
+            &BTreeSet::new(),
+            &BTreeSet::from([0x8200_0000]),
+        );
+
+        assert_eq!(blocks.len(), 1);
+    }
+
+    /// The blocks an additional entry adds must not overlap the ones already
+    /// walked, which is what would happen if a named address landed partway
+    /// through a block the entry had already covered.
+    #[test]
+    fn additional_entries_never_overlap_what_was_already_walked() {
+        let image = ImageBuilder::new(0x8200_0000)
+            .code(&[
+                encode::addi(3, 4, 1),
+                encode::addi(3, 3, 1),
+                encode::addi(3, 3, 1),
+                encode::blr(),
+            ])
+            .build();
+
+        let blocks = blocks_within(
+            &image,
+            0x8200_0000,
+            &BTreeSet::new(),
+            &BTreeSet::from([0x8200_0004, 0x8200_0008]),
+        );
+
+        let mut spans: Vec<(u32, u32)> = blocks.iter().map(|b| (b.start, b.end)).collect();
+        spans.sort_unstable();
+        for pair in spans.windows(2) {
+            let [(_, first_end), (second_start, _)] = pair else {
+                continue;
+            };
+            assert!(first_end <= second_start, "blocks overlap: {spans:?}");
+        }
     }
 }
