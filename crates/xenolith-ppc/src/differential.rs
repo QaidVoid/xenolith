@@ -258,16 +258,24 @@ const HINT_ALIASES: &[(&str, &[&str])] = &[
 ///
 /// These are real encodings the architecture defines and this crate decodes.
 /// LLVM's PowerPC disassembler has no entry for these on either its 32 or
-/// 64-bit target, so there is nothing to compare against. The indexed string
-/// operations it simply never implemented. `mcrxr` it did implement once and
-/// then dropped, because a later revision of the architecture phased the
-/// instruction out, whereas the console predates that revision and has it.
+/// 64-bit target, so there is nothing to compare against.
+///
+/// The indexed string operations it simply never implemented. `mcrxr` it did
+/// implement once and then dropped, because a later revision of the
+/// architecture phased the instruction out, whereas the console predates that
+/// revision and has it. The unaligned vector accesses are the console's own
+/// addition to the standard vector instructions, so a general purpose PowerPC
+/// decoder has no reason to know them. They were found by sweeping real game
+/// code rather than by reading a specification.
 ///
 /// Listing them keeps the coverage assertion meaningful. An instruction that
 /// silently stopped being compared for any other reason still fails, and if a
 /// later LLVM gains support the list is asserted to be stale rather than
 /// quietly excluding an instruction that could now be checked.
-const ORACLE_UNSUPPORTED: &[&str] = &["lswx", "stswx", "mcrxr"];
+const ORACLE_UNSUPPORTED: &[&str] = &[
+    "lswx", "stswx", "mcrxr", "lvlx", "lvrx", "lvlxl", "lvrxl", "stvlx", "stvrx", "stvlxl",
+    "stvrxl",
+];
 
 /// Returns whether a branch rendering names one of the register branches.
 ///
