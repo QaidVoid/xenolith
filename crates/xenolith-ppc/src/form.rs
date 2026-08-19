@@ -22,6 +22,10 @@ pub enum Form {
     /// A source register, a target register, a shift amount, and a mask range,
     /// used by the 32-bit rotate instructions. Identified by primary opcode.
     M,
+    /// As [`Form::D`], but the displacement gives up its low two bits to an
+    /// extended opcode, which is how the doubleword accesses fit alongside each
+    /// other under one primary opcode.
+    DS,
     /// Three register fields, a 10-bit extended opcode, and the record bit.
     X,
     /// As [`Form::X`], but the extended opcode is nine bits and the bit above it
@@ -46,7 +50,7 @@ impl Form {
     #[must_use]
     pub const fn extended_opcode_shift(self) -> u32 {
         match self {
-            Self::D | Self::M => 0,
+            Self::D | Self::M | Self::DS => 0,
             Self::X | Self::XO | Self::MDS => 1,
             Self::XS | Self::MD => 2,
         }
@@ -58,6 +62,7 @@ impl Form {
     pub const fn extended_opcode_field(self) -> u32 {
         match self {
             Self::D | Self::M => 0,
+            Self::DS => 0x3,
             Self::X => 0x3ff,
             Self::XO | Self::XS => 0x1ff,
             Self::MD => 0x7,
@@ -72,6 +77,20 @@ impl Form {
     #[must_use]
     pub const fn mask(self) -> u32 {
         PRIMARY_MASK | (self.extended_opcode_field() << self.extended_opcode_shift())
+    }
+
+    /// Returns whether this form has a record bit at the bottom of the word.
+    ///
+    /// A record bit selects a variant of one instruction rather than a
+    /// different instruction, so a form that has one must leave it outside the
+    /// identifying mask. [`Form::DS`] has none: its low two bits are the
+    /// extended opcode itself, and [`Form::D`] spends them on its immediate.
+    #[must_use]
+    pub const fn has_record_bit(self) -> bool {
+        matches!(
+            self,
+            Self::M | Self::X | Self::XO | Self::XS | Self::MD | Self::MDS
+        )
     }
 
     /// Returns whether this form carries an extended opcode.
@@ -95,6 +114,7 @@ mod tests {
     const ALL: &[Form] = &[
         Form::D,
         Form::M,
+        Form::DS,
         Form::X,
         Form::XO,
         Form::XS,
@@ -113,12 +133,30 @@ mod tests {
         }
     }
 
-    /// The record bit selects a variant of the same instruction, so it must not
-    /// be part of what identifies one.
+    /// The record bit selects a variant of the same instruction, so a form that
+    /// has one must not let it identify the instruction.
     #[test]
-    fn no_mask_covers_the_record_bit() {
+    fn no_mask_covers_a_record_bit_the_form_actually_has() {
         for form in ALL {
-            assert_eq!(form.mask() & 1, 0, "{form:?} covers the record bit");
+            if !form.has_record_bit() {
+                continue;
+            }
+            assert_eq!(form.mask() & 1, 0, "{form:?} covers its record bit");
+        }
+    }
+
+    /// The forms without a record bit are the ones that spend the bottom of the
+    /// word on something else, which is why the rule above has to be selective.
+    #[test]
+    fn only_the_forms_that_spend_the_low_bits_lack_a_record_bit() {
+        assert!(!Form::D.has_record_bit());
+        assert!(!Form::DS.has_record_bit());
+
+        for form in ALL {
+            if matches!(form, Form::D | Form::DS) {
+                continue;
+            }
+            assert!(form.has_record_bit(), "{form:?} should have a record bit");
         }
     }
 
@@ -183,6 +221,7 @@ mod tests {
     fn known_form_masks() {
         assert_eq!(Form::D.mask(), 0xfc00_0000);
         assert_eq!(Form::M.mask(), 0xfc00_0000);
+        assert_eq!(Form::DS.mask(), 0xfc00_0003);
         assert_eq!(Form::X.mask(), 0xfc00_07fe);
         assert_eq!(Form::XO.mask(), 0xfc00_03fe);
         assert_eq!(Form::XS.mask(), 0xfc00_07fc);

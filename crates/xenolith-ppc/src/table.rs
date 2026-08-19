@@ -116,11 +116,19 @@ instructions! {
             32 => Lwz = "lwz";
             33 => Lwzu = "lwzu";
             34 => Lbz = "lbz";
+            35 => Lbzu = "lbzu";
             36 => Stw = "stw";
             37 => Stwu = "stwu";
             38 => Stb = "stb";
+            39 => Stbu = "stbu";
             40 => Lhz = "lhz";
+            41 => Lhzu = "lhzu";
+            42 => Lha = "lha";
+            43 => Lhau = "lhau";
             44 => Sth = "sth";
+            45 => Sthu = "sthu";
+            46 => Lmw = "lmw";
+            47 => Stmw = "stmw";
         }
         M {
             20 => Rlwimi = "rlwimi";
@@ -142,40 +150,95 @@ instructions! {
         }
     }
 
+    extended 58 {
+        DS {
+            0 => Ld = "ld";
+            1 => Ldu = "ldu";
+            2 => Lwa = "lwa";
+        }
+    }
+
+    extended 62 {
+        DS {
+            0 => Std = "std";
+            1 => Stdu = "stdu";
+        }
+    }
+
     extended 31 {
         X {
             0 => Cmp = "cmp";
             19 => Mfcr = "mfcr";
+            20 => Lwarx = "lwarx";
+            21 => Ldx = "ldx";
             23 => Lwzx = "lwzx";
             24 => Slw = "slw";
             26 => Cntlzw = "cntlzw";
             27 => Sld = "sld";
             28 => And = "and";
             32 => Cmpl = "cmpl";
+            53 => Ldux = "ldux";
+            54 => Dcbst = "dcbst";
+            55 => Lwzux = "lwzux";
             58 => Cntlzd = "cntlzd";
             60 => Andc = "andc";
             83 => Mfmsr = "mfmsr";
+            84 => Ldarx = "ldarx";
+            86 => Dcbf = "dcbf";
+            87 => Lbzx = "lbzx";
+            119 => Lbzux = "lbzux";
             124 => Nor = "nor";
             144 => Mtcrf = "mtcrf";
             146 => Mtmsr = "mtmsr";
+            149 => Stdx = "stdx";
+            150 => Stwcx = "stwcx.";
             151 => Stwx = "stwx";
             178 => Mtmsrd = "mtmsrd";
+            181 => Stdux = "stdux";
+            183 => Stwux = "stwux";
+            214 => Stdcx = "stdcx.";
+            215 => Stbx = "stbx";
+            246 => Dcbtst = "dcbtst";
+            247 => Stbux = "stbux";
+            278 => Dcbt = "dcbt";
+            279 => Lhzx = "lhzx";
             284 => Eqv = "eqv";
+            311 => Lhzux = "lhzux";
             316 => Xor = "xor";
             339 => Mfspr = "mfspr";
+            341 => Lwax = "lwax";
+            343 => Lhax = "lhax";
             371 => Mftb = "mftb";
+            373 => Lwaux = "lwaux";
+            375 => Lhaux = "lhaux";
+            407 => Sthx = "sthx";
             412 => Orc = "orc";
+            439 => Sthux = "sthux";
             444 => Or = "or";
             467 => Mtspr = "mtspr";
             476 => Nand = "nand";
+            532 => Ldbrx = "ldbrx";
+            533 => Lswx = "lswx";
+            534 => Lwbrx = "lwbrx";
             536 => Srw = "srw";
             539 => Srd = "srd";
+            597 => Lswi = "lswi";
+            598 => Sync = "sync";
+            660 => Stdbrx = "stdbrx";
+            661 => Stswx = "stswx";
+            662 => Stwbrx = "stwbrx";
+            725 => Stswi = "stswi";
+            790 => Lhbrx = "lhbrx";
             792 => Sraw = "sraw";
             794 => Srad = "srad";
             824 => Srawi = "srawi";
+            854 => Eieio = "eieio";
+            918 => Sthbrx = "sthbrx";
             922 => Extsh = "extsh";
             954 => Extsb = "extsb";
+            982 => Icbi = "icbi";
             986 => Extsw = "extsw";
+            1014 => Dcbz = "dcbz";
         }
         XS {
             413 => Sradi = "sradi";
