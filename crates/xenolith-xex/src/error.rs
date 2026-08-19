@@ -93,6 +93,38 @@ pub enum Error {
         len: usize,
     },
 
+    /// The container uses a compression scheme this crate does not reconstruct.
+    #[error("unsupported compression scheme {scheme}")]
+    UnsupportedCompression {
+        /// Name of the scheme that is not yet reconstructed.
+        scheme: String,
+    },
+
+    /// The container declares an image larger than the console could load.
+    #[error("declared image size of {size} bytes exceeds what the console can hold")]
+    ImageTooLarge {
+        /// The size value that was rejected.
+        size: u32,
+    },
+
+    /// The basic scheme blocks describe more bytes than the image can hold.
+    #[error("basic blocks describe {described} bytes for an image of {image_size}")]
+    BasicBlocksExceedImage {
+        /// Total bytes the blocks account for.
+        described: u64,
+        /// The declared image size.
+        image_size: u32,
+    },
+
+    /// The basic scheme blocks read more bytes than the body holds.
+    #[error("basic blocks read {stored} stored bytes, but the body holds {available}")]
+    BasicBlocksExceedBody {
+        /// Total stored bytes the blocks claim.
+        stored: u64,
+        /// Bytes actually present in the body.
+        available: usize,
+    },
+
     /// The file format info declared a size that does not describe whole blocks.
     #[error("file format info declares an invalid size of {size} bytes")]
     FileFormatInfoInvalidSize {

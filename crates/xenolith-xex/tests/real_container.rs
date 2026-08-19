@@ -7,7 +7,9 @@
 
 use std::path::PathBuf;
 
-use xenolith_xex::{CompressionType, Container, Format, OptionalHeaderValue};
+use xenolith_xex::{
+    CompressionType, Container, EncryptionType, Error, Format, OptionalHeaderValue,
+};
 
 /// Returns the path named by `XENOLITH_TEST_XEX`, or `None` when it is unset.
 fn test_xex_path() -> Option<PathBuf> {
@@ -204,5 +206,23 @@ fn basic_scheme_blocks_account_for_the_stored_image() {
     assert_eq!(
         stored, available,
         "basic blocks describe {stored:#x} stored bytes, file holds {available:#x}"
+    );
+}
+
+/// Decoding an encrypted title without key material must fail loudly rather
+/// than handing back a buffer of noise.
+#[test]
+fn decoding_an_encrypted_title_without_a_key_is_refused() {
+    let bytes = container_bytes!();
+    let container = Container::parse(&bytes).expect("real container should parse");
+
+    if container.encryption() != EncryptionType::Encrypted {
+        eprintln!("skipping: title is not encrypted");
+        return;
+    }
+
+    assert!(
+        matches!(container.image(None), Err(Error::KeyMaterialRequired)),
+        "an encrypted title decoded without key material"
     );
 }

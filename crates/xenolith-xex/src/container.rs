@@ -15,8 +15,10 @@ use alloc::borrow::Cow;
 use crate::crypto::{KeyMaterial, decrypt_image, unwrap_session_key};
 use crate::error::{Error, Result};
 use crate::headers::{
-    EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary, keys, parse_import_libraries,
+    CompressionType, EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary, keys,
+    parse_import_libraries,
 };
+use crate::image::{reconstruct_basic, reconstruct_uncompressed};
 use crate::reader::Reader;
 use crate::security::SecurityInfo;
 
@@ -252,6 +254,47 @@ impl<'a> Container<'a> {
                 Ok(Cow::Owned(decrypt_image(body, &session)?))
             }
             EncryptionType::Unknown(value) => Err(Error::UnsupportedEncryption { value }),
+        }
+    }
+
+    /// Returns how the image body is compressed.
+    ///
+    /// Containers carrying no file format info are treated as uncompressed.
+    #[must_use]
+    pub fn compression(&self) -> CompressionType {
+        self.file_format_info
+            .as_ref()
+            .map_or(CompressionType::None, FileFormatInfo::compression)
+    }
+
+    /// Decodes the container into its loaded image.
+    ///
+    /// Decrypts the body if the container is encrypted, then reconstructs the
+    /// image according to the declared compression scheme, zero filling out to
+    /// the declared image size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when key material is needed and absent, when the blocks
+    /// describe more than the image or the body holds, when the declared image
+    /// size is implausible, or when the compression scheme is one this crate
+    /// does not yet reconstruct.
+    pub fn image(&self, key: Option<&KeyMaterial>) -> Result<Vec<u8>> {
+        let body = self.decrypt_body(key)?;
+        let image_size = self.security_info.image_size();
+
+        match self.compression() {
+            CompressionType::None => reconstruct_uncompressed(&body, image_size),
+            CompressionType::Basic => {
+                let blocks = self
+                    .file_format_info
+                    .as_ref()
+                    .map_or(&[][..], FileFormatInfo::basic_blocks);
+                reconstruct_basic(&body, blocks, image_size)
+            }
+            scheme => Err(Error::UnsupportedCompression {
+                scheme: format!("{scheme:?}"),
+            }),
         }
     }
 
@@ -815,6 +858,100 @@ mod tests {
 
         assert_eq!(container.encryption(), EncryptionType::None);
         assert!(container.decrypt_body(None).is_ok());
+    }
+
+    #[test]
+    fn decodes_an_unencrypted_uncompressed_image() {
+        let body: Vec<u8> = (0..32u8).collect();
+        let bytes = ContainerBuilder::new()
+            .file_format(0, 0, &[])
+            .image_size(48)
+            .body(body.clone())
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+        let image = container.image(None).unwrap();
+
+        assert_eq!(image.len(), 48);
+        assert_eq!(&image[..32], body.as_slice());
+        assert_eq!(&image[32..], &[0u8; 16]);
+    }
+
+    /// Decryption and basic reconstruction run back to back, so a mistake in
+    /// either ordering only shows up when they are exercised together.
+    #[test]
+    fn decodes_an_encrypted_basic_image() {
+        let static_key = [0x11u8; 16];
+        let session = [0x42u8; 16];
+        let wrapped: [u8; 16] = crate::crypto::encrypt(&session, &static_key)
+            .try_into()
+            .unwrap();
+
+        let stored: Vec<u8> = (0..32u8).collect();
+        let mut blocks = Vec::new();
+        for (data, zero) in [(16u32, 8u32), (16, 0)] {
+            blocks.extend_from_slice(&data.to_be_bytes());
+            blocks.extend_from_slice(&zero.to_be_bytes());
+        }
+
+        let bytes = ContainerBuilder::new()
+            .file_format(1, 1, &blocks)
+            .session_key(wrapped)
+            .image_size(48)
+            .body(crate::crypto::encrypt(&stored, &session))
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+        let image = container
+            .image(Some(&KeyMaterial::new(static_key)))
+            .unwrap();
+
+        assert_eq!(image.len(), 48);
+        assert_eq!(&image[..16], &stored[..16]);
+        assert_eq!(&image[16..24], &[0u8; 8]);
+        assert_eq!(&image[24..40], &stored[16..]);
+        assert_eq!(&image[40..], &[0u8; 8]);
+    }
+
+    #[test]
+    fn reports_the_declared_compression_scheme() {
+        for (declared, expected) in [
+            (0u16, CompressionType::None),
+            (1, CompressionType::Basic),
+            (2, CompressionType::Normal),
+            (3, CompressionType::Delta),
+        ] {
+            let tail = if declared == 2 {
+                vec![0u8; 28]
+            } else {
+                Vec::new()
+            };
+            let bytes = ContainerBuilder::new()
+                .file_format(0, declared, &tail)
+                .build();
+
+            let container = Container::parse(&bytes).unwrap();
+
+            assert_eq!(container.compression(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_a_compression_scheme_that_is_not_reconstructed_yet() {
+        let bytes = ContainerBuilder::new()
+            .file_format(0, 3, &[])
+            .body(vec![0u8; 16])
+            .build();
+
+        let container = Container::parse(&bytes).unwrap();
+
+        assert!(
+            matches!(
+                container.image(None).unwrap_err(),
+                Error::UnsupportedCompression { .. }
+            ),
+            "delta should not reconstruct yet"
+        );
     }
 
     #[test]

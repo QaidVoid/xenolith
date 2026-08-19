@@ -16,6 +16,7 @@ mod container;
 mod crypto;
 mod error;
 mod headers;
+mod image;
 mod reader;
 mod security;
 
