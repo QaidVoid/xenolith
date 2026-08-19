@@ -188,11 +188,23 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             let value = i64::from(displacement) << 16;
             let _ = writeln!(out, "    ctx->r[{rt}] = (uint64_t)(int64_t)({value});");
         }
-        Opcode::Addi | Opcode::Addic => {
+        Opcode::Addi => {
             let _ = writeln!(
                 out,
                 "    ctx->r[{rt}] = ctx->r[{ra}] + (uint64_t)(int64_t)({displacement});"
             );
+        }
+        Opcode::Addic | Opcode::AddicRc => {
+            let _ = writeln!(out, "    {{ uint64_t left = ctx->r[{ra}];");
+            let _ = writeln!(
+                out,
+                "    uint64_t sum = left + (uint64_t)(int64_t)({displacement});"
+            );
+            let _ = writeln!(
+                out,
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (sum < left ? 0x20000000ull : 0ull);"
+            );
+            let _ = writeln!(out, "    ctx->r[{rt}] = sum; }}");
         }
         Opcode::Addis => {
             let value = i64::from(displacement) << 16;
@@ -210,8 +222,13 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         Opcode::Subfic => {
             let _ = writeln!(
                 out,
-                "    ctx->r[{rt}] = (uint64_t)(int64_t)({displacement}) - ctx->r[{ra}];"
+                "    {{ uint64_t from = (uint64_t)(int64_t)({displacement});"
             );
+            let _ = writeln!(
+                out,
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (from >= ctx->r[{ra}] ? 0x20000000ull : 0ull);"
+            );
+            let _ = writeln!(out, "    ctx->r[{rt}] = from - ctx->r[{ra}]; }}");
         }
         Opcode::Neg => {
             let _ = writeln!(
@@ -240,13 +257,13 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         Opcode::Divw => {
             let _ = writeln!(
                 out,
-                "    ctx->r[{rt}] = (uint64_t)(int64_t)(int32_t)((int32_t)ctx->r[{rb}] == 0 ? 0 : (int32_t)ctx->r[{ra}] / (int32_t)ctx->r[{rb}]);"
+                "    ctx->r[{rt}] = (uint64_t)(uint32_t)((int32_t)ctx->r[{rb}] == 0 ? 0 : (int32_t)ctx->r[{ra}] / (int32_t)ctx->r[{rb}]);"
             );
         }
         Opcode::Divwu => {
             let _ = writeln!(
                 out,
-                "    ctx->r[{rt}] = (uint32_t)ctx->r[{rb}] == 0 ? 0 : (uint32_t)ctx->r[{ra}] / (uint32_t)ctx->r[{rb}];"
+                "    ctx->r[{rt}] = (uint64_t)(uint32_t)((uint32_t)ctx->r[{rb}] == 0 ? 0 : (uint32_t)ctx->r[{ra}] / (uint32_t)ctx->r[{rb}]);"
             );
         }
 
@@ -326,6 +343,17 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
                 out,
                 "    ctx->r[{ra}] = (ctx->r[{rb}] & 0x3f) < 32 ? ((uint32_t)ctx->r[{rt}] >> (ctx->r[{rb}] & 0x3f)) : 0;"
             );
+        }
+        Opcode::Rlwnm => {
+            let mask = rotate_mask(instruction.mask_begin(), instruction.mask_end());
+            writeln!(out, "    {{ uint32_t value = (uint32_t)ctx->r[{rt}];").ok()?;
+            writeln!(out, "    uint32_t places = (uint32_t)ctx->r[{rb}] & 31u;").ok()?;
+            writeln!(
+                out,
+                "    uint32_t rotated = places == 0u ? value : ((value << places) | (value >> (32u - places)));"
+            )
+            .ok()?;
+            writeln!(out, "    ctx->r[{ra}] = rotated & {mask}u; }}").ok()?;
         }
         Opcode::Rlwinm | Opcode::Rlwimi => {
             let places = u32::from(instruction.shift_amount());
@@ -480,13 +508,6 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             }
         }
 
-        Opcode::AddicRc => {
-            writeln!(
-                out,
-                "    ctx->r[{rt}] = ctx->r[{ra}] + (uint64_t)(int64_t)({displacement});"
-            )
-            .ok()?;
-        }
         Opcode::Cntlzw => {
             writeln!(
                 out,
@@ -501,18 +522,30 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             )
             .ok()?;
         }
-        Opcode::Srawi => {
-            let places = u32::from(instruction.shift_amount());
+        // An arithmetic right shift records whether it dropped a one bit out of
+        // a negative value, which is what its carry means.
+        Opcode::Srawi | Opcode::Sraw => {
+            let places = if instruction.opcode() == Opcode::Srawi {
+                format!("{}u", instruction.shift_amount())
+            } else {
+                format!("((uint32_t)ctx->r[{rb}] & 0x3fu)")
+            };
+            writeln!(out, "    {{ uint32_t value = (uint32_t)ctx->r[{rt}];").ok()?;
+            writeln!(out, "    uint32_t places = {places};").ok()?;
+            writeln!(out, "    uint32_t taken = places < 32u ? places : 32u;").ok()?;
             writeln!(
                 out,
-                "    ctx->r[{ra}] = (uint64_t)(int64_t)((int32_t)ctx->r[{rt}] >> {places});"
+                "    uint32_t lost = taken == 0u ? 0u : (taken >= 32u ? value : (value & ((1u << taken) - 1u)));"
             )
             .ok()?;
-        }
-        Opcode::Sraw => {
             writeln!(
                 out,
-                "    ctx->r[{ra}] = (uint64_t)(int64_t)((int32_t)ctx->r[{rt}] >> ((ctx->r[{rb}] & 0x3f) < 32 ? (ctx->r[{rb}] & 0x3f) : 31));"
+                "    ctx->r[{ra}] = (uint64_t)(int64_t)((int32_t)value >> (taken >= 32u ? 31u : taken));"
+            )
+            .ok()?;
+            writeln!(
+                out,
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (((int32_t)value < 0 && lost != 0u) ? 0x20000000ull : 0ull); }}"
             )
             .ok()?;
         }
@@ -532,13 +565,26 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         }
         Opcode::Srad | Opcode::Sradi => {
             let places = if instruction.opcode() == Opcode::Sradi {
-                format!("{}", instruction.long_shift_amount())
+                format!("{}ull", instruction.long_shift_amount())
             } else {
-                format!("((ctx->r[{rb}] & 0x7f) < 64 ? (ctx->r[{rb}] & 0x7f) : 63)")
+                format!("(ctx->r[{rb}] & 0x7full)")
             };
+            writeln!(out, "    {{ uint64_t value = ctx->r[{rt}];").ok()?;
+            writeln!(out, "    uint64_t places = {places};").ok()?;
+            writeln!(out, "    uint64_t taken = places < 64ull ? places : 64ull;").ok()?;
             writeln!(
                 out,
-                "    ctx->r[{ra}] = (uint64_t)((int64_t)ctx->r[{rt}] >> {places});"
+                "    uint64_t lost = taken == 0ull ? 0ull : (taken >= 64ull ? value : (value & ((1ull << taken) - 1ull)));"
+            )
+            .ok()?;
+            writeln!(
+                out,
+                "    ctx->r[{ra}] = (uint64_t)((int64_t)value >> (taken >= 64ull ? 63ull : taken));"
+            )
+            .ok()?;
+            writeln!(
+                out,
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (((int64_t)value < 0 && lost != 0ull) ? 0x20000000ull : 0ull); }}"
             )
             .ok()?;
         }
@@ -734,7 +780,7 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         Opcode::Mulhw => {
             writeln!(
                 out,
-                "    ctx->r[{rt}] = (uint64_t)(int64_t)(int32_t)(((int64_t)(int32_t)ctx->r[{ra}] * (int64_t)(int32_t)ctx->r[{rb}]) >> 32);"
+                "    ctx->r[{rt}] = (uint64_t)(uint32_t)(((int64_t)(int32_t)ctx->r[{ra}] * (int64_t)(int32_t)ctx->r[{rb}]) >> 32);"
             )
             .ok()?;
         }
@@ -879,9 +925,9 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
     if records {
         let _ = writeln!(
             out,
-            "    ctx->cr[0].lt = (int64_t)(int32_t)ctx->r[{recorded}] < 0;\n    \
-             ctx->cr[0].gt = (int64_t)(int32_t)ctx->r[{recorded}] > 0;\n    \
-             ctx->cr[0].eq = (int32_t)ctx->r[{recorded}] == 0;\n    \
+            "    ctx->cr[0].lt = (int64_t)ctx->r[{recorded}] < 0;\n    \
+             ctx->cr[0].gt = (int64_t)ctx->r[{recorded}] > 0;\n    \
+             ctx->cr[0].eq = ctx->r[{recorded}] == 0;\n    \
              ctx->cr[0].so = (uint8_t)(ctx->xer >> 31) & 1;"
         );
     }
@@ -957,6 +1003,20 @@ fn store_width(opcode: Opcode) -> Option<(u32, bool, bool, bool)> {
         Opcode::Stfdux => (8, true, true, true),
         _ => return None,
     })
+}
+
+/// Returns the C for one instruction, if it can be written.
+///
+/// Exposed so that a test can run one instruction through exactly the code this
+/// crate emits, rather than through a second implementation written for the
+/// test which would only ever agree with itself.
+///
+/// # Errors
+///
+/// Returns `None` for an instruction this crate cannot express.
+#[must_use]
+pub fn code_for(instruction: Instruction, address: u32) -> Option<String> {
+    code_of(instruction, address)
 }
 
 /// Returns whether an instruction can be both described and written out.

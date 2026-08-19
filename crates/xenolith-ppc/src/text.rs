@@ -311,6 +311,10 @@ impl fmt::Display for Rendered {
             // operand at all, so printing three general registers names two
             // things that are not there.
             Form::X if mnemonic.starts_with('f') => write!(f, " f{rt}, f{rb}"),
+            // The shift count of an immediate arithmetic shift sits where the
+            // form otherwise names a register, so printing it as one says a
+            // register is read that is not.
+            Form::X if mnemonic == "srawi" => write!(f, " r{ra}, r{rt}, {rb}"),
             Form::X | Form::XO if takes_one_source(mnemonic) => {
                 write!(f, " r{rt}, r{ra}")
             }

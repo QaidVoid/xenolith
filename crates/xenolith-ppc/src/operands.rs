@@ -122,6 +122,10 @@ fn tempfile() -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
 /// Sorted rather than in order, because this crate prints operands in encoding
 /// order and an assembler prints them in the order it accepts. What both agree
 /// on is which values the fields hold.
+///
+/// This cannot see a field printed as the wrong kind when the number happens to
+/// match, such as a shift count of four printed as register four. Only reading
+/// the text catches that.
 pub(crate) fn values(text: &str) -> Vec<u64> {
     let body = text
         .split_once(char::is_whitespace)
