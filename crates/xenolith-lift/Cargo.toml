@@ -10,9 +10,11 @@ repository.workspace = true
 [dependencies]
 xenolith-analysis = { version = "0.1.0", path = "../xenolith-analysis" }
 xenolith-ppc = { version = "0.1.0", path = "../xenolith-ppc" }
+xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+xenolith-analysis = { path = "../xenolith-analysis" }
 xenolith-xex = { path = "../xenolith-xex" }

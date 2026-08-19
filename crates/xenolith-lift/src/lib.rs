@@ -14,5 +14,10 @@
 //! The crate contains no `unsafe` code.
 
 mod effect;
+mod emit;
+
+/// The interface emitted code is written against, shipped alongside it.
+pub const RUNTIME_HEADER: &str = include_str!("../runtime/xenolith.h");
 
 pub use effect::{Effect, Location, effect_of, is_modelled, unmodelled};
+pub use emit::{Lifted, Unlifted, declaration_of, is_liftable, lift, name_of};
