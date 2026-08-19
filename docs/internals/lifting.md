@@ -62,19 +62,47 @@ and an emitter that could not express that would have to guess which was meant.
 Memory is reached through accessors that assemble bytes explicitly, so the
 emitted code holds the guest's byte order rather than the host's.
 
-Three entry points are declared for the environment to provide:
+These entry points are declared for the environment to provide:
 
 ```c
 void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address);
 void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address);
 void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
                      uint32_t ordinal);
+uint32_t xenolith_reserve32(const uint8_t *base, uint32_t address);
+uint8_t xenolith_conditional32(uint8_t *base, uint32_t address, uint32_t value);
+uint64_t xenolith_timebase(void);
 ```
 
 A trap leaves the function it was in, so what happens next is not something
 emitted code can express. A dispatch is the single place an address unknown at
 lift time becomes a function. An import is a call into what the console
-provided. None of them exist.
+provided. A reservation goes through the runtime rather than becoming a plain
+load and store, so that a program which one day has threads has somewhere to put
+real atomicity. The time base is a counter, and what it counts at is the
+environment's decision. None of them exist.
+
+## What is approximated, and why
+
+The rule is that an instruction with no semantics is admitted rather than
+approximated. It is kept for anything that computes a value, where a wrong
+answer is invisible. It is set aside in exactly two places, both written into
+the interface beside the declaration rather than left to be found.
+
+**The machine state register is storage.** Emitted code has no interrupts to
+mask, so writing it changes nothing and reading it returns what was last
+written. Every use of it in either title is the save and restore pair around a
+reservation, where the round trip is consistent and the masking is what is being
+skipped. Refusing it would have cost 273 functions over an effect that cannot
+exist in the emitted program.
+
+**The floating point status register is storage on the same terms.** A rounding
+mode written into it does not change how a later operation rounds, because the
+emitted arithmetic is the host's, in the host's default mode, which is the mode
+this processor starts in. An exception enable written into it arms nothing.
+
+A program that depends on either effect will compile and be wrong, and nothing
+downstream can tell. That is the cost, and it is why this section exists.
 
 ## How this is checked
 
@@ -84,8 +112,8 @@ found nine model bugs.
 
 **Against hardware.** The same encoding is executed on emulated PowerPC with
 seeded registers and scratch memory, and run through the C emitted for it, and
-the architectural state afterwards is compared. That found six more, described
-on [the verification page](/verification).
+the architectural state afterwards is compared. That found seven more, described
+on [the verification page](/verification), the last of them by not finishing.
 
 **That it compiles.** Every function of both titles is emitted and compiled with
 `-Wall -Wextra`, with no warnings. Compiling only a sample used to be enough

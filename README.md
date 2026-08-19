@@ -20,16 +20,25 @@ Measured against two retail titles:
 |---|---|---|
 | functions discovered | 27,447 | 11,903 |
 | executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 26,908 (98.0%) | 11,195 (94.1%) |
+| functions lifted to C | 27,195 (99.1%) | 11,282 (94.8%) |
 | of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
+
+Every instruction still blocking a function on either title is a vector one. The
+scalar instruction set is modelled as far as these two titles exercise it.
 
 What that leaves out is the part that matters for running anything. The emitted C
 is written against a runtime interface this project declares and does not
 implement: no guest memory is mapped, no import does anything, no threads exist.
-Around 1,460 addresses are declared without a definition, mostly functions that
+Around 1,090 addresses are declared without a definition, mostly functions that
 could not be lifted plus the register save and restore helpers. So it compiles
 and it does not link, which is an honest description of how far this has got.
+
+Two registers are modelled as storage whose architectural effects are not
+honored: masking interrupts does nothing, and a rounding mode written to the
+floating point status register does not change how a later operation rounds.
+Both are stated in the runtime interface beside their declaration rather than
+left to be discovered.
 
 The output is a directory of translation units and a makefile that builds them.
 The larger title emits 88 units and takes two and a half minutes to compile with
@@ -94,7 +103,10 @@ something produced independently:
 That last one is the strongest and the newest. On its first run it found six real
 mistakes, including one where recording a result compared the low half of a
 register rather than the whole of it, so every dot suffixed instruction set the
-wrong condition whenever a result's halves disagreed in sign.
+wrong condition whenever a result's halves disagreed in sign. It later found a
+seventh by not finishing: a conditional store's low encoding bit was read as a
+record bit, so a comparison overwrote the field the store had set, and the retry
+after it looped forever.
 
 Fuzz targets cover the loader, the decoder, the analysis, and the lifter.
 
@@ -156,10 +168,16 @@ Stated plainly, because a coverage figure implies more than it means:
   against an emitted corpus and by reading, and nothing more.
 - **Compressed containers using LZX are not supported**, nor are title update
   patches. Both are implemented up to the point where a sample was needed.
-- **Between 2 and 6 percent of functions do not lift**, blocked by instructions
-  the model does not yet describe, most of them vector ones. The `lift`
-  subcommand ranks them by how many functions each blocks, which is the list to
-  work from.
+- **Between 1 and 5 percent of functions do not lift**, blocked by vector
+  instructions the model does not yet describe. Every remaining blocker on
+  either title is one. The `lift` subcommand ranks them by how many functions
+  each blocks, which is the list to work from.
+- **Two registers round trip without doing anything.** A program that depends on
+  interrupts actually being masked, or on a rounding mode actually changing,
+  compiles and is wrong.
+- **`dcbz` has no oracle.** Its block size is the console's, which a general
+  purpose emulator does not share, so it is stated from the documentation rather
+  than checked against hardware.
 
 ## Licence
 

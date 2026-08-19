@@ -39,6 +39,18 @@ halves disagreed in sign. Nothing else built could have seen it: the corpus says
 which registers are touched, objdump says which fields exist, and neither can
 say that a comparison used the wrong width.
 
+**It later found a seventh by hanging.** A conditional store's low encoding bit
+is part of its spelling rather than a record bit, and the emitter read it as one.
+The generic path appended a comparison of the stored value against zero, which
+overwrote the condition field the store had just set from its own outcome. The
+retry branch after it then read a bit that always said the store had failed, and
+the emitted code looped forever.
+
+Reading that code would have shown two writes to the same field and looked like
+harmless duplication. The corpus would have agreed with it, since the touched set
+was right either way. Only running it showed the loop, and it showed it by not
+finishing, which is a symptom worth taking as seriously as a disagreement.
+
 ## The execution differential
 
 This is the strongest oracle and the newest, so it is worth describing.
@@ -92,6 +104,12 @@ them in would imply more than it means.
 harness would report the model wrong when it is right. That is a real limit and
 the reason a disagreement is read before it is believed. Two of the first three
 disagreements found were the harness and the test data rather than the model.
+
+Some instructions are excluded for that reason. `mfmsr` and `mtmsrd` are
+privileged and a user mode emulator will not run them. `mftb` returns a clock,
+so there is nothing to compare. `dcbz` operates on a block size that is
+implementation defined, and the emulator's is not this console's, so its size is
+taken from the documentation and checked against nothing.
 
 **Coverage is a third of the instruction set, deeply.** The differential
 executes a few hundred encodings on several inputs each. The corpus covers a

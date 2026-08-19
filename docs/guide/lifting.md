@@ -37,7 +37,7 @@ make -C ./lifted -j
 ```
 
 The larger of the two test titles builds in about two and a half minutes wall
-clock on a machine with enough cores, from 88 units, at `-O2` with `-Wall
+clock on a machine with enough cores, from 90 units, at `-O2` with `-Wall
 -Wextra`, with no warnings.
 
 The makefile stops at `liblifted.a` rather than attempting a link. Nothing
@@ -83,12 +83,12 @@ the emitter is.
 
 ```
 functions               27447
-  lifted                26908  (98.036 percent)
+  lifted                27195  (99.081 percent)
     import thunks         156
-  not lifted              539
-declarations            27569
-units                      88
-  largest             6015615 bytes
+  not lifted              252
+declarations            27570
+units                      90
+  largest             5205690 bytes
 ```
 
 **functions** is what discovery found. **lifted** is how many were emitted.
@@ -109,11 +109,11 @@ xenolith lift default.xex --out ./lifted --blockers
 
 ```
 instructions blocking the most functions
-  mfmsr               233
   lvsl                 56
   vspltisw             49
   lvlx                 40
-  dcbz                 24
+  vspltish             21
+  vspltisb             18
 ```
 
 This is the instruction that stopped the most functions, not the instruction
@@ -126,9 +126,10 @@ mnemonic that stopped it, which is where to look once you want to know why.
 ## What it cannot do yet
 
 The emitted program calls a runtime that does not exist. `xenolith.h` declares
-the processor context, big endian memory accessors, and three entry points the
+the processor context, big endian memory accessors, and the entry points the
 environment has to provide: a trap, an indirect dispatch for a branch whose
-target was not known at lift time, and an import call.
+target was not known at lift time, an import call, a reserved load and a
+conditional store, and the time base.
 
 Implementing those is the work that turns this into something that runs, and it
 has not been started.
