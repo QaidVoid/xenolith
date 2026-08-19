@@ -326,15 +326,28 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
     Ok(states)
 }
 
+/// The runtime entry points the model side has to provide before it will link.
+///
+/// Nothing implements the interface, so the harness implements the least that
+/// lets the emitted code run: a reservation that always succeeds, since there is
+/// one thread and nothing to lose it to, and a time base that stands still,
+/// since nothing here reads one.
+const RUNTIME_STUBS: &str = "\
+    void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
+    void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
+    void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o) { (void)c; (void)b; (void)l; (void)o; }\n\
+    uint32_t xenolith_reserve32(const uint8_t *b, uint32_t a) { return xenolith_load32(b, a); }\n\
+    uint64_t xenolith_reserve64(const uint8_t *b, uint32_t a) { return xenolith_load64(b, a); }\n\
+    uint8_t xenolith_conditional32(uint8_t *b, uint32_t a, uint32_t v) { xenolith_store32(b, a, v); return 1; }\n\
+    uint8_t xenolith_conditional64(uint8_t *b, uint32_t a, uint64_t v) { xenolith_store64(b, a, v); return 1; }\n\
+    uint64_t xenolith_timebase(void) { return 0; }\n\n";
+
 /// Writes the host C that runs each encoding through this project's model.
 fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
     let pattern: Vec<String> = memory_seed().iter().map(u8::to_string).collect();
     let mut out =
         String::from("#include \"xenolith.h\"\n#include <stdio.h>\n#include <string.h>\n\n");
-    out.push_str(
-        "void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
-         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\n",
-    );
+    out.push_str(RUNTIME_STUBS);
     // The condition register is packed the way the architecture packs it, so the
     // two sides can be compared as one number.
     out.push_str(
@@ -607,6 +620,16 @@ fn subjects() -> Vec<(u32, &'static str)> {
         // The updating forms, which write the address register back.
         ((33 << 26) | (a << 21) | (d << 16) | 0x0008, "lwzu"),
         ((37 << 26) | (a << 21) | (d << 16) | 0x0010, "stwu"),
+        // The byte reversed forms, whose whole point is the order. Over a
+        // patterned buffer a missed swap brings back a visibly wrong value.
+        (extended(a, d, 0, 534, 0), "lwbrx"),
+        (extended(a, d, 0, 790, 0), "lhbrx"),
+        (extended(a, d, 0, 662, 0), "stwbrx"),
+        (extended(a, d, 0, 918, 0), "sthbrx"),
+        // The high half of a doubleword product, which the interface computes
+        // itself for want of a wider type to hold it in.
+        (extended(a, b, c, 73, 0), "mulhd"),
+        (extended(a, b, c, 9, 0), "mulhdu"),
     ]
 }
 
@@ -829,11 +852,11 @@ fn sequences_on_the_model(
     };
 
     let pattern: Vec<String> = memory_seed().iter().map(u8::to_string).collect();
-    let mut out = String::from(
-        "#include \"xenolith.h\"\n#include <stdio.h>\n#include <string.h>\n\n\
-         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
-         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\n\
-         static uint32_t packed(const xenolith_context *ctx) {\n\
+    let mut out =
+        String::from("#include \"xenolith.h\"\n#include <stdio.h>\n#include <string.h>\n\n");
+    out.push_str(RUNTIME_STUBS);
+    out.push_str(
+        "static uint32_t packed(const xenolith_context *ctx) {\n\
          \x20   uint32_t out = 0;\n\
          \x20   for (int i = 0; i < 8; i++) {\n\
          \x20       uint32_t f = (uint32_t)(ctx->cr[i].lt << 3 | ctx->cr[i].gt << 2 |\n\
@@ -1010,6 +1033,38 @@ fn sequences() -> Vec<(&'static str, Vec<u32>)> {
                 compare(7, 7),
                 branch(12, 29, 8),
                 (32 << 26) | (3 << 21) | (6 << 16),
+                ret,
+            ],
+        ),
+        // A reservation says nothing on its own: a conditional store with no
+        // reserved load before it fails on hardware and would report the model
+        // wrong for modelling a reservation it was never given.
+        (
+            "a count incremented under a reservation",
+            vec![
+                // lwarx r3, 0, r6; addi r3, r3, 1; stwcx. r3, 0, r6
+                (31 << 26) | (3 << 21) | (6 << 11) | (20 << 1),
+                (14 << 26) | (3 << 21) | (3 << 16) | 1,
+                (31 << 26) | (3 << 21) | (6 << 11) | (150 << 1) | 1,
+                // branch back while the store did not happen
+                (16 << 26) | (4 << 21) | (2 << 16) | (0xfff4 & 0xfffc),
+                // lwz r5, 0(r6), so the stored value is read back
+                (32 << 26) | (5 << 21) | (6 << 16),
+                ret,
+            ],
+        ),
+        // The condition register is cleared before every run, so a logical
+        // between its bits only says something once a compare has filled it.
+        (
+            "condition bits combined and read back",
+            vec![
+                compare(0, 3),
+                compare(1, 7),
+                // cror 8, 2, 6 then crand 9, 2, 6
+                (19 << 26) | (8 << 21) | (2 << 16) | (6 << 11) | (449 << 1),
+                (19 << 26) | (9 << 21) | (2 << 16) | (6 << 11) | (257 << 1),
+                // mfcr r3, so the whole register lands in a watched place
+                (31 << 26) | (3 << 21) | (19 << 1),
                 ret,
             ],
         ),

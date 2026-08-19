@@ -215,11 +215,18 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
 
     // The record bit compares the result against zero afterwards, so the value
     // is computed first and the comparison appended.
-    let records = instruction
+    //
+    // A conditional store carries a set low bit as part of its spelling rather
+    // than as a record bit, and it writes the condition field itself from
+    // whether the store happened. Letting the comparison run as well would
+    // overwrite that with a test of the value stored, which is how this was
+    // found: the retry after one never stopped retrying.
+    let records = (instruction
         .form()
         .is_some_and(xenolith_ppc::Form::has_record_bit)
         && instruction.record_bit()
-        || matches!(instruction.opcode(), Opcode::Andi | Opcode::Andis);
+        || matches!(instruction.opcode(), Opcode::Andi | Opcode::Andis))
+        && !matches!(instruction.opcode(), Opcode::Stwcx | Opcode::Stdcx);
 
     let recorded = match instruction.opcode() {
         Opcode::And

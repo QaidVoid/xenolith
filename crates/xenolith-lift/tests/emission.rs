@@ -460,6 +460,13 @@ fn a_reservation_retry_lifts() {
         emitted.contains("if (!ctx->cr[0].eq)"),
         "the retry did not read the bit the store set: {emitted}"
     );
+    // The low bit of a conditional store is part of its spelling rather than a
+    // record bit. Treating it as one appended a comparison that overwrote the
+    // outcome of the store, and the retry then never stopped retrying.
+    assert!(
+        !emitted.contains("ctx->cr[0].eq = ctx->r[10] == 0;"),
+        "the store's outcome was overwritten by a comparison: {emitted}"
+    );
     assert_eq!(compiles("reservation", &emitted), Ok(()));
 }
 
