@@ -55,6 +55,152 @@ fn is_memory_access(mnemonic: &str) -> bool {
     MEMORY_ACCESS.contains(&mnemonic)
 }
 
+/// Returns whether a mnemonic reads one source register rather than two.
+///
+/// These spend the field the rest of their form uses for a second source on
+/// nothing, so printing it names a register the instruction never reads.
+fn takes_one_source(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "extsb"
+            | "extsh"
+            | "extsw"
+            | "cntlzw"
+            | "cntlzd"
+            | "popcntb"
+            | "neg"
+            | "nego"
+            | "addze"
+            | "addme"
+            | "subfze"
+            | "subfme"
+    )
+}
+
+/// Returns whether a mnemonic addresses a cache line rather than a register.
+///
+/// These name a place in memory with the two fields that form an address and
+/// leave the third unused, so printing it names a register nothing reads.
+fn addresses_a_cache_line(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "dcbf" | "dcbst" | "dcbt" | "dcbtst" | "dcbz" | "icbi" | "dcbi"
+    )
+}
+
+/// Writes the operands of a rotate.
+///
+/// These name their destination in the field every other form uses for a
+/// source, and the rest of their operands bound a mask rather than naming
+/// registers. The doubleword ones split a six bit field across the word.
+fn rotate_operands(f: &mut fmt::Formatter<'_>, instruction: Instruction) -> fmt::Result {
+    let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
+
+    match instruction.form() {
+        Some(Form::M) => {
+            let amount = if instruction.opcode() == Opcode::Rlwnm {
+                format!("r{rb}")
+            } else {
+                instruction.shift_amount().to_string()
+            };
+            write!(
+                f,
+                " r{ra}, r{rt}, {amount}, {}, {}",
+                instruction.mask_begin(),
+                instruction.mask_end()
+            )
+        }
+        Some(Form::MDS) => write!(f, " r{ra}, r{rt}, r{rb}, {}", instruction.long_mask_bound()),
+        Some(Form::MD) => write!(
+            f,
+            " r{ra}, r{rt}, {}, {}",
+            instruction.long_shift_amount(),
+            instruction.long_mask_bound()
+        ),
+        _ => write!(f, " r{ra}, r{rt}, {}", instruction.long_shift_amount()),
+    }
+}
+
+/// Writes the operands of a vector instruction that does not take three
+/// registers, returning nothing when it does.
+///
+/// Several of the vector operations spend the field the rest use for a second
+/// source on something that is not a register: a constant to splat, a lane to
+/// select, or nothing at all.
+fn vector_operands(
+    f: &mut fmt::Formatter<'_>,
+    mnemonic: &str,
+    instruction: Instruction,
+) -> Option<fmt::Result> {
+    let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
+
+    if vector_takes_one_source(mnemonic) {
+        return Some(write!(f, " v{rt}, v{rb}"));
+    }
+    // Splatting a constant carries it in that field, signed across five bits.
+    if matches!(mnemonic, "vspltisb" | "vspltish" | "vspltisw") {
+        let signed = if ra >= 16 {
+            i32::from(ra) - 32
+        } else {
+            i32::from(ra)
+        };
+        return Some(write!(f, " v{rt}, {signed}"));
+    }
+    // Splatting a lane names which lane in that same field, unsigned.
+    if matches!(mnemonic, "vspltb" | "vsplth" | "vspltw") {
+        return Some(write!(f, " v{rt}, v{rb}, {ra}"));
+    }
+
+    None
+}
+
+/// Returns whether a vector mnemonic reads one register rather than two.
+fn vector_takes_one_source(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "vrfim"
+            | "vrfin"
+            | "vrfip"
+            | "vrfiz"
+            | "vrefp"
+            | "vrsqrtefp"
+            | "vexptefp"
+            | "vlogefp"
+            | "vupkhsb"
+            | "vupklsb"
+            | "vupkhsh"
+            | "vupklsh"
+            | "vupkhpx"
+            | "vupklpx"
+    )
+}
+
+/// Returns whether a mnemonic compares and writes a condition field.
+fn is_compare(mnemonic: &str) -> bool {
+    matches!(mnemonic, "cmp" | "cmpl" | "cmpi" | "cmpli")
+}
+
+/// Returns whether a mnemonic takes an unsigned immediate.
+///
+/// The logical operations combine bits rather than counting, so their immediate
+/// is a pattern rather than a quantity and is never negative.
+fn is_logical_immediate(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "ori" | "oris" | "xori" | "xoris" | "andi." | "andis."
+    )
+}
+
+/// Returns the value a compare is measured against, written as the field holds
+/// it: unsigned for the unsigned compares and signed for the others.
+fn compare_operand(mnemonic: &str, instruction: Instruction) -> String {
+    if mnemonic == "cmpli" {
+        instruction.immediate().to_string()
+    } else {
+        instruction.displacement().to_string()
+    }
+}
+
 /// Writes the extended mnemonic for an instruction, if it has a well known one.
 ///
 /// Extended mnemonics are a spelling convention, not different instructions.
@@ -110,7 +256,19 @@ impl fmt::Display for Rendered {
         let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
 
         match form {
-            Form::I | Form::B => branch_operands(f, instruction, self.address),
+            Form::I => branch_operands(f, instruction, self.address),
+            // A conditional branch chooses its condition with two fields. Printing
+            // only the target loses which condition it was, so a branch taken when
+            // equal reads the same as one taken when not.
+            Form::B => {
+                write!(
+                    f,
+                    " {}, {}",
+                    instruction.branch_condition(),
+                    instruction.branch_condition_bit()
+                )?;
+                branch_operands(f, instruction, self.address)
+            }
             Form::SC => Ok(()),
             Form::XL => {
                 write!(
@@ -123,36 +281,64 @@ impl fmt::Display for Rendered {
             Form::D | Form::DS if is_memory_access(mnemonic) => {
                 write!(f, " r{rt}, {}(r{ra})", instruction.displacement())
             }
+            // A compare spends the field the others use for a target register
+            // on the condition field it writes and the width it compares at.
+            // Printing it as a register names something that is not one.
+            Form::D if is_compare(mnemonic) => write!(
+                f,
+                " cr{}, {}, r{ra}, {}",
+                rt >> 2,
+                rt & 1,
+                compare_operand(mnemonic, instruction)
+            ),
+            // The logical immediates take an unsigned field, so sign extending
+            // it reports a negative constant where the instruction has none.
+            Form::D if is_logical_immediate(mnemonic) => {
+                write!(f, " r{rt}, r{ra}, {}", instruction.immediate())
+            }
             Form::D | Form::DS => {
                 write!(f, " r{rt}, r{ra}, {}", instruction.displacement())
+            }
+            Form::X if is_compare(mnemonic) => {
+                write!(f, " cr{}, {}, r{ra}, r{rb}", rt >> 2, rt & 1)
+            }
+            // Comparing floats writes a condition field and reads two of the
+            // floating bank, none of which are general purpose registers.
+            Form::X if matches!(mnemonic, "fcmpu" | "fcmpo") => {
+                write!(f, " cr{}, f{ra}, f{rb}", rt >> 2)
+            }
+            // The floating conversions and moves take one source and no second
+            // operand at all, so printing three general registers names two
+            // things that are not there.
+            Form::X if mnemonic.starts_with('f') => write!(f, " f{rt}, f{rb}"),
+            Form::X | Form::XO if takes_one_source(mnemonic) => {
+                write!(f, " r{rt}, r{ra}")
+            }
+            Form::X if addresses_a_cache_line(mnemonic) => write!(f, " r{ra}, r{rb}"),
+            // Writing the machine state register takes one register and a bit
+            // saying how much of it to write, not three registers.
+            Form::X if matches!(mnemonic, "mtmsr" | "mtmsrd") => {
+                write!(f, " r{rt}, {}", ra & 1)
             }
             Form::X | Form::XO => write!(f, " r{rt}, r{ra}, r{rb}"),
             // The rotates name their destination where the other forms name a
             // source, and the rest of their operands are mask bounds rather
             // than registers. Only the two that take a variable rotate spend an
             // operand on a register at all.
-            Form::M => {
-                let amount = if instruction.opcode() == Opcode::Rlwnm {
-                    format!("r{rb}")
-                } else {
-                    instruction.shift_amount().to_string()
-                };
-                write!(
-                    f,
-                    " r{ra}, r{rt}, {amount}, {}, {}",
-                    instruction.mask_begin(),
-                    instruction.mask_end()
-                )
+            Form::M | Form::MDS | Form::MD | Form::XS => rotate_operands(f, instruction),
+            Form::A => {
+                let third = (instruction.word() >> 6) & 0x1f;
+                match mnemonic {
+                    "fmul" | "fmuls" => write!(f, " f{rt}, f{ra}, f{third}"),
+                    "fmadd" | "fmadds" | "fmsub" | "fmsubs" | "fnmadd" | "fnmadds" | "fnmsub"
+                    | "fnmsubs" | "fsel" => {
+                        write!(f, " f{rt}, f{ra}, f{third}, f{rb}")
+                    }
+                    "fsqrt" | "fsqrts" | "fres" | "frsqrte" => write!(f, " f{rt}, f{rb}"),
+                    _ => write!(f, " f{rt}, f{ra}, f{rb}"),
+                }
             }
-            Form::MDS => write!(f, " r{ra}, r{rt}, r{rb}, {}", instruction.long_mask_bound()),
-            Form::MD => write!(
-                f,
-                " r{ra}, r{rt}, {}, {}",
-                instruction.long_shift_amount(),
-                instruction.long_mask_bound()
-            ),
-            Form::XS => write!(f, " r{ra}, r{rt}, {}", instruction.long_shift_amount()),
-            Form::A => write!(f, " f{rt}, f{ra}, f{rb}"),
+            Form::VX if vector_operands(f, mnemonic, instruction).is_some() => Ok(()),
             Form::VX | Form::VC => write!(f, " v{rt}, v{ra}, v{rb}"),
             Form::VA => write!(
                 f,

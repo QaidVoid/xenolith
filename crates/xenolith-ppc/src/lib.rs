@@ -22,6 +22,8 @@ mod differential;
 mod flow;
 mod form;
 mod instruction;
+#[cfg(test)]
+mod operands;
 mod table;
 mod text;
 
