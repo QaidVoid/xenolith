@@ -97,6 +97,8 @@ enum Shape {
     CompareBoth,
     /// Reads `ra` and an immediate and writes a condition field.
     CompareImmediate,
+    /// Touches places its fields name rather than places its form implies.
+    Named,
 }
 
 /// Returns how an operation's fields map onto what it touches.
@@ -118,11 +120,18 @@ fn shape_of(opcode: Opcode) -> Option<Shape> {
         | Opcode::Divw
         | Opcode::Divwu
         | Opcode::Divd
-        | Opcode::Divdu => Shape::TargetFromBoth,
+        | Opcode::Divdu
+        | Opcode::Mulhd
+        | Opcode::Mulhdu => Shape::TargetFromBoth,
 
-        Opcode::Addi | Opcode::Addis | Opcode::Addic | Opcode::Mulli | Opcode::Subfic => {
-            Shape::TargetFromFirst
-        }
+        // Negating has one source, so it belongs with the immediate arithmetic
+        // rather than with the operations that read a second register.
+        Opcode::Addi
+        | Opcode::Addis
+        | Opcode::Addic
+        | Opcode::Mulli
+        | Opcode::Subfic
+        | Opcode::Neg => Shape::TargetFromFirst,
 
         Opcode::And
         | Opcode::Andc
@@ -138,7 +147,9 @@ fn shape_of(opcode: Opcode) -> Option<Shape> {
         | Opcode::Sld
         | Opcode::Srd
         | Opcode::Srad
-        | Opcode::Rlwnm => Shape::FirstFromTargetAndSecond,
+        | Opcode::Rlwnm
+        | Opcode::Rldcl
+        | Opcode::Rldcr => Shape::FirstFromTargetAndSecond,
 
         Opcode::Rlwinm
         | Opcode::Rlwimi
@@ -153,13 +164,153 @@ fn shape_of(opcode: Opcode) -> Option<Shape> {
         | Opcode::Ori
         | Opcode::Oris
         | Opcode::Xori
-        | Opcode::Xoris => Shape::FirstFromTarget,
+        | Opcode::Xoris
+        | Opcode::Rldicl
+        | Opcode::Rldicr
+        | Opcode::Rldic
+        | Opcode::Rldimi
+        | Opcode::Sradi => Shape::FirstFromTarget,
 
         Opcode::Cmp | Opcode::Cmpl => Shape::CompareBoth,
         Opcode::Cmpi | Opcode::Cmpli => Shape::CompareImmediate,
 
+        // These name what they touch in a way no shape describes, so each is
+        // handled where the shapes are applied rather than being given one.
+        Opcode::Mtspr
+        | Opcode::Mfspr
+        | Opcode::Mftb
+        | Opcode::Mfcr
+        | Opcode::Mtcrf
+        | Opcode::Mcrf
+        | Opcode::Crand
+        | Opcode::Crandc
+        | Opcode::Cror
+        | Opcode::Crorc
+        | Opcode::Crxor
+        | Opcode::Crnand
+        | Opcode::Crnor
+        | Opcode::Creqv
+        | Opcode::B
+        | Opcode::Bc
+        | Opcode::Bclr
+        | Opcode::Bcctr
+        | Opcode::Sync
+        | Opcode::Isync
+        | Opcode::Eieio
+        | Opcode::Tw
+        | Opcode::Twi
+        | Opcode::Td
+        | Opcode::Tdi => Shape::Named,
+
         _ => return None,
     })
+}
+
+/// Returns what an instruction that names its own places touches.
+///
+/// Some operations do not read a register named by a field at all. A branch
+/// reads a condition field chosen by its condition operand, a move to a special
+/// register writes whichever one its field selects, and a trap reads its
+/// operands to decide whether to leave the function entirely.
+fn named_effect(instruction: Instruction, effect: &mut Effect) {
+    let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
+
+    match instruction.opcode() {
+        Opcode::Mtspr => {
+            effect.read(Location::General(rt));
+            if let Some(register) = special(instruction.spr()) {
+                effect.write(register);
+            }
+        }
+        Opcode::Mfspr | Opcode::Mftb => {
+            if let Some(register) = special(instruction.spr()) {
+                effect.read(register);
+            }
+            effect.write(Location::General(rt));
+        }
+        // Reading the condition register reads every field of it.
+        Opcode::Mfcr => {
+            for field in 0..8 {
+                effect.read(Location::Condition(field));
+            }
+            effect.write(Location::General(rt));
+        }
+        // Writing it writes the fields the mask selects.
+        Opcode::Mtcrf => {
+            effect.read(Location::General(rt));
+            for field in 0..8 {
+                if instruction.word() & (1 << (19 - u32::from(field))) != 0 {
+                    effect.write(Location::Condition(field));
+                }
+            }
+        }
+        Opcode::Mcrf => {
+            effect.read(Location::Condition(ra >> 2));
+            effect.write(Location::Condition(rt >> 2));
+        }
+        // The condition register logicals name single bits, and a bit belongs
+        // to the field holding it.
+        Opcode::Crand
+        | Opcode::Crandc
+        | Opcode::Cror
+        | Opcode::Crorc
+        | Opcode::Crxor
+        | Opcode::Crnand
+        | Opcode::Crnor
+        | Opcode::Creqv => {
+            effect.read(Location::Condition(ra >> 2));
+            effect.read(Location::Condition(rb >> 2));
+            effect.write(Location::Condition(rt >> 2));
+        }
+        // A branch reads the field its condition names, unless it is taken
+        // whatever the condition says. One that decrements the count register
+        // reads and writes it. One that takes the link writes it.
+        Opcode::Bc | Opcode::Bclr | Opcode::Bcctr => {
+            let condition = instruction.branch_condition();
+            if condition & 0b1_0000 == 0 {
+                let bit = u8::try_from(instruction.branch_condition_bit()).unwrap_or(0);
+                effect.read(Location::Condition(bit >> 2));
+            }
+            if condition & 0b0_0100 == 0 {
+                effect.read(Location::Count);
+                effect.write(Location::Count);
+            }
+            if instruction.opcode() == Opcode::Bclr {
+                effect.read(Location::Link);
+            }
+            if instruction.opcode() == Opcode::Bcctr {
+                effect.read(Location::Count);
+            }
+            if instruction.link_bit() {
+                effect.write(Location::Link);
+            }
+        }
+        Opcode::B => {
+            if instruction.link_bit() {
+                effect.write(Location::Link);
+            }
+        }
+        Opcode::Tw | Opcode::Td => {
+            effect.read(Location::General(ra));
+            effect.read(Location::General(rb));
+        }
+        Opcode::Twi | Opcode::Tdi => effect.read(Location::General(ra)),
+        // Ordering touches no register this model describes.
+        _ => {}
+    }
+}
+
+/// Returns the register a special purpose register number names.
+///
+/// Only the three this model describes are named. Anything else is a register
+/// the model has nothing to say about, and saying nothing is the answer.
+fn special(number: u32) -> Option<Location> {
+    match number {
+        1 => Some(Location::Exception),
+        8 => Some(Location::Link),
+        9 => Some(Location::Count),
+        _ => None,
+    }
 }
 
 /// Returns the condition field a compare writes.
@@ -213,7 +364,7 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
             effect.write(Location::General(ra));
             // Inserting leaves the bits the mask excludes alone, so the
             // destination is a source as well.
-            if instruction.opcode() == Opcode::Rlwimi {
+            if matches!(instruction.opcode(), Opcode::Rlwimi | Opcode::Rldimi) {
                 effect.read(Location::General(ra));
             }
         }
@@ -230,6 +381,7 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
             effect.read(Location::Exception);
             effect.write(Location::Condition(compared_field(instruction)));
         }
+        Shape::Named => named_effect(instruction, &mut effect),
     }
 
     // Both bits are only meaningful where the form carries them. Every other
@@ -274,7 +426,10 @@ fn always_records(opcode: Opcode) -> bool {
 /// The arithmetic shifts do, because a right shift of a negative value has to
 /// say whether any one bits were shifted out.
 fn shifts_out_a_carry(opcode: Opcode) -> bool {
-    matches!(opcode, Opcode::Sraw | Opcode::Srawi | Opcode::Srad)
+    matches!(
+        opcode,
+        Opcode::Sraw | Opcode::Srawi | Opcode::Srad | Opcode::Sradi
+    )
 }
 
 /// Returns whether adding to register zero means adding to nothing.

@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use xenolith_lift::{Location, effect_of, is_modelled};
-use xenolith_ppc::Instruction;
+use xenolith_ppc::{Instruction, Opcode};
 use xenolith_xex::{Container, KeyMaterial};
 
 /// One instruction as the corpus recorded it.
@@ -102,6 +102,13 @@ fn places(statement: &str) -> Vec<(usize, Location)> {
 /// because it names its destination the same way a read would.
 fn assigns_first(statement: &str) -> bool {
     let trimmed = statement.trim_start();
+
+    // A counted branch is lowered as a decrement in place, which writes the
+    // register without an assignment anywhere for the test below to find.
+    if trimmed.contains("--ctx.") || trimmed.contains("++ctx.") {
+        return true;
+    }
+
     let Some(rest) = trimmed.strip_prefix("ctx.") else {
         return false;
     };
@@ -371,6 +378,46 @@ macro_rules! supplied_corpus {
     };
 }
 
+/// Returns whether the corpus can say anything useful about an instruction.
+///
+/// The corpus is one project's C, not a description of the instruction set, and
+/// some instructions are lowered into forms that name different things than the
+/// instruction touches. Comparing those would measure the lowering rather than
+/// the model.
+fn outside_the_oracle(instruction: Instruction, spelling: &str) -> bool {
+    // Control transfer becomes the host language's control flow, which does not
+    // name what the instruction consults. A return becomes a return and the
+    // link register never appears; a trap is left out entirely.
+    if matches!(
+        instruction.opcode(),
+        Opcode::B
+            | Opcode::Bc
+            | Opcode::Bclr
+            | Opcode::Bcctr
+            | Opcode::Sc
+            | Opcode::Tw
+            | Opcode::Twi
+            | Opcode::Td
+            | Opcode::Tdi
+    ) {
+        return true;
+    }
+
+    // Reading the condition register is lowered as an accumulation into the
+    // destination, so the corpus lists it as read. The instruction does not
+    // read it.
+    if instruction.opcode() == Opcode::Mfcr {
+        return true;
+    }
+
+    // The console spells a timing hint as a register combined with itself. That
+    // does write the register, with the value it already held, and is modelled
+    // as such. The corpus emits nothing for it instead. Both readings are
+    // defensible and the difference is recorded here rather than resolved by
+    // bending one of them.
+    spelling == "db16cyc"
+}
+
 /// Reports how much of the corpus the model covers, in instructions and in
 /// whole functions.
 ///
@@ -514,12 +561,7 @@ fn the_model_agrees_with_the_corpus_about_what_is_touched() {
             continue;
         }
 
-        // The console spells a timing hint as a register combined with itself.
-        // That does write the register, with the value it already held, and is
-        // modelled as such. The corpus emits nothing for it instead. Both
-        // readings are defensible and the difference is recorded here rather
-        // than resolved by bending one of them.
-        if record.mnemonic == "db16cyc" {
+        if outside_the_oracle(instruction, &record.mnemonic) {
             continue;
         }
 
