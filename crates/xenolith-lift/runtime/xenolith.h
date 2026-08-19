@@ -22,14 +22,22 @@
 #define XENOLITH_VECTOR_REGISTERS 128
 #define XENOLITH_CONDITION_FIELDS 8
 
-/* A vector register, addressable as the lanes the instructions use. */
-typedef union xenolith_vector {
+/* A vector register, held as the guest's bytes in the guest's order.
+ *
+ * A register is 128 bits the instruction set reads as bytes, halfwords, words,
+ * doublewords, or floats, and the guest reads every one of those big end first.
+ * A host of the other byte order cannot hold a layout that makes all of those
+ * views right at once: keeping the bytes means a word read directly comes back
+ * reversed, and keeping each lane in host order means the bytes come back in
+ * the wrong lane order.
+ *
+ * The bytes are kept, which is the same decision guest memory takes, and every
+ * lane is assembled by the accessors below. There is deliberately no second
+ * member to read a lane through, because reading one would be the mistake those
+ * accessors exist to prevent, and it would pass every test on one host.
+ */
+typedef struct xenolith_vector {
     uint8_t u8[16];
-    uint16_t u16[8];
-    uint32_t u32[4];
-    uint64_t u64[2];
-    float f32[4];
-    double f64[2];
 } xenolith_vector;
 
 /* A floating point register.
@@ -131,6 +139,68 @@ static inline void xenolith_store32(uint8_t *base, uint32_t address, uint32_t va
 static inline void xenolith_store64(uint8_t *base, uint32_t address, uint64_t value) {
     xenolith_store32(base, address, (uint32_t)(value >> 32));
     xenolith_store32(base, address + 4, (uint32_t)value);
+}
+
+/* Reaching one lane of a vector register.
+ *
+ * Lane zero is the one at the lowest guest address, which is how the
+ * instruction set numbers elements. Each lane is assembled from the bytes the
+ * same way a word is assembled from memory, so the byte order is stated here
+ * once instead of being inherited from whichever host this is built on.
+ */
+
+static inline uint8_t xenolith_vector_u8(const xenolith_vector *v, unsigned lane) {
+    return v->u8[lane];
+}
+
+static inline void xenolith_vector_set_u8(xenolith_vector *v, unsigned lane, uint8_t value) {
+    v->u8[lane] = value;
+}
+
+static inline uint16_t xenolith_vector_u16(const xenolith_vector *v, unsigned lane) {
+    return (uint16_t)(((uint16_t)v->u8[lane * 2] << 8) | v->u8[lane * 2 + 1]);
+}
+
+static inline void xenolith_vector_set_u16(xenolith_vector *v, unsigned lane, uint16_t value) {
+    v->u8[lane * 2] = (uint8_t)(value >> 8);
+    v->u8[lane * 2 + 1] = (uint8_t)value;
+}
+
+static inline uint32_t xenolith_vector_u32(const xenolith_vector *v, unsigned lane) {
+    return ((uint32_t)v->u8[lane * 4] << 24) | ((uint32_t)v->u8[lane * 4 + 1] << 16) |
+           ((uint32_t)v->u8[lane * 4 + 2] << 8) | v->u8[lane * 4 + 3];
+}
+
+static inline void xenolith_vector_set_u32(xenolith_vector *v, unsigned lane, uint32_t value) {
+    v->u8[lane * 4] = (uint8_t)(value >> 24);
+    v->u8[lane * 4 + 1] = (uint8_t)(value >> 16);
+    v->u8[lane * 4 + 2] = (uint8_t)(value >> 8);
+    v->u8[lane * 4 + 3] = (uint8_t)value;
+}
+
+static inline uint64_t xenolith_vector_u64(const xenolith_vector *v, unsigned lane) {
+    return ((uint64_t)xenolith_vector_u32(v, lane * 2) << 32) | xenolith_vector_u32(v, lane * 2 + 1);
+}
+
+static inline void xenolith_vector_set_u64(xenolith_vector *v, unsigned lane, uint64_t value) {
+    xenolith_vector_set_u32(v, lane * 2, (uint32_t)(value >> 32));
+    xenolith_vector_set_u32(v, lane * 2 + 1, (uint32_t)value);
+}
+
+/* A float lane moves through its bits rather than through a pointer aimed at
+ * them, because copying is what the language defines and the pointer is what a
+ * compiler is allowed to assume nothing does. */
+static inline float xenolith_vector_f32(const xenolith_vector *v, unsigned lane) {
+    uint32_t bits = xenolith_vector_u32(v, lane);
+    float value;
+    __builtin_memcpy(&value, &bits, 4);
+    return value;
+}
+
+static inline void xenolith_vector_set_f32(xenolith_vector *v, unsigned lane, float value) {
+    uint32_t bits;
+    __builtin_memcpy(&bits, &value, 4);
+    xenolith_vector_set_u32(v, lane, bits);
 }
 
 /* The high half of a doubleword product.

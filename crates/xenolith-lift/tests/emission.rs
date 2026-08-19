@@ -703,3 +703,46 @@ fn zeroing_a_block_stays_inside_it() {
         "the zeroed range was not the block containing the address"
     );
 }
+
+/// The whole change rests on this: a lane written through one width and read
+/// through another has to agree with what the guest's byte order says, and a
+/// mistake would be invisible on one host and wrong on the other.
+#[test]
+fn the_vector_views_agree_about_byte_order() {
+    let program = String::from(
+        "#include \"xenolith.h\"\n#include <stdio.h>\n\
+         int main(void) {\n\
+         \x20 xenolith_vector v;\n\
+         \x20 for (unsigned i = 0; i < 16; i++) { xenolith_vector_set_u8(&v, i, (uint8_t)(0x10 + i)); }\n\
+         \x20 printf(\"%04x %08x %016llx\\n\", xenolith_vector_u16(&v, 0),\n\
+         \x20        xenolith_vector_u32(&v, 0), (unsigned long long)xenolith_vector_u64(&v, 0));\n\
+         \x20 printf(\"%04x %08x %016llx\\n\", xenolith_vector_u16(&v, 7),\n\
+         \x20        xenolith_vector_u32(&v, 3), (unsigned long long)xenolith_vector_u64(&v, 1));\n\
+         \x20 xenolith_vector_set_u32(&v, 2, 0xdeadbeefu);\n\
+         \x20 printf(\"%02x%02x%02x%02x\\n\", xenolith_vector_u8(&v, 8), xenolith_vector_u8(&v, 9),\n\
+         \x20        xenolith_vector_u8(&v, 10), xenolith_vector_u8(&v, 11));\n\
+         \x20 xenolith_vector_set_f32(&v, 1, 1.5f);\n\
+         \x20 printf(\"%08x %g\\n\", xenolith_vector_u32(&v, 1), (double)xenolith_vector_f32(&v, 1));\n\
+         \x20 return 0;\n\
+         }\n",
+    );
+
+    let Some(output) = run_program("vector_lanes", &program) else {
+        return;
+    };
+
+    assert_eq!(
+        output.lines().collect::<Vec<_>>(),
+        [
+            // The first halfword, word, and doubleword are the leading bytes.
+            "1011 10111213 1011121314151617",
+            // The last of each is the trailing bytes.
+            "1e1f 1c1d1e1f 18191a1b1c1d1e1f",
+            // A word written lands most significant byte first.
+            "deadbeef",
+            // A float lane holds its bits, and reads back as the value.
+            "3fc00000 1.5",
+        ],
+        "a lane written through one width disagrees with another"
+    );
+}
