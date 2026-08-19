@@ -984,6 +984,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenolith-lift"
+version = "0.1.0"
+dependencies = [
+ "xenolith-analysis",
+ "xenolith-ppc",
+]
+
+[[package]]
 name = "xenolith-ppc"
 version = "0.1.0"
 dependencies = [

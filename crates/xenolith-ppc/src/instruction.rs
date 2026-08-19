@@ -209,6 +209,12 @@ impl Instruction {
     ///
     /// A set record bit means the instruction updates a condition register
     /// field as a side effect, which is what distinguishes `add.` from `add`.
+    ///
+    /// Only meaningful for forms that carry it, which is why the bit sits
+    /// outside the mask that identifies such an instruction. Every other form
+    /// spends that bit on something else, so a caller that does not check
+    /// [`Form::has_record_bit`] will read the low bit of an immediate and
+    /// conclude that loading a constant updates a condition field.
     #[must_use]
     pub const fn record_bit(self) -> bool {
         self.word & 1 != 0

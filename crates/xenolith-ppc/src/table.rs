@@ -674,6 +674,16 @@ impl Opcode {
     pub fn form(self) -> Option<Form> {
         self.entry().map(|entry| entry.form)
     }
+
+    /// Returns every operation the decoder recognizes, in declaration order.
+    ///
+    /// The unknown one is not among them, since it names the absence of an
+    /// operation rather than one. This is what lets a later stage say which
+    /// instructions it does not yet handle by comparing against the whole set
+    /// rather than against the ones it happened to meet.
+    pub fn all() -> impl Iterator<Item = Self> {
+        TABLE.iter().map(|entry| entry.opcode)
+    }
 }
 
 #[cfg(test)]

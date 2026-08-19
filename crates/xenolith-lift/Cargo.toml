@@ -1,0 +1,15 @@
+[package]
+name = "xenolith-lift"
+description = "Lifting decoded Xbox 360 functions to C"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+xenolith-analysis = { version = "0.1.0", path = "../xenolith-analysis" }
+xenolith-ppc = { version = "0.1.0", path = "../xenolith-ppc" }
+
+[lints]
+workspace = true

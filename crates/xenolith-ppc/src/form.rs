@@ -206,6 +206,16 @@ impl Form {
         )
     }
 
+    /// Returns whether this form carries an overflow enable bit.
+    ///
+    /// Only the extended arithmetic form does. Every other form spends that bit
+    /// on something else, so reading it without checking here reports overflow
+    /// on instructions that cannot overflow.
+    #[must_use]
+    pub const fn has_overflow_bit(self) -> bool {
+        matches!(self, Self::XO)
+    }
+
     /// Returns whether this form has a link bit at the bottom of the word.
     ///
     /// A link bit turns a branch into a call. Like a record bit it selects a
