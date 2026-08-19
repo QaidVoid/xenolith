@@ -234,6 +234,17 @@ const HINT_ALIASES: &[(&str, &[&str])] = &[
     ("dcbz", &["dcbzl"]),
     ("eieio", &["mbar"]),
     ("sc", &["scv"]),
+    (
+        "mffs",
+        &[
+            "mffscdrn",
+            "mffscdrni",
+            "mffsce",
+            "mffscrn",
+            "mffscrni",
+            "mffsl",
+        ],
+    ),
     ("sync", &["lwsync", "ptesync", "hwsync", "msync", "waitrsv"]),
 ];
 

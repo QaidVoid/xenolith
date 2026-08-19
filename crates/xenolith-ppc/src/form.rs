@@ -37,6 +37,9 @@ pub enum Form {
     /// A branch through a register, sharing the extended opcode layout of
     /// [`Form::X`] but ending in a link bit rather than a record bit.
     XL,
+    /// Four register fields and a five-bit extended opcode, used by the
+    /// floating point operations that take three source operands.
+    A,
     /// Three register fields, a 10-bit extended opcode, and the record bit.
     X,
     /// As [`Form::X`], but the extended opcode is nine bits and the bit above it
@@ -62,7 +65,7 @@ impl Form {
     pub const fn extended_opcode_shift(self) -> u32 {
         match self {
             Self::D | Self::M | Self::DS | Self::I | Self::B | Self::SC => 0,
-            Self::X | Self::XL | Self::XO | Self::MDS => 1,
+            Self::A | Self::X | Self::XL | Self::XO | Self::MDS => 1,
             Self::XS | Self::MD => 2,
         }
     }
@@ -74,6 +77,7 @@ impl Form {
         match self {
             Self::D | Self::M | Self::I | Self::B | Self::SC => 0,
             Self::DS => 0x3,
+            Self::A => 0x1f,
             Self::X | Self::XL => 0x3ff,
             Self::XO | Self::XS => 0x1ff,
             Self::MD => 0x7,
@@ -100,7 +104,7 @@ impl Form {
     pub const fn has_record_bit(self) -> bool {
         matches!(
             self,
-            Self::M | Self::X | Self::XO | Self::XS | Self::MD | Self::MDS
+            Self::M | Self::A | Self::X | Self::XO | Self::XS | Self::MD | Self::MDS
         )
     }
 
@@ -148,6 +152,7 @@ mod tests {
         Form::B,
         Form::SC,
         Form::XL,
+        Form::A,
         Form::X,
         Form::XO,
         Form::XS,
@@ -228,6 +233,7 @@ mod tests {
             (Form::X, Form::XO),
             (Form::X, Form::XS),
             (Form::MDS, Form::MD),
+            (Form::X, Form::A),
         ] {
             assert_eq!(
                 wider.mask() & narrower.mask(),
@@ -278,6 +284,7 @@ mod tests {
         assert_eq!(Form::B.mask(), 0xfc00_0000);
         assert_eq!(Form::SC.mask(), 0xfc00_0000);
         assert_eq!(Form::XL.mask(), 0xfc00_07fe);
+        assert_eq!(Form::A.mask(), 0xfc00_003e);
         assert_eq!(Form::X.mask(), 0xfc00_07fe);
         assert_eq!(Form::XO.mask(), 0xfc00_03fe);
         assert_eq!(Form::XS.mask(), 0xfc00_07fc);

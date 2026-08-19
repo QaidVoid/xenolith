@@ -131,6 +131,14 @@ instructions! {
             45 => Sthu = "sthu";
             46 => Lmw = "lmw";
             47 => Stmw = "stmw";
+            48 => Lfs = "lfs";
+            49 => Lfsu = "lfsu";
+            50 => Lfd = "lfd";
+            51 => Lfdu = "lfdu";
+            52 => Stfs = "stfs";
+            53 => Stfsu = "stfsu";
+            54 => Stfd = "stfd";
+            55 => Stfdu = "stfdu";
         }
         I {
             18 => B = "b";
@@ -164,6 +172,59 @@ instructions! {
             417 => Crorc = "crorc";
             449 => Cror = "cror";
             528 => Bcctr = "bcctr";
+        }
+    }
+
+    extended 59 {
+        A {
+            18 => Fdivs = "fdivs";
+            20 => Fsubs = "fsubs";
+            21 => Fadds = "fadds";
+            22 => Fsqrts = "fsqrts";
+            24 => Fres = "fres";
+            25 => Fmuls = "fmuls";
+            26 => Frsqrtes = "frsqrtes";
+            28 => Fmsubs = "fmsubs";
+            29 => Fmadds = "fmadds";
+            30 => Fnmsubs = "fnmsubs";
+            31 => Fnmadds = "fnmadds";
+        }
+    }
+
+    extended 63 {
+        X {
+            0 => Fcmpu = "fcmpu";
+            12 => Frsp = "frsp";
+            14 => Fctiw = "fctiw";
+            15 => Fctiwz = "fctiwz";
+            32 => Fcmpo = "fcmpo";
+            38 => Mtfsb1 = "mtfsb1";
+            40 => Fneg = "fneg";
+            64 => Mcrfs = "mcrfs";
+            70 => Mtfsb0 = "mtfsb0";
+            72 => Fmr = "fmr";
+            134 => Mtfsfi = "mtfsfi";
+            136 => Fnabs = "fnabs";
+            264 => Fabs = "fabs";
+            583 => Mffs = "mffs";
+            711 => Mtfsf = "mtfsf";
+            814 => Fctid = "fctid";
+            815 => Fctidz = "fctidz";
+            846 => Fcfid = "fcfid";
+        }
+        A {
+            18 => Fdiv = "fdiv";
+            20 => Fsub = "fsub";
+            21 => Fadd = "fadd";
+            22 => Fsqrt = "fsqrt";
+            23 => Fsel = "fsel";
+            24 => Fre = "fre";
+            25 => Fmul = "fmul";
+            26 => Frsqrte = "frsqrte";
+            28 => Fmsub = "fmsub";
+            29 => Fmadd = "fmadd";
+            30 => Fnmsub = "fnmsub";
+            31 => Fnmadd = "fnmadd";
         }
     }
 
@@ -251,6 +312,15 @@ instructions! {
             476 => Nand = "nand";
             512 => Mcrxr = "mcrxr";
             532 => Ldbrx = "ldbrx";
+            535 => Lfsx = "lfsx";
+            567 => Lfsux = "lfsux";
+            599 => Lfdx = "lfdx";
+            631 => Lfdux = "lfdux";
+            663 => Stfsx = "stfsx";
+            695 => Stfsux = "stfsux";
+            727 => Stfdx = "stfdx";
+            759 => Stfdux = "stfdux";
+            983 => Stfiwx = "stfiwx";
             533 => Lswx = "lswx";
             534 => Lwbrx = "lwbrx";
             536 => Srw = "srw";

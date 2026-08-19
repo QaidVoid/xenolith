@@ -242,13 +242,16 @@ mod tests {
         }
     }
 
+    /// Uses a primary opcode the architecture leaves unassigned, so the word
+    /// stays unrecognized however many instruction families are declared.
     #[test]
     fn an_unrecognized_word_keeps_its_bits() {
-        let instruction = Instruction::decode(0xffff_ffff);
+        let instruction = Instruction::decode(0x17ff_ffff);
 
+        assert_eq!(instruction.primary_opcode(), 5, "primary 5 is unassigned");
         assert!(instruction.is_unknown());
         assert_eq!(instruction.opcode(), Opcode::Unknown);
-        assert_eq!(instruction.word(), 0xffff_ffff);
+        assert_eq!(instruction.word(), 0x17ff_ffff);
         assert_eq!(instruction.form(), None);
         assert_eq!(instruction.extended_opcode(), None);
     }
