@@ -1,0 +1,15 @@
+[package]
+name = "xenolith"
+description = "Static recompiler turning Xbox 360 executables into native code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+miette = { version = "7.6.0", features = ["fancy"] }
+
+[lints]
+workspace = true
