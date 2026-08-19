@@ -62,10 +62,6 @@ fn report_discovery(program: &Program, words: u64) {
         .functions()
         .map(|f| f.edges().values().map(Vec::len).sum::<usize>())
         .sum();
-    let unresolved: usize = program
-        .functions()
-        .map(Function::unresolved_edge_count)
-        .sum();
     let tail_calls: usize = program.functions().map(|f| f.tail_calls.len()).sum();
 
     println!("functions          {:>10}", program.function_count());
@@ -87,7 +83,6 @@ fn report_discovery(program: &Program, words: u64) {
     );
     println!("blocks             {blocks:>10}");
     println!("edges              {edges:>10}");
-    println!("  unresolved       {unresolved:>10}");
     println!("tail calls         {tail_calls:>10}");
     println!(
         "\nexecutable words   {words:>10}\nclaimed            {claimed:>10}  ({} percent)",
@@ -117,16 +112,31 @@ fn report_helpers(image: &Image) {
 }
 
 /// Prints the jump table counts, and the tables themselves when asked.
-fn report_tables(tables: &JumpTables, list: bool) {
+///
+/// Resolved branches are counted apart from recovered tables. A table whose
+/// every target lies in another function is recovered and resolves nothing, so
+/// summing the two would report a graph better connected than it is.
+fn report_tables(program: &Program, tables: &JumpTables, list: bool) {
     let considered = tables.considered();
     let recovered = tables.recovered().len();
     let entries: usize = tables.recovered().iter().map(JumpTable::entries).sum();
 
+    let resolved: usize = program
+        .functions()
+        .map(|function| function.resolved.len())
+        .sum();
+    let unresolved: usize = program
+        .functions()
+        .map(Function::unresolved_edge_count)
+        .sum();
+
     println!("\nindirect branches  {considered:>10}");
     println!(
-        "  tables recovered {recovered:>10}  ({} percent)",
-        percent(recovered as u64, considered as u64)
+        "  resolved         {resolved:>10}  ({} percent)",
+        percent(resolved as u64, considered as u64)
     );
+    println!("  unresolved       {unresolved:>10}");
+    println!("tables recovered   {recovered:>10}");
     println!("  not recovered    {:>10}", tables.unrecovered().len());
     println!("table entries      {entries:>10}");
 
@@ -179,7 +189,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     for function in program.functions() {
         tables.absorb(recover(&image, function));
     }
-    report_tables(&tables, args.tables);
+    report_tables(&program, &tables, args.tables);
 
     if args.functions {
         println!("\nfunctions");

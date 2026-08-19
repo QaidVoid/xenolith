@@ -313,8 +313,16 @@ fn analyze_reports_a_jump_table_worked_out_by_hand() {
 
     assert!(ok, "analyzing a crafted image should succeed: {stderr}");
     assert!(
-        stdout.contains("tables recovered          1"),
+        stdout.contains("tables recovered            1"),
         "the table was not recovered: {stdout}"
+    );
+    assert!(
+        stdout.contains("resolved                  1"),
+        "the branch was not reported resolved: {stdout}"
+    );
+    assert!(
+        stdout.contains("unresolved                0"),
+        "the branch was reported unresolved: {stdout}"
     );
     assert!(
         stdout.contains("branch 0x82000030  index r10  table 0x82000048  default 0x82000038"),
