@@ -127,9 +127,31 @@ impl fmt::Display for Rendered {
                 write!(f, " r{rt}, r{ra}, {}", instruction.displacement())
             }
             Form::X | Form::XO => write!(f, " r{rt}, r{ra}, r{rb}"),
-            Form::XS | Form::M | Form::MD | Form::MDS => {
-                write!(f, " r{ra}, r{rt}, r{rb}")
+            // The rotates name their destination where the other forms name a
+            // source, and the rest of their operands are mask bounds rather
+            // than registers. Only the two that take a variable rotate spend an
+            // operand on a register at all.
+            Form::M => {
+                let amount = if instruction.opcode() == Opcode::Rlwnm {
+                    format!("r{rb}")
+                } else {
+                    instruction.shift_amount().to_string()
+                };
+                write!(
+                    f,
+                    " r{ra}, r{rt}, {amount}, {}, {}",
+                    instruction.mask_begin(),
+                    instruction.mask_end()
+                )
             }
+            Form::MDS => write!(f, " r{ra}, r{rt}, r{rb}, {}", instruction.long_mask_bound()),
+            Form::MD => write!(
+                f,
+                " r{ra}, r{rt}, {}, {}",
+                instruction.long_shift_amount(),
+                instruction.long_mask_bound()
+            ),
+            Form::XS => write!(f, " r{ra}, r{rt}, {}", instruction.long_shift_amount()),
             Form::A => write!(f, " f{rt}, f{ra}, f{rb}"),
             Form::VX | Form::VC => write!(f, " v{rt}, v{ra}, v{rb}"),
             Form::VA => write!(
@@ -180,6 +202,26 @@ fn suffixes(instruction: Instruction) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// The rotates take mask bounds rather than registers, and the doubleword
+    /// ones split a six bit field across the instruction. Every case here was
+    /// checked against an external disassembler, including one that needs both
+    /// split bits set to read correctly.
+    #[test]
+    fn the_rotates_render_their_bounds_rather_than_registers() {
+        let rendered = |word| Instruction::decode(word).render(0).to_string();
+
+        assert_eq!(rendered(0x5400_103a), "rlwinm r0, r0, 2, 0, 29");
+        assert_eq!(rendered(0x5c00_103a), "rlwnm r0, r0, r2, 0, 29");
+        assert_eq!(rendered(0x5000_0000), "rlwimi r0, r0, 0, 0, 0");
+        assert_eq!(rendered(0x7800_0708), "rldic r0, r0, 0, 28");
+        assert_eq!(rendered(0x7800_070c), "rldimi r0, r0, 0, 28");
+        assert_eq!(rendered(0x7c00_0674), "sradi r0, r0, 0");
+
+        // Both the shift and the mask bound need their sixth bit here, which is
+        // stored away from the rest of the field.
+        assert_eq!(rendered(0x7800_076a), "rldic r0, r0, 32, 61");
+    }
     use super::*;
 
     fn render(word: u32, address: u32) -> String {

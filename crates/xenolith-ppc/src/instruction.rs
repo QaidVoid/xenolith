@@ -150,6 +150,32 @@ impl Instruction {
         ((self.word >> 1) & 0x1f) as u8
     }
 
+    /// Returns how far a doubleword rotate rotates left.
+    ///
+    /// The field is six bits wide but there are only five bits left where the
+    /// word rotates keep theirs, so the sixth is stored on its own further down
+    /// the instruction. Reading only the lower five would halve every rotate
+    /// past thirty one.
+    #[must_use]
+    pub fn long_shift_amount(self) -> u8 {
+        let low = ((self.word >> 11) & 0x1f) as u8;
+        let high = ((self.word >> 1) & 1) as u8;
+        low | (high << 5)
+    }
+
+    /// Returns the six bit mask bound a doubleword rotate uses.
+    ///
+    /// Which end of the mask this is depends on the instruction: the left
+    /// shifting forms bound the start and the right shifting forms bound the
+    /// end. The field is stored with its two halves in the opposite order to
+    /// the one they read in.
+    #[must_use]
+    pub fn long_mask_bound(self) -> u8 {
+        let low = ((self.word >> 6) & 0x1f) as u8;
+        let high = ((self.word >> 5) & 1) as u8;
+        low | (high << 5)
+    }
+
     /// Returns the displacement field, sign extended.
     ///
     /// Displacements are signed in the architecture, so a load from a negative
