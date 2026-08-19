@@ -16,7 +16,9 @@
 //! The crate contains no `unsafe` code.
 
 mod block;
+mod helper;
 #[cfg(test)]
 mod testing;
 
 pub use block::{Block, Terminator, blocks_from};
+pub use helper::{Helper, HelperDirection, HelperKind, Helpers, detect};

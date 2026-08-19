@@ -78,6 +78,32 @@ pub(crate) mod encode {
         0x4e80_0420
     }
 
+    /// Stores a doubleword. The low two bits of the field are the opcode.
+    pub(crate) const fn std(rs: u32, ra: u32, displacement: u32) -> u32 {
+        (62 << 26) | (rs << 21) | (ra << 16) | (displacement & 0xfffc)
+    }
+
+    /// Loads a doubleword.
+    pub(crate) const fn ld(rt: u32, ra: u32, displacement: u32) -> u32 {
+        (58 << 26) | (rt << 21) | (ra << 16) | (displacement & 0xfffc)
+    }
+
+    /// Stores a double precision float.
+    pub(crate) const fn stfd(frs: u32, ra: u32, displacement: u32) -> u32 {
+        (54 << 26) | (frs << 21) | (ra << 16) | (displacement & 0xffff)
+    }
+
+    /// Stores a vector register, offset by a register.
+    pub(crate) const fn stvx(vrs: u32, ra: u32, rb: u32) -> u32 {
+        (31 << 26) | (vrs << 21) | (ra << 16) | (rb << 11) | (231 << 1)
+    }
+
+    /// Stores a vector register through the console's extension, which splits
+    /// the register number so it can reach past the standard range.
+    pub(crate) const fn stvx128(vd: u32, ra: u32, rb: u32) -> u32 {
+        0x1000_01c3 | ((vd & 0x1f) << 21) | (ra << 16) | (rb << 11) | (((vd >> 5) & 3) << 2)
+    }
+
     /// Returns the displacement that branches `bytes` backward.
     ///
     /// Displacements are signed, and writing the two's complement value out is
