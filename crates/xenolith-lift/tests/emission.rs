@@ -248,8 +248,8 @@ fn a_tail_call_returns_after_calling() {
 /// that is right except in one place compiles and runs and is wrong.
 #[test]
 fn one_unmodelled_instruction_stops_the_whole_function() {
-    // addi r3, r0, 1 then an instruction with no semantics, then blr
-    let outcome = lift_entry(&[0x3860_0001, 0x1000_0000, 0x4e80_0020]);
+    // addi r3, r0, 1 then vsl, which has no semantics here, then blr
+    let outcome = lift_entry(&[0x3860_0001, 0x1000_01c4, 0x4e80_0020]);
 
     let complaint = outcome.expect_err("it should not lift");
     assert!(
@@ -266,7 +266,7 @@ fn other_functions_still_lift() {
         0x4800_0009,
         0x4e80_0020,
         // a function holding something unmodelled
-        0x1000_0000,
+        0x1000_01c4,
         0x4e80_0020,
     ];
     let image = image_of(&words);
@@ -931,4 +931,59 @@ fn a_console_fused_multiply_reads_what_it_writes() {
         "the move idiom did not decode with equal sources: {emitted}"
     );
     assert_eq!(compiles("console_fused_multiply", &emitted), Ok(()));
+}
+
+/// A saturating form stops at the end of the range rather than wrapping, and a
+/// clamp at the wrong bound gives an answer that is almost right, which is the
+/// kind that survives a reading.
+#[test]
+fn the_saturating_bounds_are_where_the_range_ends() {
+    // vaddshs v1, v2, v3; vsubuhs v4, v2, v3; blr
+    let emitted = lift_entry(&[0x1022_1b40, 0x1082_1e40, 0x4e80_0020]).expect("both should lift");
+
+    let program = format!(
+        "#include \"xenolith.h\"\n#include <stdio.h>\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\n\
+         {emitted}\n\
+         int main(void) {{\n\
+         \x20 static uint8_t memory[16];\n\
+         \x20 xenolith_context ctx = {{0}};\n\
+         \x20 const uint16_t left[8]  = {{0x7fff, 0x8000, 0x7fff, 0x8000, 0x0001, 0xffff, 0x0000, 0x1234}};\n\
+         \x20 const uint16_t right[8] = {{0x0001, 0xffff, 0xffff, 0x0001, 0x0002, 0x0001, 0xffff, 0x1000}};\n\
+         \x20 for (unsigned lane = 0; lane < 8; lane++) {{\n\
+         \x20   xenolith_vector_set_u16(&ctx.v[2], lane, left[lane]);\n\
+         \x20   xenolith_vector_set_u16(&ctx.v[3], lane, right[lane]);\n\
+         \x20 }}\n\
+         \x20 sub_82000000(&ctx, memory);\n\
+         \x20 for (unsigned lane = 0; lane < 8; lane++) {{ printf(\"%04x\", xenolith_vector_u16(&ctx.v[1], lane)); }}\n\
+         \x20 printf(\"\\n\");\n\
+         \x20 for (unsigned lane = 0; lane < 8; lane++) {{ printf(\"%04x\", xenolith_vector_u16(&ctx.v[4], lane)); }}\n\
+         \x20 printf(\"\\n\");\n\
+         \x20 return 0;\n\
+         }}\n"
+    );
+
+    let Some(output) = run_program("vector_saturation", &program) else {
+        return;
+    };
+
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(
+        lines[0],
+        // Signed halfwords stop at the ends of the signed range and pass
+        // through anything that fits.
+        concat!(
+            "7fff", "8000", "7ffe", "8001", "0003", "0000", "ffff", "2234"
+        ),
+        "the signed saturating add did not stop at the signed bounds"
+    );
+    assert_eq!(
+        lines[1],
+        // Unsigned halfwords stop at zero rather than wrapping below it.
+        concat!(
+            "7ffe", "0000", "0000", "7fff", "0000", "fffe", "0000", "0234"
+        ),
+        "the unsigned saturating subtract did not stop at zero"
+    );
 }

@@ -407,6 +407,113 @@ fn vector_access_shape(opcode: Opcode) -> bool {
     )
 }
 
+/// Returns whether a vector operation writes one register from two of them.
+///
+/// This is much the largest family, since almost everything the instruction
+/// set does to a pair of vectors lands here whatever width the lanes are
+/// read at.
+fn reads_two_vectors(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Vand
+            | Opcode::Vand128
+            | Opcode::Vandc
+            | Opcode::Vor
+            | Opcode::Vor128
+            | Opcode::Vnor
+            | Opcode::Vxor
+            | Opcode::Vxor128
+            | Opcode::Vmrghb
+            | Opcode::Vmrghh
+            | Opcode::Vmrghw
+            | Opcode::Vmrghw128
+            | Opcode::Vmrglb
+            | Opcode::Vmrglh
+            | Opcode::Vmrglw
+            | Opcode::Vmrglw128
+            | Opcode::Vaddfp
+            | Opcode::Vaddfp128
+            | Opcode::Vsubfp
+            | Opcode::Vsubfp128
+            | Opcode::Vmulfp128
+            | Opcode::Vmaxfp
+            | Opcode::Vmaxfp128
+            | Opcode::Vminfp
+            | Opcode::Vminfp128
+            | Opcode::Vmsum3fp128
+            | Opcode::Vmsum4fp128
+            | Opcode::Vaddubm
+            | Opcode::Vadduhm
+            | Opcode::Vadduwm
+            | Opcode::Vsububm
+            | Opcode::Vsubuhm
+            | Opcode::Vsubuwm
+            | Opcode::Vaddubs
+            | Opcode::Vadduhs
+            | Opcode::Vadduws
+            | Opcode::Vaddsbs
+            | Opcode::Vaddshs
+            | Opcode::Vaddsws
+            | Opcode::Vsububs
+            | Opcode::Vsubuhs
+            | Opcode::Vsubuws
+            | Opcode::Vsubsbs
+            | Opcode::Vsubshs
+            | Opcode::Vsubsws
+            | Opcode::Vslb
+            | Opcode::Vslh
+            | Opcode::Vslw
+            | Opcode::Vslw128
+            | Opcode::Vsrb
+            | Opcode::Vsrh
+            | Opcode::Vsrw
+            | Opcode::Vsrw128
+            | Opcode::Vsrab
+            | Opcode::Vsrah
+            | Opcode::Vsraw
+            | Opcode::Vsraw128
+            | Opcode::Vrlb
+            | Opcode::Vrlh
+            | Opcode::Vrlw
+            | Opcode::Vmaxub
+            | Opcode::Vmaxuh
+            | Opcode::Vmaxuw
+            | Opcode::Vmaxsb
+            | Opcode::Vmaxsh
+            | Opcode::Vmaxsw
+            | Opcode::Vminub
+            | Opcode::Vminuh
+            | Opcode::Vminuw
+            | Opcode::Vminsb
+            | Opcode::Vminsh
+            | Opcode::Vminsw
+            | Opcode::Vavgub
+            | Opcode::Vavguh
+            | Opcode::Vavguw
+            | Opcode::Vavgsb
+            | Opcode::Vavgsh
+            | Opcode::Vavgsw
+            | Opcode::Vpkuhum
+            | Opcode::Vpkuhum128
+            | Opcode::Vpkuwum
+            | Opcode::Vpkuwum128
+            | Opcode::Vpkuhus
+            | Opcode::Vpkuhus128
+            | Opcode::Vpkuwus
+            | Opcode::Vpkuwus128
+            | Opcode::Vpkshss
+            | Opcode::Vpkshss128
+            | Opcode::Vpkshus
+            | Opcode::Vpkshus128
+            | Opcode::Vpkswss
+            | Opcode::Vpkswss128
+            | Opcode::Vpkswus
+            | Opcode::Vpkswus128
+            | Opcode::Vsldoi
+            | Opcode::Vsldoi128
+    )
+}
+
 /// Returns how a vector operation maps onto what it touches.
 ///
 /// Every one of these arrives twice, once as the standard extension and once as
@@ -415,36 +522,11 @@ fn vector_shape(opcode: Opcode) -> Option<Shape> {
     if vector_access_shape(opcode) {
         return Some(Shape::Named);
     }
+    if reads_two_vectors(opcode) {
+        return Some(Shape::VectorFromBoth);
+    }
 
     Some(match opcode {
-        Opcode::Vand
-        | Opcode::Vand128
-        | Opcode::Vandc
-        | Opcode::Vor
-        | Opcode::Vor128
-        | Opcode::Vnor
-        | Opcode::Vxor
-        | Opcode::Vxor128
-        | Opcode::Vmrghb
-        | Opcode::Vmrghh
-        | Opcode::Vmrghw
-        | Opcode::Vmrghw128
-        | Opcode::Vmrglb
-        | Opcode::Vmrglh
-        | Opcode::Vmrglw
-        | Opcode::Vmrglw128
-        | Opcode::Vaddfp
-        | Opcode::Vaddfp128
-        | Opcode::Vsubfp
-        | Opcode::Vsubfp128
-        | Opcode::Vmulfp128
-        | Opcode::Vmaxfp
-        | Opcode::Vmaxfp128
-        | Opcode::Vminfp
-        | Opcode::Vminfp128
-        | Opcode::Vmsum3fp128
-        | Opcode::Vmsum4fp128 => Shape::VectorFromBoth,
-
         Opcode::Vspltb
         | Opcode::Vsplth
         | Opcode::Vspltw
@@ -472,7 +554,13 @@ fn vector_shape(opcode: Opcode) -> Option<Shape> {
         | Opcode::Vexptefp
         | Opcode::Vexptefp128
         | Opcode::Vlogefp
-        | Opcode::Vlogefp128 => Shape::VectorFromOne,
+        | Opcode::Vlogefp128
+        | Opcode::Vupkhsb
+        | Opcode::Vupkhsb128
+        | Opcode::Vupklsb
+        | Opcode::Vupklsb128
+        | Opcode::Vupkhsh
+        | Opcode::Vupklsh => Shape::VectorFromOne,
 
         Opcode::Vsel
         | Opcode::Vsel128

@@ -262,7 +262,25 @@ fn lane_width(width: u32) -> (&'static str, u32) {
 }
 
 /// Returns the C for a vector instruction, if it can be written.
+///
+/// The families are tried in turn and each answers only for the opcodes it
+/// knows. They were once written to fall through to one another, which twice
+/// left a family unreachable when a new one was spliced into the middle: the
+/// instructions it covered went back to being refused and the coverage figure
+/// was the only thing that noticed.
 fn vector_code(instruction: Instruction) -> Option<String> {
+    vector_bitwise(instruction)
+        .or_else(|| vector_arrangement(instruction))
+        .or_else(|| vector_float(instruction))
+        .or_else(|| vector_convert(instruction))
+        .or_else(|| vector_compare(instruction))
+        .or_else(|| vector_integer(instruction))
+        .or_else(|| vector_pack(instruction))
+        .or_else(|| vector_access(instruction))
+}
+
+/// Returns the C for a vector instruction that combines lanes bit by bit.
+fn vector_bitwise(instruction: Instruction) -> Option<String> {
     let (d, a, b, c) = vector_operands(instruction);
     let mut out = String::new();
 
@@ -310,7 +328,7 @@ fn vector_code(instruction: Instruction) -> Option<String> {
             vector_lanes(&mut out, d, 4, "u32", &body);
         }
 
-        _ => return vector_arrangement(instruction),
+        _ => return None,
     }
 
     Some(out)
@@ -384,7 +402,7 @@ fn vector_arrangement(instruction: Instruction) -> Option<String> {
             vector_lanes(&mut out, d, count, name, &body);
         }
 
-        _ => return vector_float(instruction),
+        _ => return None,
     }
 
     Some(out)
@@ -492,9 +510,251 @@ fn vector_convert(instruction: Instruction) -> Option<String> {
             let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
         }
 
-        _ => return vector_compare(instruction),
+        _ => return None,
     }
 
+    Some(out)
+}
+
+/// How an integer lane operation combines its operands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Integer {
+    /// Wraps rather than stopping at the end of the range.
+    Add,
+    Subtract,
+    /// Stops at the end of the range rather than wrapping.
+    AddSaturating,
+    SubtractSaturating,
+    ShiftLeft,
+    ShiftRight,
+    Rotate,
+    Maximum,
+    Minimum,
+    /// Adds and halves, rounding away from zero.
+    Average,
+}
+
+/// Returns the lane width, whether the lanes are signed, and what an integer
+/// operation does to them.
+#[allow(clippy::too_many_lines)]
+fn integer_operation(opcode: Opcode) -> Option<(u32, bool, Integer)> {
+    use Integer::{
+        Add, AddSaturating, Average, Maximum, Minimum, Rotate, ShiftLeft, ShiftRight, Subtract,
+        SubtractSaturating,
+    };
+
+    Some(match opcode {
+        Opcode::Vaddubm => (1, false, Add),
+        Opcode::Vadduhm => (2, false, Add),
+        Opcode::Vadduwm => (4, false, Add),
+        Opcode::Vsububm => (1, false, Subtract),
+        Opcode::Vsubuhm => (2, false, Subtract),
+        Opcode::Vsubuwm => (4, false, Subtract),
+
+        Opcode::Vaddubs => (1, false, AddSaturating),
+        Opcode::Vadduhs => (2, false, AddSaturating),
+        Opcode::Vadduws => (4, false, AddSaturating),
+        Opcode::Vaddsbs => (1, true, AddSaturating),
+        Opcode::Vaddshs => (2, true, AddSaturating),
+        Opcode::Vaddsws => (4, true, AddSaturating),
+        Opcode::Vsububs => (1, false, SubtractSaturating),
+        Opcode::Vsubuhs => (2, false, SubtractSaturating),
+        Opcode::Vsubuws => (4, false, SubtractSaturating),
+        Opcode::Vsubsbs => (1, true, SubtractSaturating),
+        Opcode::Vsubshs => (2, true, SubtractSaturating),
+        Opcode::Vsubsws => (4, true, SubtractSaturating),
+
+        Opcode::Vslb => (1, false, ShiftLeft),
+        Opcode::Vslh => (2, false, ShiftLeft),
+        Opcode::Vslw | Opcode::Vslw128 => (4, false, ShiftLeft),
+        Opcode::Vsrb => (1, false, ShiftRight),
+        Opcode::Vsrh => (2, false, ShiftRight),
+        Opcode::Vsrw | Opcode::Vsrw128 => (4, false, ShiftRight),
+        Opcode::Vsrab => (1, true, ShiftRight),
+        Opcode::Vsrah => (2, true, ShiftRight),
+        Opcode::Vsraw | Opcode::Vsraw128 => (4, true, ShiftRight),
+        Opcode::Vrlb => (1, false, Rotate),
+        Opcode::Vrlh => (2, false, Rotate),
+        Opcode::Vrlw => (4, false, Rotate),
+
+        Opcode::Vmaxub => (1, false, Maximum),
+        Opcode::Vmaxuh => (2, false, Maximum),
+        Opcode::Vmaxuw => (4, false, Maximum),
+        Opcode::Vmaxsb => (1, true, Maximum),
+        Opcode::Vmaxsh => (2, true, Maximum),
+        Opcode::Vmaxsw => (4, true, Maximum),
+        Opcode::Vminub => (1, false, Minimum),
+        Opcode::Vminuh => (2, false, Minimum),
+        Opcode::Vminuw => (4, false, Minimum),
+        Opcode::Vminsb => (1, true, Minimum),
+        Opcode::Vminsh => (2, true, Minimum),
+        Opcode::Vminsw => (4, true, Minimum),
+
+        Opcode::Vavgub => (1, false, Average),
+        Opcode::Vavguh => (2, false, Average),
+        Opcode::Vavguw => (4, false, Average),
+        Opcode::Vavgsb => (1, true, Average),
+        Opcode::Vavgsh => (2, true, Average),
+        Opcode::Vavgsw => (4, true, Average),
+
+        _ => return None,
+    })
+}
+
+/// Returns the source width, whether the source is read as signed, and whether
+/// the narrower result is clamped and to which signedness.
+fn pack_operation(opcode: Opcode) -> Option<(u32, bool, Option<bool>)> {
+    Some(match opcode {
+        Opcode::Vpkuhum | Opcode::Vpkuhum128 => (2, false, None),
+        Opcode::Vpkuwum | Opcode::Vpkuwum128 => (4, false, None),
+        Opcode::Vpkuhus | Opcode::Vpkuhus128 => (2, false, Some(false)),
+        Opcode::Vpkuwus | Opcode::Vpkuwus128 => (4, false, Some(false)),
+        Opcode::Vpkshss | Opcode::Vpkshss128 => (2, true, Some(true)),
+        Opcode::Vpkshus | Opcode::Vpkshus128 => (2, true, Some(false)),
+        Opcode::Vpkswss | Opcode::Vpkswss128 => (4, true, Some(true)),
+        Opcode::Vpkswus | Opcode::Vpkswus128 => (4, true, Some(false)),
+        _ => return None,
+    })
+}
+
+/// Returns the source width and which half of it an unpack widens.
+fn unpack_operation(opcode: Opcode) -> Option<(u32, bool)> {
+    Some(match opcode {
+        Opcode::Vupkhsb | Opcode::Vupkhsb128 => (1, false),
+        Opcode::Vupklsb | Opcode::Vupklsb128 => (1, true),
+        Opcode::Vupkhsh => (2, false),
+        Opcode::Vupklsh => (2, true),
+        _ => return None,
+    })
+}
+
+/// Returns the C for a vector instruction that narrows, widens, or slides.
+fn vector_pack(instruction: Instruction) -> Option<String> {
+    let (d, a, b, _) = vector_operands(instruction);
+    let mut out = String::new();
+
+    if let Some((source, signed, saturate)) = pack_operation(instruction.opcode()) {
+        let (from, _) = lane_width(source);
+        let (into, count) = lane_width(source / 2);
+        let bits = source * 4;
+        let half = count / 2;
+        let read = |register: u32, lane: &str| {
+            let read = format!("xenolith_vector_{from}(&ctx->v[{register}], {lane})");
+            if signed {
+                format!("(int64_t)(int{}_t){read}", source * 8)
+            } else {
+                format!("(int64_t){read}")
+            }
+        };
+        // The first half of the result comes from the first operand and the
+        // second from the second, which is what packing two vectors into one
+        // means.
+        let value = format!(
+            "(lane < {half} ? {} : {})",
+            read(a, "lane"),
+            read(b, &format!("lane - {half}"))
+        );
+        let body = match saturate {
+            None => format!("(uint{bits}_t){value}"),
+            Some(true) => {
+                let high = (1i64 << (bits - 1)) - 1;
+                format!(
+                    "(uint{bits}_t)xenolith_clamp({value}, {}, {high})",
+                    -high - 1
+                )
+            }
+            Some(false) => {
+                let high = (1u64 << bits) - 1;
+                format!("(uint{bits}_t)xenolith_clamp_unsigned({value}, {high})")
+            }
+        };
+        vector_lanes(&mut out, d, count, into, &body);
+        return Some(out);
+    }
+
+    if let Some((source, low)) = unpack_operation(instruction.opcode()) {
+        let (from, lanes) = lane_width(source);
+        let (into, count) = lane_width(source * 2);
+        let offset = if low { count } else { 0 };
+        let _ = lanes;
+        let body = format!(
+            "(uint{0}_t)(int{0}_t)(int{1}_t)xenolith_vector_{from}(&ctx->v[{b}], lane + {offset})",
+            source * 16,
+            source * 8
+        );
+        vector_lanes(&mut out, d, count, into, &body);
+        return Some(out);
+    }
+
+    // Sliding a window across the two operands laid end to end.
+    if matches!(instruction.opcode(), Opcode::Vsldoi | Opcode::Vsldoi128) {
+        let shift = (instruction.word() >> 6) & 0xf;
+        let body = format!(
+            "(lane + {shift} < 16) ? xenolith_vector_u8(&ctx->v[{a}], lane + {shift}) : xenolith_vector_u8(&ctx->v[{b}], lane + {shift} - 16)"
+        );
+        vector_lanes(&mut out, d, 16, "u8", &body);
+        return Some(out);
+    }
+
+    None
+}
+
+/// Returns the C for a vector instruction that works on integer lanes.
+fn vector_integer(instruction: Instruction) -> Option<String> {
+    let (d, a, b, _) = vector_operands(instruction);
+    let (width, signed, operation) = integer_operation(instruction.opcode())?;
+
+    let (name, count) = lane_width(width);
+    let bits = width * 8;
+    let read = |register: u32| {
+        let lane = format!("xenolith_vector_{name}(&ctx->v[{register}], lane)");
+        if signed {
+            format!("(int64_t)(int{bits}_t){lane}")
+        } else {
+            format!("(int64_t){lane}")
+        }
+    };
+    let (left, right) = (read(a), read(b));
+
+    // The shifts and rotates take their count from the matching lane of the
+    // second operand rather than treating it as a value.
+    let places = format!(
+        "(unsigned)(xenolith_vector_{name}(&ctx->v[{b}], lane) & {})",
+        bits - 1
+    );
+
+    let body = match operation {
+        Integer::Add => format!("(uint{bits}_t)({left} + {right})"),
+        Integer::Subtract => format!("(uint{bits}_t)({left} - {right})"),
+        Integer::AddSaturating | Integer::SubtractSaturating => {
+            let sign = if operation == Integer::AddSaturating {
+                '+'
+            } else {
+                '-'
+            };
+            let sum = format!("{left} {sign} {right}");
+            if signed {
+                let high = (1i64 << (bits - 1)) - 1;
+                let low = -(1i64 << (bits - 1));
+                format!("(uint{bits}_t)xenolith_clamp({sum}, {low}, {high})")
+            } else {
+                let high = (1u64 << bits) - 1;
+                format!("(uint{bits}_t)xenolith_clamp_unsigned({sum}, {high})")
+            }
+        }
+        Integer::ShiftLeft => format!("(uint{bits}_t)({left} << {places})"),
+        Integer::ShiftRight => format!("(uint{bits}_t)({left} >> {places})"),
+        Integer::Rotate => format!(
+            "(uint{bits}_t)(({left} << {places}) | ((uint{bits}_t){left} >> (({bits} - {places}) & {})))",
+            bits - 1
+        ),
+        Integer::Maximum => format!("(uint{bits}_t)({left} > {right} ? {left} : {right})"),
+        Integer::Minimum => format!("(uint{bits}_t)({left} < {right} ? {left} : {right})"),
+        Integer::Average => format!("(uint{bits}_t)(({left} + {right} + 1) >> 1)"),
+    };
+
+    let mut out = String::new();
+    vector_lanes(&mut out, d, count, name, &body);
     Some(out)
 }
 
@@ -628,9 +888,7 @@ fn unaligned_store(out: &mut String, source: u32, effective: &str, taken: &str, 
 /// produce code that compiles and takes the wrong path.
 fn vector_compare(instruction: Instruction) -> Option<String> {
     let (d, a, b, _) = vector_operands(instruction);
-    let Some((width, floating, test)) = comparison(instruction.opcode()) else {
-        return vector_access(instruction);
-    };
+    let (width, floating, test) = comparison(instruction.opcode())?;
     let (name, count) = lane_width(width);
     let bits = width * 8;
 
@@ -771,7 +1029,7 @@ fn vector_float(instruction: Instruction) -> Option<String> {
             vector_lanes(&mut out, d, 4, "f32", &body);
         }
 
-        _ => return vector_convert(instruction),
+        _ => return None,
     }
 
     Some(out)

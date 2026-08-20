@@ -268,6 +268,24 @@ static inline int64_t xenolith_multiply_high_signed(int64_t left, int64_t right)
     return (int64_t)high;
 }
 
+/* Clamping a wider intermediate back into a lane.
+ *
+ * The saturating forms of the vector arithmetic stop at the end of the range
+ * rather than wrapping, so each is computed at a width that cannot overflow and
+ * then brought back. A clamp at the wrong bound gives an answer that is almost
+ * right, which is the kind that survives review.
+ */
+static inline int64_t xenolith_clamp(int64_t value, int64_t low, int64_t high) {
+    return value < low ? low : (value > high ? high : value);
+}
+
+static inline uint64_t xenolith_clamp_unsigned(int64_t value, uint64_t high) {
+    if (value < 0) {
+        return 0;
+    }
+    return (uint64_t)value > high ? high : (uint64_t)value;
+}
+
 /* Zeroing a data cache block.
  *
  * The block size is implementation defined. This console spells two of them
