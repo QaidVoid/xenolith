@@ -297,7 +297,7 @@ fn write_support(
     for address in &missing {
         let _ = writeln!(
             traps,
-            "void {}(xenolith_context *ctx, uint8_t *base) {{ xenolith_trap(ctx, base, {address:#010x}u); }}",
+            "void {}(xenolith_context *ctx, uint8_t *base) {{ xenolith_unlifted(ctx, base, {address:#010x}u); }}",
             name_of(*address)
         );
     }

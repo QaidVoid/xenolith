@@ -383,6 +383,15 @@ void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address);
 void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
                        uint32_t from);
 
+/* Where a call to a function that was never translated goes.
+ *
+ * Told apart from a trap because the two are different events. A trap is an
+ * instruction the title ran on purpose, and this is a function the translation
+ * could not express, so reading one as the other sends a reader looking in the
+ * wrong place. Implemented by the environment, not here.
+ */
+void xenolith_unlifted(xenolith_context *ctx, uint8_t *base, uint32_t address);
+
 /* Where a call to an imported function goes.
  *
  * The container names an import by ordinal within a library and never by name,

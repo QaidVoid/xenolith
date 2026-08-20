@@ -66,6 +66,36 @@ void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
     exit(2);
 }
 
+/* A function the translation could not express.
+ *
+ * Reaching one means the title wanted code that is not there, which is a gap in
+ * the translation rather than anything the title did wrong. Setting
+ * XENOLITH_TRACE_UNLIFTED reports each and returns as though it had done
+ * nothing, which walks a title past a gap to see what it asks for on the other
+ * side.
+ *
+ * Returning from a function that should have done something is a lie, the same
+ * as answering an import with nothing. What comes after describes the answer
+ * given rather than the title.
+ */
+void xenolith_unlifted(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+    static int tracing = -1;
+
+    (void)ctx;
+    (void)base;
+    if (tracing < 0) {
+        tracing = getenv("XENOLITH_TRACE_UNLIFTED") != NULL;
+    }
+    if (tracing) {
+        printf("unlifted %#010x\n", address);
+        fflush(stdout);
+        return;
+    }
+    fprintf(stderr, "xenolith: %#010x was never lifted, so there is nothing to call\n",
+            address);
+    exit(2);
+}
+
 /* An address unknown when the code was emitted, resolved against the functions
  * that were. One that is not among them is not something this program can
  * reach, and guessing would be worse than stopping. */

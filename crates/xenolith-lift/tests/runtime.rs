@@ -75,6 +75,12 @@ void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
     (void)address;
 }
 
+void xenolith_unlifted(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+    (void)ctx;
+    (void)base;
+    (void)address;
+}
+
 int main(void) {
     xenolith_context ctx = {0};
     ctx.r[3] = 1;
@@ -104,6 +110,12 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address, u
 }
 
 void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+    (void)ctx;
+    (void)base;
+    (void)address;
+}
+
+void xenolith_unlifted(xenolith_context *ctx, uint8_t *base, uint32_t address) {
     (void)ctx;
     (void)base;
     (void)address;
