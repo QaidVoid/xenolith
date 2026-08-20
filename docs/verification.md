@@ -12,7 +12,7 @@ something only it can see.
 | decoder, mnemonics | `llvm-mc` | an instruction named as the wrong one |
 | decoder, operands | GNU `objdump`, by value and in order | a field read from the wrong bits, or printed in the wrong place |
 | analysis | jump tables and helper addresses worked out by hand elsewhere | a function or target that should have been found |
-| instruction model | 2.14 million instructions another project emitted | an instruction touching the wrong register |
+| instruction model | 4.2 million instructions another project emitted, over both titles | an instruction touching the wrong register |
 | semantics | PowerPC executed under emulation | an instruction computing the wrong value |
 | whole functions | functions out of a shipped title, executed under emulation | control flow this project would never have written |
 
@@ -56,8 +56,14 @@ one, since it needs no list of extended spellings to exclude.
 Both run over both titles: 942,332 instructions, no disagreements.
 
 **The emitted corpus found nine model bugs, and later two more.** It compares
-which registers each instruction reads and writes, over 2.14 million of them,
-which reaches families the execution differential is far too slow to touch.
+which registers each instruction reads and writes, over 2.14 million of them for
+one title and 2.12 million for the other, which reaches families the execution
+differential is far too slow to touch.
+
+Run against the second title it found nothing new, which after three rounds of
+the opposite is worth recording. The ten disagreements left there are both
+defects in that output rather than in the model: the recording vector comparison
+below, and a vertex unpack it refuses to emit at all.
 
 For a long time it reached none of the vector families at all. The corpus writes
 a vector through an intrinsic rather than an assignment, so the parser recorded

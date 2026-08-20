@@ -114,8 +114,11 @@ something produced independently:
 - **The analysis** is checked against jump tables and helper addresses worked out
   by hand elsewhere, and asserts that no block is ever claimed without an edge
   reaching it.
-- **The instruction model** is checked against 2.14 million instructions another
-  project emitted for the same title, comparing which registers each touches.
+- **The instruction model** is checked against 4.2 million instructions another
+  project emitted for these titles, comparing which registers each touches. The
+  only disagreements left are two defects in that output: a recording vector
+  comparison that never sets its condition field, and a vertex unpack it
+  refuses outright.
 - **The semantics** are checked by running the instruction on emulated PowerPC
   hardware and running the C this project emits for it, from the same state, and
   comparing the general, floating point, and vector registers, the condition
