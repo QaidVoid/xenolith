@@ -288,8 +288,13 @@ fn reports_jump_table_recovery() {
     eprintln!("indirect jumps considered {considered:>8}");
     eprintln!("tables recovered          {recovered:>8}");
     eprintln!("not recovered             {:>8}", all.unrecovered().len());
-    if let Some(rate) = (recovered * 100).checked_div(considered) {
-        eprintln!("recovery rate             {rate:>7}%");
+    eprintln!("through a pointer         {:>8}", all.dynamic().len());
+    // Over the branches that could have a table behind them. A call through a
+    // pointer has none, so counting one against the recovery says the reading
+    // failed where there was nothing to read.
+    let recoverable = considered - all.dynamic().len();
+    if let Some(rate) = (recovered * 100).checked_div(recoverable) {
+        eprintln!("recovery rate             {rate:>7}%  of {recoverable} that could have one");
     }
 
     let sizes: Vec<usize> = all.recovered().iter().map(JumpTable::entries).collect();

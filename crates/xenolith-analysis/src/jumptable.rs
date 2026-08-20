@@ -106,6 +106,15 @@ enum Value {
     /// A table entry added to a fixed base, which is how an offset table gives
     /// an address.
     Offset { base: u32, load: Load },
+    /// Read out of memory at an address that is not fixed when the title is
+    /// built, so what it holds depends on what the program did before.
+    ///
+    /// Told apart from nothing being known because it is the shape of a call
+    /// through a pointer held in an object, which has no table behind it and
+    /// never will. Counting one of those as a table that could not be read
+    /// makes the recovery look worse than it is and hides the ones that really
+    /// were missed.
+    Dynamic,
 }
 
 /// Tracks what each register holds while reading forward through a run.
@@ -182,7 +191,7 @@ fn indexed(
     let (table, index) = match (registers.get(ra), registers.get(rb)) {
         (Value::Const(table), _) => (table, rb),
         (_, Value::Const(table)) => (table, ra),
-        _ => return Value::Unknown,
+        _ => return Value::Dynamic,
     };
 
     let (root, factor) = lineage.of(index);
@@ -288,6 +297,19 @@ fn step(registers: &mut Registers, lineage: &mut Lineage, instruction: Instructi
                 | (Value::Entry(load), Value::Const(base)) => Value::Offset { base, load },
                 (Value::Const(left), Value::Const(right)) => Value::Const(left.wrapping_add(right)),
                 _ => Value::Unknown,
+            };
+            registers.set(rt, value);
+            lineage.clear(rt);
+        }
+
+        // Reading through a base that is not fixed. A virtual call reaches its
+        // target with two of these, one for the table in the object and one for
+        // the method in the table, and neither address is known before the
+        // program runs.
+        Opcode::Lwz | Opcode::Ld => {
+            let value = match registers.get(ra) {
+                Value::Const(_) => Value::Unknown,
+                _ => Value::Dynamic,
             };
             registers.set(rt, value);
             lineage.clear(rt);
@@ -435,15 +457,47 @@ fn default_of(block: &Block) -> Option<u32> {
 /// register an index was derived from is only known while walking. Reading the
 /// bound afterwards would mean comparing register numbers that no longer refer
 /// to the same value.
-fn recover_one(image: &Image, function: &Function, block: &Block) -> Option<JumpTable> {
-    let chain = predecessor_chain(function, block);
+/// Returns every way into a block, as a chain ending at it.
+///
+/// One chain when the block has a single predecessor, which is the shape a
+/// compiler usually leaves. Where several paths arrive, each is followed
+/// separately, because which one was taken is not known here and a bound
+/// checked on one of them is not a bound on the others.
+fn paths_into<'a>(function: &'a Function, block: &'a Block) -> Vec<Vec<&'a Block>> {
+    let edges = function.edges();
+    let sources: Vec<&Block> = function
+        .blocks
+        .iter()
+        .filter(|candidate| {
+            edges
+                .get(&candidate.start)
+                .is_some_and(|list| list.iter().any(|edge| edge.target() == Some(block.start)))
+        })
+        .collect();
 
+    if sources.len() < 2 {
+        return vec![predecessor_chain(function, block)];
+    }
+
+    sources
+        .into_iter()
+        .map(|source| {
+            let mut chain = predecessor_chain(function, source);
+            chain.push(block);
+            chain
+        })
+        .collect()
+}
+
+/// Reads a run of blocks, returning what the count register ends up holding and
+/// every bound checked along the way.
+fn walk(image: &Image, chain: &[&Block]) -> Option<(Value, Vec<Bound>)> {
     let mut registers = Registers::default();
     let mut lineage = Lineage::default();
     let mut target_value = Value::Unknown;
     let mut bounds: Vec<Bound> = Vec::new();
 
-    for step_block in &chain {
+    for step_block in chain {
         let mut compared: BTreeMap<u32, (u8, u32)> = BTreeMap::new();
         let mut address = step_block.start;
 
@@ -491,6 +545,23 @@ fn recover_one(image: &Image, function: &Function, block: &Block) -> Option<Jump
         }
     }
 
+    Some((target_value, bounds))
+}
+
+fn recover_one(image: &Image, function: &Function, block: &Block) -> Option<JumpTable> {
+    // Every way in has to give the same answer. A table read on one path and a
+    // bound checked on another says nothing about the path actually taken, so
+    // the value has to match across all of them and so does the bound, which is
+    // checked once the table says which register it is on.
+    let walks: Vec<(Value, Vec<Bound>)> = paths_into(function, block)
+        .into_iter()
+        .map(|chain| walk(image, &chain))
+        .collect::<Option<Vec<_>>>()?;
+    let (target_value, _) = *walks.first()?;
+    if walks.iter().any(|(value, _)| *value != target_value) {
+        return None;
+    }
+
     let (base, load) = match target_value {
         Value::Offset { base, load } => (base, load),
         Value::Entry(load) => (0, load),
@@ -507,8 +578,20 @@ fn recover_one(image: &Image, function: &Function, block: &Block) -> Option<Jump
         return None;
     }
 
-    // The nearest check wins, because an outer one may guard something else.
-    let bound = bounds.iter().rev().find(|bound| bound.root == load.root)?;
+    // The nearest check on each path wins, because an outer one may guard
+    // something else, and every path has to have one that agrees.
+    let bound = *walks
+        .first()?
+        .1
+        .iter()
+        .rev()
+        .find(|bound| bound.root == load.root)?;
+    for (_, bounds) in &walks {
+        let other = bounds.iter().rev().find(|other| other.root == load.root)?;
+        if other.limit != bound.limit {
+            return None;
+        }
+    }
     let entries = bound.limit.checked_add(1)?;
     let default = bound.default;
     if entries == 0 || entries > MAX_ENTRIES {
@@ -546,6 +629,7 @@ fn recover_one(image: &Image, function: &Function, block: &Block) -> Option<Jump
 pub struct JumpTables {
     recovered: Vec<JumpTable>,
     unrecovered: Vec<u32>,
+    dynamic: Vec<u32>,
 }
 
 impl JumpTables {
@@ -563,17 +647,40 @@ impl JumpTables {
         &self.unrecovered
     }
 
+    /// Returns the addresses of branches that reach a target read out of
+    /// memory the program wrote, which is a call through a pointer.
+    ///
+    /// These have no table behind them and never will, so they are counted
+    /// apart from the ones a table was expected from and not found.
+    #[must_use]
+    pub fn dynamic(&self) -> &[u32] {
+        &self.dynamic
+    }
+
     /// Returns how many indirect branches were considered.
     #[must_use]
     pub fn considered(&self) -> usize {
-        self.recovered.len() + self.unrecovered.len()
+        self.recovered.len() + self.unrecovered.len() + self.dynamic.len()
     }
 
     /// Merges another function's results into this one.
     pub fn absorb(&mut self, other: Self) {
         self.recovered.extend(other.recovered);
         self.unrecovered.extend(other.unrecovered);
+        self.dynamic.extend(other.dynamic);
     }
+}
+
+/// Returns whether a branch takes its target from memory the program wrote.
+///
+/// A call through a pointer held in an object reaches its target with a load
+/// whose address is not fixed when the title is built. There is no table behind
+/// one and there never will be, so it is not a table that failed to be read.
+fn reaches_a_pointer(image: &Image, function: &Function, block: &Block) -> bool {
+    paths_into(function, block)
+        .into_iter()
+        .filter_map(|chain| walk(image, &chain))
+        .any(|(value, _)| value == Value::Dynamic)
 }
 
 /// Recovers the jump tables of one function.
@@ -593,11 +700,11 @@ pub fn recover(image: &Image, function: &Function) -> JumpTables {
             continue;
         };
 
+        let branch = block.end.saturating_sub(INSTRUCTION_SIZE);
         match recover_one(image, function, block) {
             Some(table) => tables.recovered.push(table),
-            None => tables
-                .unrecovered
-                .push(block.end.saturating_sub(INSTRUCTION_SIZE)),
+            None if reaches_a_pointer(image, function, block) => tables.dynamic.push(branch),
+            None => tables.unrecovered.push(branch),
         }
     }
 
