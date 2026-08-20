@@ -725,7 +725,7 @@ fn build_model(directory: &Path, image: &Image, pool: &BTreeMap<u32, String>) ->
         .arg(directory.join("driver.c"))
         .arg(directory.join("lifted.c"))
         .arg(directory.join("xenolith.c"))
-        .arg("-lm")
+        .args(["-lm", "-lpthread"])
         .output()
         .ok()?;
     assert!(

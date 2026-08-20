@@ -346,7 +346,7 @@ const BUILD_FILE: &str = r"# Emitted by xenolith. Run with -j to build the units
 
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-infinite-recursion
-LDLIBS ?= -lm
+LDLIBS ?= -lm -lpthread
 
 SOURCES := $(wildcard lifted.*.c) unlifted.c table.c xenolith.c main.c
 OBJECTS := $(SOURCES:.c=.o)

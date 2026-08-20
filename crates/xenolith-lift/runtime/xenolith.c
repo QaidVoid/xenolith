@@ -13,9 +13,14 @@
  * stops, which is an accurate account of how far this has got.
  */
 
+/* Asked for before anything is included, because a strict C compiler hides the
+ * threading interface otherwise and this needs the whole of it. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "xenolith.h"
 
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -312,6 +317,247 @@ static void query_performance_frequency(xenolith_context *ctx) {
     ctx->r[3] = XENOLITH_TIMEBASE_HZ;
 }
 
+/* Objects a title makes, reaches through a handle, and waits on.
+ *
+ * The console hands back a handle and takes it again later, so what a handle
+ * means has to live here rather than in guest memory. A handle is an index into
+ * this table with one added, so that nothing is ever handle zero.
+ */
+#define XENOLITH_OBJECTS 4096
+
+enum object_kind {
+    OBJECT_NONE = 0,
+    OBJECT_EVENT,
+    OBJECT_MUTANT,
+    OBJECT_SEMAPHORE,
+    OBJECT_THREAD,
+};
+
+struct object {
+    enum object_kind kind;
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    int signalled;
+    int manual;
+    long count;
+    long limit;
+    pthread_t thread;
+    int running;
+    int suspended;
+    /* What a thread was told to run, kept until it is resumed. */
+    uint32_t startup;
+    uint32_t entry;
+    uint32_t argument;
+    uint8_t *base;
+};
+
+static struct object objects[XENOLITH_OBJECTS];
+static pthread_mutex_t objects_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Returns a fresh handle, or zero when there are no more. */
+static uint32_t take_object(enum object_kind kind) {
+    pthread_mutex_lock(&objects_lock);
+    for (uint32_t at = 0; at < XENOLITH_OBJECTS; at++) {
+        if (objects[at].kind == OBJECT_NONE) {
+            struct object *made = &objects[at];
+            memset(made, 0, sizeof *made);
+            made->kind = kind;
+            pthread_mutex_init(&made->lock, NULL);
+            pthread_cond_init(&made->changed, NULL);
+            pthread_mutex_unlock(&objects_lock);
+            return at + 1;
+        }
+    }
+    pthread_mutex_unlock(&objects_lock);
+    return 0;
+}
+
+/* Returns what a handle names, or nothing when it names nothing. */
+static struct object *object_of(uint32_t handle) {
+    if (handle == 0 || handle > XENOLITH_OBJECTS) {
+        return NULL;
+    }
+    struct object *found = &objects[handle - 1];
+    return found->kind == OBJECT_NONE ? NULL : found;
+}
+
+/* Waits until an object is signalled, taking it if taking is what waiting on
+ * that kind means. */
+static uint32_t wait_on(struct object *waited) {
+    pthread_mutex_lock(&waited->lock);
+    while (!waited->signalled) {
+        pthread_cond_wait(&waited->changed, &waited->lock);
+    }
+    if (!waited->manual) {
+        waited->signalled = 0;
+    }
+    pthread_mutex_unlock(&waited->lock);
+    return XENOLITH_STATUS_SUCCESS;
+}
+
+/* Sets an object signalled and wakes whoever was waiting. */
+static void signal_object(struct object *woken, int state) {
+    pthread_mutex_lock(&woken->lock);
+    woken->signalled = state;
+    pthread_cond_broadcast(&woken->changed);
+    pthread_mutex_unlock(&woken->lock);
+}
+
+/* Where each thread's stack is taken from, below the one the first thread was
+ * given so that none of them meet. */
+#define XENOLITH_THREAD_STACK 0x00100000u
+
+static uint32_t thread_stack_next = XENOLITH_STACK_TOP - XENOLITH_THREAD_STACK;
+static pthread_mutex_t thread_stack_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t take_thread_stack(void) {
+    pthread_mutex_lock(&thread_stack_lock);
+    thread_stack_next -= XENOLITH_THREAD_STACK;
+    uint32_t top = thread_stack_next;
+    pthread_mutex_unlock(&thread_stack_lock);
+    return top;
+}
+
+/* What a guest thread runs.
+ *
+ * The console gives a thread a shim to start in, which takes what to run and
+ * what to pass it. Where a title named one it is entered with those two, and
+ * where it did not the thread starts at what was named directly.
+ */
+static void *run_guest_thread(void *given) {
+    struct object *self = given;
+    static _Thread_local xenolith_context state;
+
+    state.r[1] = take_thread_stack() - 64;
+    if (self->startup != 0) {
+        state.r[3] = self->entry;
+        state.r[4] = self->argument;
+    } else {
+        state.r[3] = self->argument;
+    }
+
+    uint32_t at = self->startup != 0 ? self->startup : self->entry;
+    xenolith_function body = xenolith_lookup(at);
+    if (body != NULL) {
+        body(&state, self->base);
+    }
+
+    self->manual = 1;
+    signal_object(self, 1);
+    return NULL;
+}
+
+/* Locks a title takes, kept beside the guest address each one lives at.
+ *
+ * A critical section is a structure in guest memory and a real lock cannot be
+ * put inside one, so the address is what identifies it here.
+ */
+#define XENOLITH_SECTIONS 1024
+
+static struct {
+    uint32_t at;
+    pthread_mutex_t lock;
+} sections[XENOLITH_SECTIONS];
+static pthread_mutex_t sections_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static pthread_mutex_t *section_of(uint32_t at) {
+    pthread_mutex_lock(&sections_lock);
+    for (unsigned k = 0; k < XENOLITH_SECTIONS; k++) {
+        unsigned slot = (at / 4 + k) % XENOLITH_SECTIONS;
+        if (sections[slot].at == at) {
+            pthread_mutex_unlock(&sections_lock);
+            return &sections[slot].lock;
+        }
+        if (sections[slot].at == 0) {
+            sections[slot].at = at;
+            pthread_mutexattr_t how;
+            pthread_mutexattr_init(&how);
+            pthread_mutexattr_settype(&how, PTHREAD_MUTEX_RECURSIVE);
+            pthread_mutex_init(&sections[slot].lock, &how);
+            pthread_mutexattr_destroy(&how);
+            pthread_mutex_unlock(&sections_lock);
+            return &sections[slot].lock;
+        }
+    }
+    pthread_mutex_unlock(&sections_lock);
+    return NULL;
+}
+
+/* Creating a thread, which a title does suspended and resumes after it has said
+ * how the thread should be scheduled. What it is told about scheduling is not
+ * acted on: a host decides that, and saying otherwise would be a pretence.
+ */
+static void create_thread(xenolith_context *ctx, uint8_t *base) {
+    uint32_t handle_at = (uint32_t)ctx->r[3];
+    uint32_t id_at = (uint32_t)ctx->r[5];
+    uint32_t handle = take_object(OBJECT_THREAD);
+    struct object *made = object_of(handle);
+    if (made == NULL) {
+        ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+        return;
+    }
+
+    made->startup = (uint32_t)ctx->r[6];
+    made->entry = (uint32_t)ctx->r[7];
+    made->argument = (uint32_t)ctx->r[8];
+    made->base = base;
+    made->suspended = ((uint32_t)ctx->r[9] & 1) != 0;
+
+    if (handle_at != 0) {
+        xenolith_store32(base, handle_at, handle);
+    }
+    if (id_at != 0) {
+        xenolith_store32(base, id_at, handle);
+    }
+    if (!made->suspended) {
+        made->running = 1;
+        pthread_create(&made->thread, NULL, run_guest_thread, made);
+    }
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
+/* Letting a suspended thread go. */
+static void resume_thread(xenolith_context *ctx) {
+    struct object *found = object_of((uint32_t)ctx->r[3]);
+    if (found != NULL && found->kind == OBJECT_THREAD && !found->running) {
+        found->running = 1;
+        found->suspended = 0;
+        pthread_create(&found->thread, NULL, run_guest_thread, found);
+    }
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
+/* Making something to wait on. The kind decides what waiting takes. */
+static void create_waitable(xenolith_context *ctx, uint8_t *base, enum object_kind kind) {
+    uint32_t handle_at = (uint32_t)ctx->r[3];
+    uint32_t handle = take_object(kind);
+    struct object *made = object_of(handle);
+    if (made == NULL) {
+        ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+        return;
+    }
+
+    if (kind == OBJECT_EVENT) {
+        /* The kind is which of the two an event is: one that stays signalled
+         * until it is cleared, or one that lets a single waiter through. */
+        made->manual = (uint32_t)ctx->r[5] == 0;
+        made->signalled = (uint32_t)ctx->r[6] != 0;
+    } else if (kind == OBJECT_MUTANT) {
+        made->manual = 0;
+        made->signalled = (uint32_t)ctx->r[5] == 0;
+    } else {
+        made->manual = 0;
+        made->count = (long)(uint32_t)ctx->r[5];
+        made->limit = (long)(uint32_t)ctx->r[6];
+        made->signalled = made->count > 0;
+    }
+
+    if (handle_at != 0) {
+        xenolith_store32(base, handle_at, handle);
+    }
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
 /* What the runtime answers to, by ordinal within a library.
  *
  * Each entry is here because a title reached it. Nothing is implemented ahead
@@ -327,16 +573,109 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
     case 102:
         current_process_type(ctx);
         return 1;
+    case 13:
+        create_thread(ctx, base);
+        return 1;
+    case 129:
+    case 151:
+    case 153:
+        /* How a thread should be scheduled, which a host decides. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
     case 131:
         query_performance_frequency(ctx);
         return 1;
+    case 132: {
+        /* What the clock says, in the hundred nanosecond ticks the console
+         * counts. Where it counts from is not modelled, so this counts from
+         * when the program started. */
+        uint32_t at = (uint32_t)ctx->r[3];
+        if (at != 0) {
+            xenolith_store64(base, at, xenolith_timebase() * 100);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 186:
+        /* Memory the graphics hardware can reach. Every guest address is
+         * mapped here and none of it is nearer the hardware than any other, so
+         * this is the same allocation as any other. */
+        allocate_virtual_memory(ctx, base);
+        return 1;
+    case 206:
+    case 246: {
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        if (found != NULL) {
+            signal_object(found, ordinal == 246);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 209:
+        create_waitable(ctx, base, OBJECT_EVENT);
+        return 1;
+    case 212:
+        create_waitable(ctx, base, OBJECT_MUTANT);
+        return 1;
+    case 213:
+        create_waitable(ctx, base, OBJECT_SEMAPHORE);
+        return 1;
+    case 242: {
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        if (found != NULL) {
+            signal_object(found, 1);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 245:
+        resume_thread(ctx);
+        return 1;
+    case 253: {
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(found);
+        return 1;
+    }
+    case 261:
+        /* Dropping a reference. Nothing here counts them, since a title that
+         * has stopped using an object stops mentioning it. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 272: {
+        /* Turning a handle into something to hold. A handle is what this
+         * runtime hands out, so it is also what it hands back. */
+        uint32_t out = (uint32_t)ctx->r[5];
+        if (out != 0) {
+            xenolith_store32(base, out, (uint32_t)ctx->r[3]);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 303:
+        initialize_critical_section(ctx, base);
+        return 1;
+    case 321: {
+        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
+        ctx->r[3] = lock != NULL && pthread_mutex_trylock(lock) == 0;
+        return 1;
+    }
     case 204:
         allocate_virtual_memory(ctx, base);
         return 1;
-    case 293:
-    case 304:
-        /* Entering and leaving a lock nothing else can hold. */
+    case 293: {
+        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
+        if (lock != NULL) {
+            pthread_mutex_lock(lock);
+        }
         return 1;
+    }
+    case 304: {
+        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
+        if (lock != NULL) {
+            pthread_mutex_unlock(lock);
+        }
+        return 1;
+    }
     case 302:
         initialize_critical_section(ctx, base);
         return 1;
@@ -414,25 +753,57 @@ void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
     ctx->r[3] = 0;
 }
 
-/* One thread, so a reservation cannot be lost between taking it and redeeming
- * it, and a conditional store always happens. An environment with threads
- * replaces these with real atomics rather than changing the emitted code. */
+/* A reservation, now that more than one thread can take one.
+ *
+ * What each thread reserved is kept beside it, and redeeming one compares
+ * memory against what was reserved under a lock and stores only where the two
+ * still agree. That is a compare and swap rather than the reservation the
+ * hardware has, and the difference shows where a value is written back to what
+ * it already was: the hardware would notice and this does not.
+ *
+ * A title uses these to build its own locks, and for that the difference does
+ * not arise, since what it writes back is never what it read.
+ */
+static pthread_mutex_t reservation_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local uint32_t reserved_at;
+static _Thread_local uint64_t reserved_was;
+
 uint32_t xenolith_reserve32(const uint8_t *base, uint32_t address) {
-    return xenolith_load32(base, address);
+    uint32_t held = xenolith_load32(base, address);
+    reserved_at = address;
+    reserved_was = held;
+    return held;
 }
 
 uint64_t xenolith_reserve64(const uint8_t *base, uint32_t address) {
-    return xenolith_load64(base, address);
+    uint64_t held = xenolith_load64(base, address);
+    reserved_at = address;
+    reserved_was = held;
+    return held;
 }
 
 uint8_t xenolith_conditional32(uint8_t *base, uint32_t address, uint32_t value) {
-    xenolith_store32(base, address, value);
-    return 1;
+    uint8_t stored = 0;
+    pthread_mutex_lock(&reservation_lock);
+    if (reserved_at == address && xenolith_load32(base, address) == (uint32_t)reserved_was) {
+        xenolith_store32(base, address, value);
+        stored = 1;
+    }
+    reserved_at = 0;
+    pthread_mutex_unlock(&reservation_lock);
+    return stored;
 }
 
 uint8_t xenolith_conditional64(uint8_t *base, uint32_t address, uint64_t value) {
-    xenolith_store64(base, address, value);
-    return 1;
+    uint8_t stored = 0;
+    pthread_mutex_lock(&reservation_lock);
+    if (reserved_at == address && xenolith_load64(base, address) == reserved_was) {
+        xenolith_store64(base, address, value);
+        stored = 1;
+    }
+    reserved_at = 0;
+    pthread_mutex_unlock(&reservation_lock);
+    return stored;
 }
 
 /* A counter that advances, which is all a timing loop needs to finish. What it
