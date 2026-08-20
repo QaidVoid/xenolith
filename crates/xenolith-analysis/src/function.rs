@@ -571,6 +571,38 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
     Program { helpers, functions }
 }
 
+/// Returns a function for the address a caller enters a helper at.
+///
+/// A helper is one run of stores or loads that several callers enter at
+/// different offsets, depending on how many registers they want saved. A call
+/// to one is a call to the helper rather than to a function beginning wherever
+/// the caller happened to enter, so discovery does not claim those offsets and
+/// the program reports eight helpers rather than a hundred and fifty near
+/// duplicates of them.
+///
+/// Emitted code still needs something to call. This builds the straight line
+/// from an entry to the helper's return, so the caller reaches a body rather
+/// than a hole.
+///
+/// Returns nothing for an address no helper covers.
+#[must_use]
+pub fn helper_entry(image: &Image, helpers: &Helpers, address: u32) -> Option<Function> {
+    helpers.containing(address)?;
+
+    let blocks = crate::block::blocks_from(image, address);
+    if blocks.is_empty() {
+        return None;
+    }
+
+    Some(Function {
+        start: address,
+        origin: Origin::Called,
+        blocks,
+        tail_calls: Vec::new(),
+        resolved: BTreeMap::new(),
+    })
+}
+
 /// Builds the functions of a walk, attaching what is known about each.
 fn assemble(
     walked: &BTreeMap<u32, Vec<Block>>,
