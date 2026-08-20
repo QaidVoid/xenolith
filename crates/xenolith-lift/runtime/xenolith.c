@@ -17,6 +17,12 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 
+/* How many calls a trace reports before giving up.
+ *
+ * A title told that every import returned zero goes wrong quickly, and once it
+ * has, the calls it makes say more about the lie than about the title. */
+#define XENOLITH_TRACE_LIMIT 20000
+
 /* The guest addresses a 32-bit pointer can form.
  *
  * Reserved rather than committed. Only the pages actually touched become
@@ -71,13 +77,53 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address) {
 }
 
 /* Nothing here provides what the console did. Reporting which import was wanted
- * is the whole of what this can honestly do. */
+ * is the whole of what this can honestly do.
+ *
+ * Naming one is not enough to know what a title needs, because the first is all
+ * a run ever reaches. Setting XENOLITH_TRACE_IMPORTS reports each one and
+ * carries on as though it had returned zero, which walks the title far enough
+ * to see what else it asks for.
+ *
+ * That is a diagnostic and not an environment. Returning zero from something
+ * that was meant to allocate memory or open a file is a lie the title will
+ * believe, so the run after the first import means nothing except as a list of
+ * what was wanted. It is labelled on every line so that no output of this can be
+ * mistaken for a title running.
+ */
 void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
                      uint32_t ordinal) {
-    (void)ctx;
+    static int tracing = -1;
+    static unsigned long reached = 0;
+
     (void)base;
-    fprintf(stderr, "xenolith: %s ordinal %u is not implemented\n", library, ordinal);
-    exit(3);
+    if (tracing < 0) {
+        tracing = getenv("XENOLITH_TRACE_IMPORTS") != NULL;
+    }
+
+    if (!tracing) {
+        fprintf(stderr, "xenolith: %s ordinal %u is not implemented\n", library, ordinal);
+        exit(3);
+    }
+
+    if (reached >= XENOLITH_TRACE_LIMIT) {
+        fprintf(stderr, "xenolith: trace: stopping after %lu calls\n", reached);
+        exit(3);
+    }
+    reached++;
+
+    /* Where it was called from, and the registers the calling convention puts
+     * arguments in. Which of them mean anything depends on the import, and
+     * nothing here knows which, so all of them are reported. */
+    printf("trace %s ordinal %-5u from %#010llx  args", library, ordinal,
+           (unsigned long long)ctx->lr);
+    for (int at = 3; at <= 10; at++) {
+        printf(" %016llx", (unsigned long long)ctx->r[at]);
+    }
+    printf("\n");
+    fflush(stdout);
+
+    /* Carrying on as though it returned nothing. */
+    ctx->r[3] = 0;
 }
 
 /* One thread, so a reservation cannot be lost between taking it and redeeming
