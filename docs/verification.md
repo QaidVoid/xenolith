@@ -12,7 +12,7 @@ something only it can see.
 | decoder, mnemonics | `llvm-mc` | an instruction named as the wrong one |
 | decoder, operands | GNU `objdump` | a field read from the wrong bits |
 | analysis | jump tables and helper addresses worked out by hand elsewhere | a function or target that should have been found |
-| instruction model | 1.19 million instructions another project emitted | an instruction touching the wrong register |
+| instruction model | 2.14 million instructions another project emitted | an instruction touching the wrong register |
 | semantics | PowerPC executed under emulation | an instruction computing the wrong value |
 
 ## What each one found
@@ -28,9 +28,20 @@ kind of thing, where the number coincides, is invisible to a comparison of
 values. `srawi r4, r3, r4` printed a shift amount as a register and was found by
 reading, not by the oracle.
 
-**The emitted corpus found nine model bugs.** It compares which registers each
-instruction reads and writes, over 1.19 million of them, which reaches families
-the execution differential is far too slow to touch.
+**The emitted corpus found nine model bugs, and later two more.** It compares
+which registers each instruction reads and writes, over 2.14 million of them,
+which reaches families the execution differential is far too slow to touch.
+
+For a long time it reached none of the vector families at all. The corpus writes
+a vector through an intrinsic rather than an assignment, so the parser recorded
+every vector destination as a read and no writes at all, and the comparison was
+vacuous for exactly the instructions with the weakest other evidence. Once it
+could read them it immediately disagreed about the console's forms, and it was
+right: the first source was being read from a bit the opcode owns.
+
+It has also been wrong once. It emits a recording vector comparison without ever
+setting the condition field, then reads that field in the next instruction. That
+is a defect in the oracle rather than in the model, recorded rather than matched.
 
 **Execution found six real semantic mistakes on its first run.** The worst was
 that the record bit compared the low 32 bits of a result rather than all 64, so
@@ -39,7 +50,13 @@ halves disagreed in sign. Nothing else built could have seen it: the corpus says
 which registers are touched, objdump says which fields exist, and neither can
 say that a comparison used the wrong width.
 
-**It later found a seventh by hanging.** A conditional store's low encoding bit
+**It found two in the vector families.** The fused multiply and add rounds once
+between the two operations rather than twice, and writing it as a multiply
+followed by an add is one place out for some inputs. Four runs of one
+instruction disagreed, out of a differential over sixty six vector instructions,
+and no amount of reading would have found it.
+
+**It found a seventh by hanging.** A conditional store's low encoding bit
 is part of its spelling rather than a record bit, and the emitter read it as one.
 The generic path appended a comparison of the stored value against zero, which
 overwrote the condition field the store had just set from its own outcome. The

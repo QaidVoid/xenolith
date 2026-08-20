@@ -20,7 +20,7 @@ Measured against two retail titles:
 |---|---|---|
 | functions discovered | 27,447 | 11,903 |
 | executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 27,297 (99.5%) | 11,624 (97.7%) |
+| functions lifted to C | 27,382 (99.8%) | 11,651 (97.9%) |
 | of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
 
@@ -96,7 +96,7 @@ something produced independently:
 - **The analysis** is checked against jump tables and helper addresses worked out
   by hand elsewhere, and asserts that no block is ever claimed without an edge
   reaching it.
-- **The instruction model** is checked against 1.19 million instructions another
+- **The instruction model** is checked against 2.14 million instructions another
   project emitted for the same title, comparing which registers each touches.
 - **The semantics** are checked by running the instruction on emulated PowerPC
   hardware and running the C this project emits for it, from the same state, and
@@ -108,7 +108,9 @@ register rather than the whole of it, so every dot suffixed instruction set the
 wrong condition whenever a result's halves disagreed in sign. It later found a
 seventh by not finishing: a conditional store's low encoding bit was read as a
 record bit, so a comparison overwrote the field the store had set, and the retry
-after it looped forever.
+after it looped forever. It found two more in the vector families: the fused
+multiply and add rounds once between the two operations rather than twice, and
+the console's own forms take their third source from the register they write.
 
 Fuzz targets cover the loader, the decoder, the analysis, and the lifter.
 
@@ -175,9 +177,11 @@ Stated plainly, because a coverage figure implies more than it means:
   them by how many functions each blocks, which is the list to work from.
 - **The console's vector extension is modelled without an execution oracle.**
   No assembler accepts it and no emulator implements it, so those instructions
-  are checked against the emitted corpus and by reading and nothing else. Its
-  permute forms are refused outright, because a permute built from the wrong
-  bits produces a plausible vector rather than an obvious mistake.
+  are checked against the emitted corpus and by reading and nothing else. The
+  standard extension is executed: sixty six of its instructions are run on
+  emulated hardware and compared. Its permute forms are refused outright,
+  because a permute built from the wrong bits produces a plausible vector rather
+  than an obvious mistake.
 - **Two registers round trip without doing anything.** A program that depends on
   interrupts actually being masked, or on a rounding mode actually changing,
   compiles and is wrong.

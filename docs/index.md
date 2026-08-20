@@ -25,7 +25,7 @@ Measured against two retail titles:
 |---|---|---|
 | functions discovered | 27,447 | 11,903 |
 | executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 27,297 (99.5%) | 11,624 (97.7%) |
+| functions lifted to C | 27,382 (99.8%) | 11,651 (97.9%) |
 | of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
 
