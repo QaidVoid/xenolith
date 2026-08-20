@@ -67,7 +67,14 @@ then a hundred and twenty, then none.
 
 At the end of that a title lifts 14,474 functions, runs every static constructor
 it has, and stops inside a function that uses the Direct3D vertex unpack. The
-startup path is finished; what stops it now is the coverage gap named above. It can also be asked what a title needs:
+startup path is finished; what stops it now is the coverage gap named above.
+
+Walked past that gap with `XENOLITH_TRACE_UNLIFTED`, a title asks for 23 entry
+points, and only one of them is graphics: the video driver being told where the
+command buffer identifier lives, handed the address the console keeps its
+graphics registers at. The rest are threads and what threads need. A title
+creates eight of them, with events, mutants, semaphores and thirteen physical
+allocations, before it says anything to the video driver at all. It can also be asked what a title needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
 its arguments are in, and carries on as though it had returned nothing. Both
 titles ask for the same nine kernel entry points in the same order before they

@@ -423,6 +423,23 @@ title told that every import returned zero believes it, so everything after the
 first call describes the answer it was given rather than the title. The run is
 bounded for the same reason, and every line of it says trace.
 
+## What a title asks for
+
+Three traces answer three different questions, and each is a lie while it runs.
+`XENOLITH_TRACE_IMPORTS` answers every call into the operating system with
+nothing. `XENOLITH_TRACE_DISPATCH` carries on past a computed address that no
+function answers to. `XENOLITH_TRACE_UNLIFTED` returns from a function the
+translation could not express. In each case what the title does afterwards
+describes the answer it was given, so what these produce is a list of what was
+wanted and not an account of a title running.
+
+The list is worth having because nothing else says it. A container records 492
+imports for one title, being everything its linker knew about. Its startup
+reaches nine. Past the vertex unpack that stops it, it reaches 23, and only one
+of those is graphics. The rest are threads, events, object references and
+physical memory. Guessing at that ordering from the outside would have put the
+graphics hardware first, and it is last.
+
 ## What this cannot reach
 
 **The console's vector extension has no execution oracle.** No assembler accepts
