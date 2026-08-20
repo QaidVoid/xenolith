@@ -32,12 +32,28 @@ const MOST_INSTRUCTIONS: u32 = 400;
 /// is worth.
 const CLOSURE_LIMIT: usize = 48;
 
-/// How many functions to run.
+/// How many functions to run by default.
 ///
 /// Every one costs an emulator start and a host process, so this is a sample
 /// rather than a sweep. What makes it worth having is that the sample is drawn
 /// from code nobody here wrote.
-const SAMPLE: usize = 4000;
+///
+/// Enough to have found something every time it was widened, and small enough
+/// that a full run of the suite stays in minutes rather than tens of them. A
+/// deeper sweep is worth doing after a change to the model, which is what the
+/// environment variable is for.
+const SAMPLE: usize = 1200;
+
+/// Names how many to run instead, for a deeper sweep than the default.
+const SAMPLE_VARIABLE: &str = "XENOLITH_TITLE_SAMPLE";
+
+/// Returns how many functions to run.
+fn sample() -> usize {
+    std::env::var(SAMPLE_VARIABLE)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(SAMPLE)
+}
 
 /// The registers seeded before a call and read back after it.
 ///
@@ -774,14 +790,15 @@ fn the_model_runs_what_the_title_holds() {
         return;
     }
 
-    let (chosen, pool) = candidates(&image, SAMPLE);
+    let wanted = sample();
+    let (chosen, pool) = candidates(&image, wanted);
     assert!(
-        chosen.len() >= SAMPLE / 2,
+        chosen.len() >= wanted / 2,
         "only {} functions were safe to run, which is too few to say anything",
         chosen.len()
     );
     println!(
-        "entries {} of {SAMPLE} wanted, functions emitted with them {}",
+        "entries {} of {wanted} wanted, functions emitted with them {}",
         chosen.len(),
         pool.len()
     );
