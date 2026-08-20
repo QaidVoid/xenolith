@@ -213,8 +213,19 @@ fn candidates(image: &Image, wanted: usize) -> (Vec<u32>, BTreeMap<u32, String>)
         if bodies.contains_key(&address) {
             return true;
         }
-        let Some(function) = by_address.get(&address) else {
-            return false;
+        // A call into a register save helper lands partway through one, and
+        // discovery does not claim those. Without them every function with a
+        // prologue was refused, which is better than a third of a title.
+        let owned;
+        let function = match by_address.get(&address) {
+            Some(function) => *function,
+            None => match xenolith_analysis::helper_entry(image, program.helpers(), address) {
+                Some(entry) => {
+                    owned = entry;
+                    &owned
+                }
+                None => return false,
+            },
         };
         let Ok(lifted) = lift(image, function, &imports) else {
             return false;
@@ -286,25 +297,7 @@ fn candidates(image: &Image, wanted: usize) -> (Vec<u32>, BTreeMap<u32, String>)
     let eligible = entries.len();
     let entries = spread(entries, wanted);
 
-    // Only what the chosen entries actually reach is emitted.
-    let mut needed = BTreeSet::new();
-    let mut pending = entries.clone();
-    while let Some(address) = pending.pop() {
-        if !needed.insert(address) {
-            continue;
-        }
-        if let Some(lifted) = bodies.get(&address) {
-            pending.extend(lifted.calls.iter().copied());
-        }
-    }
-    let pool = needed
-        .into_iter()
-        .filter_map(|address| {
-            bodies
-                .get(&address)
-                .map(|lifted| (address, lifted.code.clone()))
-        })
-        .collect();
+    let pool = pool_for(&entries, &bodies);
 
     println!(
         "functions eligible to run {eligible}, of which {} chosen",
@@ -326,6 +319,36 @@ fn candidates(image: &Image, wanted: usize) -> (Vec<u32>, BTreeMap<u32, String>)
         .count();
     println!("of those, {calling} call and {tabled} hold a jump table");
     (entries, pool)
+}
+
+/// Returns the code for every function the chosen entries reach.
+///
+/// Only what they reach, since the pool is compiled for each run and the bodies
+/// map holds everything considered rather than everything chosen.
+fn pool_for(
+    entries: &[u32],
+    bodies: &BTreeMap<u32, xenolith_lift::Lifted>,
+) -> BTreeMap<u32, String> {
+    let mut needed = BTreeSet::new();
+    let mut pending = entries.to_vec();
+
+    while let Some(address) = pending.pop() {
+        if !needed.insert(address) {
+            continue;
+        }
+        if let Some(lifted) = bodies.get(&address) {
+            pending.extend(lifted.calls.iter().copied());
+        }
+    }
+
+    needed
+        .into_iter()
+        .filter_map(|address| {
+            bodies
+                .get(&address)
+                .map(|lifted| (address, lifted.code.clone()))
+        })
+        .collect()
 }
 
 /// Returns a sample drawn from end to end rather than from the front.
