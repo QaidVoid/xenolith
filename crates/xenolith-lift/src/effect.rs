@@ -767,11 +767,14 @@ fn address_effect(instruction: Instruction, effect: &mut Effect) {
 /// position.
 fn vector_operands(instruction: Instruction) -> (u8, u8, u8, u8) {
     if instruction.form().is_some_and(Form::is_console_extension) {
+        // Its forms carry three register fields where the standard ones carry
+        // four, so an instruction needing three sources takes one of them from
+        // the field it writes.
         (
             instruction.vector_d(),
             instruction.vector_a(),
             instruction.vector_b(),
-            instruction.vector_b(),
+            instruction.vector_d(),
         )
     } else {
         (

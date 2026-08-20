@@ -908,3 +908,27 @@ fn an_unaligned_vector_load_takes_the_right_bytes() {
         "the unaligned load did not take the bytes the address names"
     );
 }
+
+/// The console's forms carry one register field fewer than the standard ones,
+/// so an instruction needing three sources takes the third from the field it
+/// writes. Reading the second source twice instead compiles and is wrong.
+#[test]
+fn a_console_fused_multiply_reads_what_it_writes() {
+    // vmaddfp128 v11, v126, v0; vor128 v127, v0, v0; blr
+    let emitted = lift_entry(&[0x157e_04f0, 0x17e0_02dc, 0x4e80_0020]).expect("both should lift");
+
+    assert!(
+        emitted.contains(
+            "xenolith_vector_f32(&ctx->v[126], lane) * xenolith_vector_f32(&ctx->v[0], lane) + xenolith_vector_f32(&ctx->v[11], lane)"
+        ),
+        "the accumulate source was not the register written: {emitted}"
+    );
+    // A vector register is moved with an or of one with itself, so the two
+    // sources of one have to name the same register. They did not while the
+    // first source was read from a bit the opcode owns.
+    assert!(
+        emitted.contains("/* 0x82000004  vor128 v127, v0, v0 */"),
+        "the move idiom did not decode with equal sources: {emitted}"
+    );
+    assert_eq!(compiles("console_fused_multiply", &emitted), Ok(()));
+}

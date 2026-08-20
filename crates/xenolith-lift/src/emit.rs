@@ -204,6 +204,10 @@ fn indexed_address(ra: u32, rb: u32) -> String {
 /// The console's extension reaches four times as many registers by scattering
 /// the extra bits across the word, so which bits hold a register number depends
 /// on the form rather than on the position.
+///
+/// Its forms carry three register fields where the standard ones carry four, so
+/// an instruction of its own needing three sources has to take one of them from
+/// the field it writes. The destination is therefore also the third source.
 fn vector_operands(instruction: Instruction) -> (u32, u32, u32, u32) {
     if instruction
         .form()
@@ -213,7 +217,7 @@ fn vector_operands(instruction: Instruction) -> (u32, u32, u32, u32) {
             u32::from(instruction.vector_d()),
             u32::from(instruction.vector_a()),
             u32::from(instruction.vector_b()),
-            u32::from(instruction.vector_b()),
+            u32::from(instruction.vector_d()),
         )
     } else {
         (
@@ -292,13 +296,10 @@ fn vector_code(instruction: Instruction) -> Option<String> {
         // Every set bit of the control takes the second source and every clear
         // bit takes the first, which is a choice per bit rather than per lane.
         Opcode::Vsel | Opcode::Vsel128 => {
-            let control = if instruction.opcode() == Opcode::Vsel {
-                c
-            } else {
-                // The console's form names its control where the third operand
-                // of a standard four operand instruction would not fit.
-                u32::from(instruction.vector_d())
-            };
+            // The third source of a console form is the register it writes,
+            // which the operands already report, so both spellings read it the
+            // same way.
+            let control = c;
             let body = format!(
                 "({} & {}) | ({} & ~{})",
                 at(b, "u32", "lane"),
@@ -748,22 +749,25 @@ fn vector_float(instruction: Instruction) -> Option<String> {
             );
             vector_lanes(&mut out, d, 4, "f32", &body);
         }
-        Opcode::Vmaddfp | Opcode::Vmaddfp128 => {
-            let body = format!(
-                "{} * {} + {}",
-                at(a, "f32", "lane"),
-                at(c, "f32", "lane"),
-                at(b, "f32", "lane")
+        // The standard form multiplies its first and third operands and adds
+        // the second. The console's has one register field fewer, so it
+        // multiplies its two sources and adds the register it writes.
+        Opcode::Vmaddfp | Opcode::Vmaddfp128 | Opcode::Vnmsubfp | Opcode::Vnmsubfp128 => {
+            let console = matches!(
+                instruction.opcode(),
+                Opcode::Vmaddfp128 | Opcode::Vnmsubfp128
             );
-            vector_lanes(&mut out, d, 4, "f32", &body);
-        }
-        Opcode::Vnmsubfp | Opcode::Vnmsubfp128 => {
-            let body = format!(
-                "-({} * {} - {})",
-                at(a, "f32", "lane"),
-                at(c, "f32", "lane"),
-                at(b, "f32", "lane")
+            let (left, right, addend) = if console { (a, b, c) } else { (a, c, b) };
+            let (left, right, addend) = (
+                at(left, "f32", "lane"),
+                at(right, "f32", "lane"),
+                at(addend, "f32", "lane"),
             );
+            let body = if matches!(instruction.opcode(), Opcode::Vmaddfp | Opcode::Vmaddfp128) {
+                format!("{left} * {right} + {addend}")
+            } else {
+                format!("-({left} * {right} - {addend})")
+            };
             vector_lanes(&mut out, d, 4, "f32", &body);
         }
 
