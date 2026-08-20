@@ -63,15 +63,70 @@ const VECTOR_SECOND: u32 = 3;
 /// read them ignore the low bits of an address rather than faulting on them.
 const VECTOR_SEED_OFFSET: u32 = 128;
 
+/// How many floating point registers are watched.
+///
+/// More than the subjects strictly need. Each precision wants its own pair and
+/// product, and each wants that product both ways round so that the adding and
+/// the subtracting forms both cancel. The count also keeps the bytes each run
+/// reports a multiple of sixteen, which the vector stores rely on.
+const WATCHED_FLOAT_COUNT: usize = 10;
+
+/// The floating point registers under test, destination first.
+///
+/// All of them are ones a called function is free to use without saving, so
+/// the harness need not preserve them around the call.
+const WATCHED_FLOATS: [u32; WATCHED_FLOAT_COUNT] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+/// The destination every float subject writes.
+const FLOAT_DESTINATION: u32 = 0;
+
+/// A pair of doubles and the double their product rounds to.
+///
+/// Chosen so that a fused multiply and add of the three is exactly the error
+/// the rounding threw away, which a multiply followed by an add computes as
+/// zero. That makes the difference between one rounding and two the whole
+/// result rather than a bit at the end of it.
+const FLOAT_FIRST: u32 = 1;
+const FLOAT_SECOND: u32 = 2;
+const FLOAT_THIRD: u32 = 3;
+
+/// The same three, held as values a single precision form can take exactly.
+const SINGLE_FIRST: u32 = 4;
+const SINGLE_SECOND: u32 = 5;
+const SINGLE_THIRD: u32 = 6;
+
+/// The two products again with their signs flipped, so that the forms which add
+/// their third operand cancel the same way the ones that subtract it do.
+const FLOAT_NEGATED: u32 = 7;
+const SINGLE_NEGATED: u32 = 8;
+
+/// Where the floating point seeds sit in the scratch page.
+///
+/// Past the vector seeds, which are themselves past the window that is
+/// compared, so that seeding one disturbs neither the other nor what a store is
+/// checked against.
+const FLOAT_SEED_OFFSET: u32 = VECTOR_SEED_OFFSET + WATCHED_VECTOR_BYTES;
+
+/// How many bytes the vector seeds take in the scratch page.
+const WATCHED_VECTOR_BYTES: u32 = 48;
+
 /// Bytes each run reports: the watched registers, the condition register, the
-/// exception register, the watched vectors, and the scratch memory.
+/// exception register, the watched vectors, the watched floats, and the scratch
+/// memory.
 ///
 /// A multiple of sixteen, so the vector slot of every run stays aligned for the
 /// stores that write it.
-const RESULT_BYTES: usize = (WATCHED_COUNT + 2) * 8 + WATCHED_VECTOR_COUNT * 16 + MEMORY_SIZE;
+const RESULT_BYTES: usize =
+    (WATCHED_COUNT + 2) * 8 + WATCHED_VECTOR_COUNT * 16 + WATCHED_FLOAT_COUNT * 8 + MEMORY_SIZE;
 
 /// Where the vectors sit within one run's report.
 const VECTOR_RESULT_OFFSET: usize = (WATCHED_COUNT + 2) * 8;
+
+/// Where the floats sit within one run's report.
+const FLOAT_RESULT_OFFSET: usize = VECTOR_RESULT_OFFSET + WATCHED_VECTOR_COUNT * 16;
+
+/// Where the scratch memory sits within one run's report.
+const MEMORY_RESULT_OFFSET: usize = FLOAT_RESULT_OFFSET + WATCHED_FLOAT_COUNT * 8;
 
 /// Bits of the exception register this project models.
 ///
@@ -90,6 +145,12 @@ pub struct State {
     pub exception: u64,
     /// The watched vector registers, in the order of `WATCHED_VECTORS`.
     pub vectors: [[u8; 16]; WATCHED_VECTOR_COUNT],
+    /// The watched floating point registers, as the bits they hold.
+    ///
+    /// Compared as bits rather than as numbers, so that the two zeroes stay
+    /// distinct and so that a result which is not a number has to match in the
+    /// payload it carries and not merely in being one.
+    pub floats: [u64; WATCHED_FLOAT_COUNT],
     /// The scratch memory afterwards, so a store can be seen.
     pub memory: [u8; MEMORY_SIZE],
 }
@@ -164,6 +225,11 @@ fn guest_assembly(words: &[u32], seeds: usize) -> String {
                 let offset = VECTOR_SEED_OFFSET as usize + at * 16;
                 let _ = writeln!(out, "\tli 0, {offset}\n\tlvx {register}, 29, 0");
             }
+            // The floating point seeds live in the scratch page too.
+            for (at, register) in WATCHED_FLOATS.iter().enumerate() {
+                let offset = FLOAT_SEED_OFFSET as usize + at * 8;
+                let _ = writeln!(out, "\tlfd {register}, {offset}(29)");
+            }
             // Start from a cleared condition and exception register, so that
             // what is read back afterwards was written by the instruction.
             let _ = writeln!(out, "\tli 0, 0\n\tmtxer 0\n\tmtcr 0");
@@ -186,9 +252,14 @@ fn guest_assembly(words: &[u32], seeds: usize) -> String {
                 );
             }
 
+            for (at, register) in WATCHED_FLOATS.iter().enumerate() {
+                let offset = FLOAT_RESULT_OFFSET + at * 8;
+                let _ = writeln!(out, "\tstfd {register}, {offset}({OUTPUT_REGISTER})");
+            }
+
             // The scratch memory afterwards, so that a store can be seen.
             for at in (0..MEMORY_SIZE).step_by(8) {
-                let to = VECTOR_RESULT_OFFSET + WATCHED_VECTOR_COUNT * 16 + at;
+                let to = MEMORY_RESULT_OFFSET + at;
                 let _ = writeln!(out, "\tld 0, {at}(29)\n\tstd 0, {to}({OUTPUT_REGISTER})");
             }
             let _ = writeln!(
@@ -223,6 +294,7 @@ int main(void) {
     static const uint64_t seeds[SEED_WORDS] = SEED_VALUES;
     static const unsigned char pattern[MEMORY_SIZE] = MEMORY_PATTERN;
     static const unsigned char vectors[VECTOR_SEED_BYTES] = VECTOR_SEEDS;
+    static const uint64_t floats[FLOAT_COUNT] = FLOAT_SEEDS;
     static uint64_t out[RESULT_WORDS] __attribute__((aligned(16)));
 
     void *scratch = mmap((void *)(uintptr_t)MEMORY_BASE, 4096,
@@ -234,6 +306,7 @@ int main(void) {
     }
     memcpy(scratch, pattern, MEMORY_SIZE);
     memcpy((unsigned char *)scratch + VECTOR_SEED_OFFSET, vectors, VECTOR_SEED_BYTES);
+    memcpy((unsigned char *)scratch + FLOAT_SEED_OFFSET, floats, FLOAT_COUNT * 8);
 
     run(seeds, out);
 
@@ -251,7 +324,12 @@ int main(void) {
             printf("%02x", v[b]);
         }
         printf(" ");
-        const unsigned char *m = v + VECTOR_SEED_BYTES;
+        const uint64_t *f = (const uint64_t *)(v + VECTOR_SEED_BYTES);
+        for (int n = 0; n < FLOAT_COUNT; n++) {
+            printf("%016llx", (unsigned long long)f[n]);
+        }
+        printf(" ");
+        const unsigned char *m = (const unsigned char *)(f + FLOAT_COUNT);
         for (int b = 0; b < MEMORY_SIZE; b++) {
             printf("%02x", m[b]);
         }
@@ -285,6 +363,48 @@ fn driver_for(seeds: &[[u64; WATCHED_COUNT]], count: usize) -> String {
             &(WATCHED_VECTOR_COUNT * 16).to_string(),
         )
         .replace("VECTOR_SEEDS", &format!("{{{}}}", vector_seed().join(", ")))
+        .replace("FLOAT_SEED_OFFSET", &FLOAT_SEED_OFFSET.to_string())
+        .replace("FLOAT_COUNT", &WATCHED_FLOAT_COUNT.to_string())
+        .replace(
+            "FLOAT_SEEDS",
+            &format!(
+                "{{{}}}",
+                float_seed()
+                    .iter()
+                    .map(|bits| format!("0x{bits:016x}ull"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+}
+
+/// Returns the bits the watched floating point registers start each run with.
+///
+/// The two triples are a pair and the value their product rounds to, one at
+/// each precision. A fused multiply and add over a triple gives the error the
+/// rounding discarded; the same written as a multiply and then an add gives
+/// zero, because the product it rounds is the value being subtracted. Nothing
+/// else here separates one rounding from two so plainly.
+fn float_seed() -> [u64; WATCHED_FLOAT_COUNT] {
+    [
+        // The destination, which no subject here reads.
+        0x4008_0000_0000_0000,
+        // Two doubles using every bit of their significands, and their product.
+        0x3ff6_a09e_667f_3bcd,
+        0x3ffb_b67a_e858_4caa,
+        0x4003_988e_1409_212f,
+        // The same shape at single precision, so the single forms are seeded
+        // with values they can hold exactly rather than ones they would round
+        // on the way in.
+        0x3ff1_9999_a000_0000,
+        0x3ff4_cccc_c000_0000,
+        0x3ff6_e147_a000_0000,
+        // Both products with the sign bit set, for the forms that add.
+        0xc003_988e_1409_212f,
+        0xbff6_e147_a000_0000,
+        // A spare ordinary value, negative and not a power of two.
+        0xbfe5_5555_5555_5555,
+    ]
 }
 
 /// Returns the bytes the watched vector registers start each run holding.
@@ -362,8 +482,8 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         // The registers, the condition register, the exception register, the
-        // vectors, and the memory.
-        if fields.len() != WATCHED.len() + 4 {
+        // vectors, the floats, and the memory.
+        if fields.len() != WATCHED.len() + 5 {
             continue;
         }
         let number = |at: usize| {
@@ -397,6 +517,18 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
 
         let hex = fields
             .get(WATCHED.len() + 3)
+            .ok_or_else(|| format!("no floats in {line:?}"))?;
+        let mut floats = [0u64; WATCHED_FLOAT_COUNT];
+        for (at, slot) in floats.iter_mut().enumerate() {
+            let text = hex
+                .get(at * 16..at * 16 + 16)
+                .ok_or_else(|| format!("short floats in {line:?}"))?;
+            *slot = u64::from_str_radix(text, 16)
+                .map_err(|error| format!("bad floats in {line:?}: {error}"))?;
+        }
+
+        let hex = fields
+            .get(WATCHED.len() + 4)
             .ok_or_else(|| format!("no memory in {line:?}"))?;
         let mut memory = [0u8; MEMORY_SIZE];
         for (at, slot) in memory.iter_mut().enumerate() {
@@ -412,6 +544,7 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
             condition: u32::try_from(condition).unwrap_or(0),
             exception: exception & EXCEPTION_MODELLED,
             vectors,
+            floats,
             memory,
         });
     }
@@ -434,6 +567,58 @@ const RUNTIME_STUBS: &str = "\
     uint8_t xenolith_conditional32(uint8_t *b, uint32_t a, uint32_t v) { xenolith_store32(b, a, v); return 1; }\n\
     uint8_t xenolith_conditional64(uint8_t *b, uint32_t a, uint64_t v) { xenolith_store64(b, a, v); return 1; }\n\
     uint64_t xenolith_timebase(void) { return 0; }\n\n";
+
+/// Writes the C that puts one starting state into the context.
+///
+/// Shared by the two model programs, which seed the same registers from the
+/// same tables and differ only in what they run afterwards.
+fn seed_state(out: &mut String, seed: &[u64; WATCHED_COUNT]) {
+    for (register, value) in WATCHED.iter().zip(seed) {
+        let _ = writeln!(out, "        state.r[{register}] = {value}ull;");
+    }
+    for (at, register) in WATCHED_VECTORS.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "        for (unsigned b = 0; b < 16; b++) {{ xenolith_vector_set_u8(&state.v[{register}], b, vectors[{at} * 16 + b]); }}"
+        );
+    }
+    for (at, register) in WATCHED_FLOATS.iter().enumerate() {
+        let _ = writeln!(out, "        state.f[{register}].u64 = floats[{at}];");
+    }
+}
+
+/// Writes the C that prints one finished state, in the order the parser reads.
+fn report_state(out: &mut String) {
+    out.push_str("        printf(\"%016llx\", (unsigned long long)state.r[3]);\n");
+    for register in &WATCHED[1..] {
+        let _ = writeln!(
+            out,
+            "        printf(\" %016llx\", (unsigned long long)state.r[{register}]);"
+        );
+    }
+    out.push_str(
+        "        printf(\" %08llx %016llx \", (unsigned long long)packed(&state), (unsigned long long)state.xer);\n",
+    );
+    for register in &WATCHED_VECTORS {
+        let _ = writeln!(
+            out,
+            "        for (unsigned b = 0; b < 16; b++) {{ printf(\"%02x\", xenolith_vector_u8(&state.v[{register}], b)); }}"
+        );
+    }
+    out.push_str("        printf(\" \");\n");
+    for register in &WATCHED_FLOATS {
+        let _ = writeln!(
+            out,
+            "        printf(\"%016llx\", (unsigned long long)state.f[{register}].u64);"
+        );
+    }
+    out.push_str("        printf(\" \");\n");
+    let _ = writeln!(
+        out,
+        "        for (int b = 0; b < {MEMORY_SIZE}; b++) {{ printf(\"%02x\", memory[0x{MEMORY_BASE:x} + b]); }}"
+    );
+    out.push_str("        printf(\"\\n\");\n    }\n");
+}
 
 /// Writes the host C that runs each encoding through this project's model.
 fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
@@ -473,6 +658,16 @@ fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
         seeded.len(),
         seeded.join(", ")
     );
+    let _ = writeln!(
+        out,
+        "static const uint64_t floats[{}] = {{{}}};",
+        WATCHED_FLOAT_COUNT,
+        float_seed()
+            .iter()
+            .map(|bits| format!("0x{bits:016x}ull"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     out.push_str("\nint main(void) {\n");
     let _ = writeln!(
@@ -494,40 +689,10 @@ fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
             out.push_str("        xenolith_context *ctx = &state;\n");
             out.push_str("        uint8_t *base = memory;\n        (void)base;\n");
             out.push_str("        uint32_t address; (void)address;\n");
-            for (register, value) in WATCHED.iter().zip(seed) {
-                let _ = writeln!(out, "        ctx->r[{register}] = {value}ull;");
-            }
-            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
-                let _ = writeln!(
-                    out,
-                    "        for (unsigned b = 0; b < 16; b++) {{ xenolith_vector_set_u8(&ctx->v[{register}], b, vectors[{at} * 16 + b]); }}"
-                );
-            }
+            seed_state(&mut out, seed);
             out.push_str(&code);
 
-            out.push_str("        printf(\"%016llx\", (unsigned long long)state.r[3]);\n");
-            for register in &WATCHED[1..] {
-                let _ = writeln!(
-                    out,
-                    "        printf(\" %016llx\", (unsigned long long)state.r[{register}]);"
-                );
-            }
-            out.push_str(
-                "        printf(\" %08llx %016llx \", (unsigned long long)packed(&state), (unsigned long long)state.xer);\n",
-            );
-            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
-                let _ = at;
-                let _ = writeln!(
-                    out,
-                    "        for (unsigned b = 0; b < 16; b++) {{ printf(\"%02x\", xenolith_vector_u8(&state.v[{register}], b)); }}"
-                );
-            }
-            out.push_str("        printf(\" \");\n");
-            let _ = writeln!(
-                out,
-                "        for (int b = 0; b < {MEMORY_SIZE}; b++) {{ printf(\"%02x\", memory[0x{MEMORY_BASE:x} + b]); }}"
-            );
-            out.push_str("        printf(\"\\n\");\n    }\n");
+            report_state(&mut out);
         }
     }
     out.push_str("    return 0;\n}\n");
@@ -793,6 +958,86 @@ fn memory_subjects() -> Vec<(u32, &'static str)> {
     ]
 }
 
+/// Builds a floating point instruction of the three source form.
+///
+/// The third source sits between the second and the extended opcode, which is
+/// the field the two source forms leave empty.
+const fn floating(first: u32, second: u32, third: u32, opcode: u32, code: u32) -> u32 {
+    (opcode << 26)
+        | (FLOAT_DESTINATION << 21)
+        | (first << 16)
+        | (second << 11)
+        | (third << 6)
+        | (code << 1)
+}
+
+/// Builds a floating point instruction that reads one source.
+const fn floating_one(second: u32, code: u32) -> u32 {
+    (63 << 26) | (FLOAT_DESTINATION << 21) | (second << 11) | (code << 1)
+}
+
+/// Instructions of the floating point families, over both precisions.
+///
+/// These had no execution oracle at all until now. The harness seeded general
+/// registers, condition fields, the exception register, memory, and vectors,
+/// and never a floating point register, so the whole family rested on the
+/// emitted corpus and on reading. A fused multiply that rounded twice where the
+/// architecture rounds once survived that until a real function tripped over
+/// one.
+fn float_subjects() -> Vec<(u32, &'static str)> {
+    let (a, b, c) = (FLOAT_FIRST, FLOAT_SECOND, FLOAT_THIRD);
+    let (sa, sb, sc) = (SINGLE_FIRST, SINGLE_SECOND, SINGLE_THIRD);
+
+    vec![
+        (floating(a, b, 0, 63, 21), "fadd"),
+        (floating(a, b, 0, 63, 20), "fsub"),
+        (floating(a, 0, b, 63, 25), "fmul"),
+        (floating(a, b, 0, 63, 18), "fdiv"),
+        (floating(sa, sb, 0, 59, 21), "fadds"),
+        (floating(sa, sb, 0, 59, 20), "fsubs"),
+        (floating(sa, 0, sb, 59, 25), "fmuls"),
+        (floating(sa, sb, 0, 59, 18), "fdivs"),
+        // The fused families, over a pair and the value their product rounds
+        // to, so that rounding once and rounding twice give different answers
+        // rather than answers that differ in a last bit.
+        (floating(a, c, b, 63, 29), "fmadd"),
+        (floating(a, c, b, 63, 28), "fmsub"),
+        (floating(a, c, FLOAT_NEGATED, 63, 29), "fmadd cancelling"),
+        (floating(a, c, FLOAT_NEGATED, 63, 31), "fnmadd cancelling"),
+        (
+            floating(sa, sc, SINGLE_NEGATED, 59, 29),
+            "fmadds cancelling",
+        ),
+        (
+            floating(sa, sc, SINGLE_NEGATED, 59, 31),
+            "fnmadds cancelling",
+        ),
+        (floating(a, c, b, 63, 31), "fnmadd"),
+        (floating(a, c, b, 63, 30), "fnmsub"),
+        (floating(sa, sc, sb, 59, 29), "fmadds"),
+        (floating(sa, sc, sb, 59, 28), "fmsubs"),
+        (floating(sa, sc, sb, 59, 31), "fnmadds"),
+        (floating(sa, sc, sb, 59, 30), "fnmsubs"),
+        // Moving and changing a sign, which touch the bits and not the value.
+        (floating_one(a, 72), "fmr"),
+        (floating_one(a, 40), "fneg"),
+        (floating_one(a, 264), "fabs"),
+        (floating_one(a, 136), "fnabs"),
+        // Narrowing to single, and the conversions to and from an integer.
+        (floating_one(a, 12), "frsp"),
+        (floating_one(a, 15), "fctiwz"),
+        (floating_one(a, 815), "fctidz"),
+        (floating_one(a, 846), "fcfid"),
+        // Selecting on a sign, and the two compares, which write a field.
+        (floating(a, b, c, 63, 23), "fsel"),
+        ((63 << 26) | (6 << 23) | (a << 16) | (b << 11), "fcmpu"),
+        (
+            (63 << 26) | (6 << 23) | (a << 16) | (b << 11) | (32 << 1),
+            "fcmpo",
+        ),
+    ]
+}
+
 /// Builds a vector instruction of the standard extension.
 ///
 /// The console's own forms are absent on purpose. Neither assembler accepts one
@@ -946,7 +1191,8 @@ fn the_model_computes_what_the_hardware_computes() {
     // An instruction the model cannot write out cannot be run through it. That
     // is reported rather than treated as agreement, since a check that did not
     // run says nothing.
-    let all = subjects();
+    let mut all = subjects();
+    all.extend(float_subjects());
     let (subjects, unreached): (Vec<_>, Vec<_>) = all
         .iter()
         .partition(|(word, _)| xenolith_lift::code_for(Instruction::decode(*word), 0).is_some());
@@ -1072,6 +1318,10 @@ fn sequence_assembly(sequences: &[(&str, Vec<u32>)], seeds: &[[u64; WATCHED_COUN
                 let offset = VECTOR_SEED_OFFSET as usize + slot * 16;
                 let _ = writeln!(out, "\tli 0, {offset}\n\tlvx {register}, 29, 0");
             }
+            for (slot, register) in WATCHED_FLOATS.iter().enumerate() {
+                let offset = FLOAT_SEED_OFFSET as usize + slot * 8;
+                let _ = writeln!(out, "\tlfd {register}, {offset}(29)");
+            }
             let _ = writeln!(out, "\tli 0, 0\n\tmtxer 0\n\tmtcr 0");
             let _ = writeln!(out, "\tbl seq{at}");
 
@@ -1090,8 +1340,12 @@ fn sequence_assembly(sequences: &[(&str, Vec<u32>)], seeds: &[[u64; WATCHED_COUN
                     "\tli 0, {offset}\n\tstvx {register}, {OUTPUT_REGISTER}, 0"
                 );
             }
+            for (slot, register) in WATCHED_FLOATS.iter().enumerate() {
+                let offset = FLOAT_RESULT_OFFSET + slot * 8;
+                let _ = writeln!(out, "\tstfd {register}, {offset}({OUTPUT_REGISTER})");
+            }
             for byte in (0..MEMORY_SIZE).step_by(8) {
-                let to = VECTOR_RESULT_OFFSET + WATCHED_VECTOR_COUNT * 16 + byte;
+                let to = MEMORY_RESULT_OFFSET + byte;
                 let _ = writeln!(out, "\tld 0, {byte}(29)\n\tstd 0, {to}({OUTPUT_REGISTER})");
             }
             let _ = writeln!(
@@ -1199,6 +1453,16 @@ fn sequence_program(
         seeded.len(),
         seeded.join(", ")
     );
+    let _ = writeln!(
+        out,
+        "static const uint64_t floats[{}] = {{{}}};",
+        WATCHED_FLOAT_COUNT,
+        float_seed()
+            .iter()
+            .map(|bits| format!("0x{bits:016x}ull"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     out.push('\n');
 
     // Each sequence is lifted into its own function, named for where it would
@@ -1228,38 +1492,9 @@ fn sequence_program(
     for seed in seeds {
         for name in &names {
             out.push_str("    {\n        xenolith_context state = {0};\n");
-            for (register, value) in WATCHED.iter().zip(seed) {
-                let _ = writeln!(out, "        state.r[{register}] = {value}ull;");
-            }
-            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
-                let _ = writeln!(
-                    out,
-                    "        for (unsigned b = 0; b < 16; b++) {{ xenolith_vector_set_u8(&state.v[{register}], b, vectors[{at} * 16 + b]); }}"
-                );
-            }
+            seed_state(&mut out, seed);
             let _ = writeln!(out, "        {name}(&state, memory);");
-            out.push_str("        printf(\"%016llx\", (unsigned long long)state.r[3]);\n");
-            for register in &WATCHED[1..] {
-                let _ = writeln!(
-                    out,
-                    "        printf(\" %016llx\", (unsigned long long)state.r[{register}]);"
-                );
-            }
-            out.push_str(
-                "        printf(\" %08llx %016llx \", (unsigned long long)packed(&state), (unsigned long long)state.xer);\n",
-            );
-            for register in &WATCHED_VECTORS {
-                let _ = writeln!(
-                    out,
-                    "        for (unsigned b = 0; b < 16; b++) {{ printf(\"%02x\", xenolith_vector_u8(&state.v[{register}], b)); }}"
-                );
-            }
-            out.push_str("        printf(\" \");\n");
-            let _ = writeln!(
-                out,
-                "        for (int b = 0; b < {MEMORY_SIZE}; b++) {{ printf(\"%02x\", memory[0x{MEMORY_BASE:x} + b]); }}"
-            );
-            out.push_str("        printf(\"\\n\");\n    }\n");
+            report_state(&mut out);
         }
     }
     out.push_str("    return 0;\n}\n");
