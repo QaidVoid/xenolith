@@ -20,19 +20,19 @@ Measured against two retail titles:
 |---|---|---|
 | functions discovered | 27,447 | 11,903 |
 | executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 27,382 (99.8%) | 11,651 (97.9%) |
+| functions lifted to C | 27,431 (99.9%) | 11,726 (98.5%) |
 | of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
 
-The scalar instruction set is modelled as far as these two titles exercise it,
-and so are the vector families they lean on. What is left is a tail of a few
-instructions each, most of them the console's own forms whose operand fields
-this project has no independent reading of.
+The scalar and vector instruction sets are modelled as far as these two titles
+exercise them, including the console's own vector forms. What is left is 193
+functions, every one of them stopped by the Direct3D vertex pack or unpack,
+whose type field selects a format this project has no independent reading of.
 
 What that leaves out is the part that matters for running anything. The emitted C
 is written against a runtime interface this project declares and does not
 implement: no guest memory is mapped, no import does anything, no threads exist.
-Around 700 addresses are declared without a definition, mostly functions that
+Around 550 addresses are declared without a definition, mostly functions that
 could not be lifted plus the register save and restore helpers. So it compiles
 and it does not link, which is an honest description of how far this has got.
 
@@ -172,9 +172,11 @@ Stated plainly, because a coverage figure implies more than it means:
   against an emitted corpus and by reading, and nothing more.
 - **Compressed containers using LZX are not supported**, nor are title update
   patches. Both are implemented up to the point where a sample was needed.
-- **Between 0.5 and 2.3 percent of functions do not lift**, blocked by vector
-  instructions the model does not yet describe. The `lift` subcommand ranks
-  them by how many functions each blocks, which is the list to work from.
+- **Between 0.1 and 1.5 percent of functions do not lift**, all of them
+  blocked by the Direct3D vertex pack and unpack. Their encoding is readable
+  and their type field is not: learning what each format means would mean
+  copying it from another implementation, and an unpack built from a guessed
+  format produces plausible floats rather than an obvious mistake.
 - **The console's vector extension is modelled without an execution oracle.**
   No assembler accepts it and no emulator implements it, so those instructions
   are checked against the emitted corpus and by reading and nothing else. The
