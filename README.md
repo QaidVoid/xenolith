@@ -74,7 +74,19 @@ points, and only one of them is graphics: the video driver being told where the
 command buffer identifier lives, handed the address the console keeps its
 graphics registers at. The rest are threads and what threads need. A title
 creates eight of them, with events, mutants, semaphores and thirteen physical
-allocations, before it says anything to the video driver at all. It can also be asked what a title needs:
+allocations, before it says anything to the video driver at all.
+
+So threads are what the runtime does next, and they are real ones. A guest
+thread runs on a host thread with its own register state and its own stack, the
+objects a title waits on are held behind handles, and a critical section is a
+lock kept beside the guest address it lives at. The reservation the emitted code
+uses stopped being safe the moment a second thread existed, and is now a compare
+and swap under a lock, which is stated beside it because it is not quite what
+the hardware does.
+
+With that serviced rather than faked, what a title still asks for falls from 23
+entry points to five: networking twice, formatting a time, the system version,
+and the one call to the video driver. It can also be asked what a title needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
 its arguments are in, and carries on as though it had returned nothing. Both
 titles ask for the same nine kernel entry points in the same order before they

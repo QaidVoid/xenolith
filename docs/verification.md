@@ -440,6 +440,23 @@ of those is graphics. The rest are threads, events, object references and
 physical memory. Guessing at that ordering from the outside would have put the
 graphics hardware first, and it is last.
 
+## What threads cost
+
+The runtime said a reservation could not be lost because there was one thread,
+and named itself as the thing that would have to change when that stopped being
+true. It has stopped being true.
+
+What replaced it is a compare and swap: what each thread reserved is kept beside
+it, and redeeming one compares memory under a lock before storing. That is not
+the reservation the hardware has. The two differ where a value is written back
+to what it already was, which the hardware notices and this does not. A title
+building its own locks never writes back what it read, so the difference does
+not arise there, and it is written down where the code is rather than left to be
+discovered.
+
+Scheduling is answered and not acted on. A title says how it would like its
+threads prioritised and affinitised, and a host decides that instead.
+
 ## What this cannot reach
 
 **The console's vector extension has no execution oracle.** No assembler accepts
