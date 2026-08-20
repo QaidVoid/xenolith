@@ -105,7 +105,8 @@ recovered, or reported as unrecovered. Nothing is guessed:
 - An instruction the decoder does not recognize reports itself unknown, and a
   function holding an instruction the model cannot express is not emitted at all.
 - Every address the image points at that begins like a function is claimed by
-  one. What is left unclaimed is data, jump table entries, and leaf functions
+  one, and so is every trampoline it names, being one branch a linker left where
+  a call could not reach. What is left unclaimed is data, jump table entries, and leaf functions
   that leave no prologue to recognize.
 
 ## How it is checked

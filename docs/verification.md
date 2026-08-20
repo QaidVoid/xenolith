@@ -406,6 +406,18 @@ nine entry points in the same order at different addresses: 204 twice, then 102,
 runtime starting up, and it is the same runtime in both, so the startup path is
 not per title.
 
+Tracing found a gap of its own before it found anything else. It stopped at a
+dispatch to an address holding one instruction, `b 0x823834a0`, which is what a
+linker leaves behind when a call cannot reach far enough. A trampoline has no
+prologue, so scanning never finds it, and nothing calls it directly, so
+discovery never reaches it. One word elsewhere in the image names it, and that
+was enough: an address the image points at whose first instruction branches into
+executable memory is now claimed, and its target is reached as a tail call from
+it. That found 56 more functions in one title and 44 in the other, several of
+them keeping their frame in the red zone and leaving no prologue to have been
+found by. The trace then reached seventeen calls across ten entry points rather
+than fourteen across nine.
+
 It is a diagnostic and not an environment, which is worth being blunt about. A
 title told that every import returned zero believes it, so everything after the
 first call describes the answer it was given rather than the title. The run is
