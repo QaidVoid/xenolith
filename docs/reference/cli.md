@@ -103,7 +103,7 @@ failure. The subcommand reports them and succeeds.
 
 ```sh
 xenolith lift default.xex --out ./lifted --blockers
-make -C ./lifted -j
+make -C ./lifted -j8
 ```
 
 See [Lifting a title](/guide/lifting) for what the output holds and how to read

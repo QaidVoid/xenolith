@@ -38,7 +38,7 @@ xenolith lift default.xex --out ./lifted --part-size 0x200000
 ## Building it
 
 ```sh
-make -C ./lifted -j
+make -C ./lifted -j8
 ```
 
 The larger of the two test titles builds in about two and a half minutes wall

@@ -219,6 +219,93 @@ the environment is unimplemented by design. And anything reading the time base,
 which is a clock the two sides read differently, the same reason the instruction
 differential leaves it out.
 
+**Following calls needed the register helpers, and that is what made a title
+run at all.** A call into a save or restore helper lands partway through it,
+depending on how many registers the caller wants kept. Discovery does not claim
+those addresses, and rightly: a call to a helper is a call to the helper, not to
+a function beginning wherever the caller entered. But emitted code still needs
+something to call, and without a body each one became a trap.
+
+Better than a third of a title's functions save registers that way. Running one
+from its entry point stopped on its first instruction, at a helper that was not
+there. Lifting each entry a caller uses turned that into a program that reaches
+its first call into the operating system.
+
+It widened this oracle at the same time, because an entry whose callee could not
+be lifted was refused outright. Eligible functions went from 2,810 to 3,556, and
+the ones holding a call from 737 to 1,483.
+
+**Two thirds of the jump table failures were never jump tables.** Recovery
+reported 130 branches it could not read. Disassembling them showed 87 reaching
+their target through two loads, one for a table held in an object and one for a
+method inside it, which is how a virtual call is compiled. There is no table
+behind one and there never will be. Counting them against the recovery made it
+look worse than it was and hid the ones that really were missed. They are now
+reported as what they are, which leaves 57 branches whose tables were not read.
+
+The rest were a bound, not a table. Recovery followed one predecessor and gave
+up at the first fork, so 37 tables whose addresses it had fully tracked never
+saw the range check guarding them. It now walks every path into the dispatch and
+requires the table and the bound to agree on all of them, which is sound:
+whichever way control arrived, the check held. That took the reference agreement
+from 803 of 852 to 809, with no disagreements either way.
+
+Worth stating plainly: that last part improved the measurement and not the
+output. The emitted C is unchanged, to the instruction, because the analysis
+already reached those tables by walking again with more boundaries known. What
+was wrong was the recovery reported on its own, which understated what the
+analysis achieves.
+
+**A prologue is longer than four instructions.** Scanning for functions nothing
+calls looked at four instructions for the signs of a prologue: reading out the
+link register, calling a helper to save registers, and moving the stack pointer
+down. A function that saves only two or three registers writes them inline
+rather than calling a helper, which pushes the stack adjustment past the fourth
+instruction, so it scored one signal where two were wanted and was never found.
+
+Widening the window to eight found 2,572 more functions in one title and 5,206
+in the other, taking claimed code from 87 to 93 percent and from 95 to 98. They
+lift with no blocker that was not already there, which is the first sign they
+are real: data misread as code hits a word that does not decode. The differential
+then ran 238 of them against hardware over 899 runs with nothing disagreeing,
+which is the second.
+
+It compounds with the tables. More functions means more blocks to read a
+dispatch out of, and jump table agreement with the hand written reference went
+from 809 of 852 to 822, still with nothing disagreeing.
+
+Widening it also exposed one more unseeded register, this time a floating point
+one: a compare against a register the harness never set read a leftover on the
+hardware side and a zero in the model. The volatile floating point registers are
+cleared on both sides now, the same as the general purpose ones.
+
+**How far the unclaimed words can go, measured rather than guessed.** After the
+wider prologue search one title still had seven percent of its executable words
+claimed by nothing. Three things were tried and only one was worth keeping.
+
+Widening the window further, from eight to twelve, found 215 more functions
+against the 2,572 the first widening found. Diminishing, and taken no further.
+
+Counting a register saved below the stack pointer as a sign of a prologue found
+800 more functions and claimed 133 more words. That is not discovery, it is
+fragmentation: a new boundary shortens the function that had covered the region,
+so the coverage moves rather than grows. Rejected.
+
+Then the shortfall itself was measured. A fifth of it does not decode at all,
+which is data. Another fifth is words that are addresses into the code section,
+which is what a jump table is made of, and every entry in one decodes as some
+instruction or other, so a run reading 99 percent decodable is not therefore
+code. What is left has no prologue: leaf functions short enough to keep their
+frame in the red zone, which read out no link register and move no stack
+pointer, and so leave nothing to recognize.
+
+The last thing tried settles it. Every word in the whole image was checked for
+being an address that begins like a function and that nothing claimed. There are
+none, in either title. Discovery already reaches everything the file points at,
+and what remains would have to be found by guessing. That check is kept as a
+test, because a function the image names and nothing claims is a real defect and
+there is no reason for one to exist.
+
 ## The execution differential
 
 This is the strongest oracle for a single instruction, so it is worth

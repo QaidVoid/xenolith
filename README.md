@@ -18,19 +18,28 @@ Measured against two retail titles:
 
 | | title A | title B |
 |---|---|---|
-| functions discovered | 27,447 | 11,903 |
-| executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 27,432 (99.9%) | 11,728 (98.5%) |
+| functions discovered | 32,653 | 14,475 |
+| executable words claimed | 97.7% | 93.0% |
+| functions lifted to C | 32,636 (99.9%) | 14,284 (98.7%) |
 | of those, import thunks | 156 | 187 |
 | emitted C compiles | yes, all of it | yes, all of it |
+| helper entries emitted beside them | 50 | 55 |
+| runs to its first import | yes | yes |
 
 The scalar and vector instruction sets are modelled as far as these two titles
-exercise them, including the console's own vector forms. What is left is 190
+exercise them, including the console's own vector forms. What is left is 208
 functions, every one of them stopped by the Direct3D vertex pack or unpack,
 whose type field selects a format this project has no independent reading of.
 
-It links, and running it gets as far as the first call into the operating
-system. A runtime ships with it that maps guest memory, loads the image, and
+It links, and running it from a title's recorded entry point gets as far as the
+first call into the operating system, on both titles. Getting there needed the
+register save and restore helpers: a call into one lands partway through it, and
+discovery does not claim those addresses, so they were emitted as traps. Better
+than a third of a title's functions save registers that way, which meant the
+program stopped on the first thing it did. Each entry a caller uses is now
+lifted from where the caller enters it.
+
+A runtime ships with it that maps guest memory, loads the image, and
 implements what the interface declares. What it does not do is service an
 import, create a thread, or draw anything, so a title entered at its recorded
 entry point reaches something unimplemented and stops there, naming it.
@@ -47,7 +56,7 @@ left to be discovered.
 
 The output is a directory of translation units, the runtime, the decoded image,
 and a makefile that links them into a program. The larger title emits 93 units
-and takes a few minutes with `make -j`, which is the shape the output has to be
+and takes a few minutes with `make -j8`, which is the shape the output has to be
 in for a build to use more than one core.
 
 ## What is here
@@ -78,13 +87,18 @@ recovered, or reported as unrecovered. Nothing is guessed:
 
 - All eight register helper addresses are detected on both titles without being
   given any of them, matched against values two other projects recorded by hand.
-- 803 of the 852 jump tables are recovered and agree exactly with what that tool
-  produced, with zero disagreements.
+- 822 of the 852 jump tables are recovered and agree exactly with what that tool
+  produced, with zero disagreements, and more are found that it does not have.
+  What is left is branches whose tables were not read and branches that have no
+  table at all, being calls through a pointer held in an object.
 - Every import record is read from the image and reported as a library and an
   ordinal, so the emitted code names each call into the operating system rather
   than leaving it among the functions that failed.
 - An instruction the decoder does not recognize reports itself unknown, and a
   function holding an instruction the model cannot express is not emitted at all.
+- Every address the image points at that begins like a function is claimed by
+  one. What is left unclaimed is data, jump table entries, and leaf functions
+  that leave no prologue to recognize.
 
 ## How it is checked
 
@@ -173,7 +187,7 @@ xenolith inspect  default.xex --imports
 xenolith disasm   default.xex --start 0x82090000 --length 256
 xenolith analyze  default.xex
 xenolith lift     default.xex --out ./lifted --blockers
-make -C ./lifted -j
+make -C ./lifted -j8
 ./lifted/lifted ./lifted/image.bin 0x82090000
 ```
 

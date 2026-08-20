@@ -91,7 +91,7 @@ branches had their jump tables recovered. `--functions` and `--tables` list them
 
 ```sh
 xenolith lift default.xex --out ./lifted --blockers
-make -C ./lifted -j
+make -C ./lifted -j8
 ```
 
 `lift` writes a directory: numbered translation units, a header holding every
