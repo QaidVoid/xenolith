@@ -4,13 +4,16 @@
 //! decode path: nothing here runs unless someone asks for text, so the analysis
 //! stages pay nothing for its existence.
 //!
-//! Operands are printed in encoding order rather than in the order an assembler
-//! would accept. The two differ for some families, notably the logical
-//! operations, whose assembler syntax names the target register before the
-//! source even though the encoding stores them the other way round. Encoding
-//! order keeps the output honest about what the bits say, which is what matters
-//! when the reason you are reading a disassembly is that something decoded
-//! surprisingly.
+//! Operands are printed in the order an assembler writes them, destination
+//! first, which for several families is not the order the encoding stores them
+//! in. The logical operations and the shifts keep their target in the field
+//! every other form uses for a source, and printing those in encoding order
+//! said `slw r8, r11, r11` for an instruction that writes r11 and reads r8.
+//! Nothing in that tells a reader which register is which, so it was neither
+//! honest nor useful.
+//!
+//! Every rendering here is compared against GNU objdump over both titles' code
+//! sections, operand by operand and in order.
 
 use core::fmt;
 
@@ -75,6 +78,156 @@ fn takes_one_source(mnemonic: &str) -> bool {
             | "subfze"
             | "subfme"
     )
+}
+
+/// Returns whether a mnemonic writes the field the rest of its form reads.
+///
+/// The logical operations and the shifts store their target where every other
+/// instruction of the same form stores a source. Printing them in the order the
+/// bits appear names the source as the destination, which reverses what the
+/// instruction does.
+fn writes_the_second_field(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "and"
+            | "andc"
+            | "nand"
+            | "nor"
+            | "or"
+            | "orc"
+            | "xor"
+            | "eqv"
+            | "slw"
+            | "srw"
+            | "sraw"
+            | "sld"
+            | "srd"
+            | "srad"
+            | "extsb"
+            | "extsh"
+            | "extsw"
+            | "cntlzw"
+            | "cntlzd"
+            | "popcntb"
+    ) || is_logical_immediate(mnemonic)
+}
+
+/// Returns whether a mnemonic names a register in the floating point bank.
+fn is_floating(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "lfs"
+            | "lfsu"
+            | "lfsx"
+            | "lfsux"
+            | "lfd"
+            | "lfdu"
+            | "lfdx"
+            | "lfdux"
+            | "stfs"
+            | "stfsu"
+            | "stfsx"
+            | "stfsux"
+            | "stfd"
+            | "stfdu"
+            | "stfdx"
+            | "stfdux"
+            | "stfiwx"
+    )
+}
+
+/// Returns whether a mnemonic names a register in the vector bank.
+///
+/// These address memory through two general purpose registers and move a whole
+/// vector, so only the operand being loaded or stored belongs to that bank.
+fn is_vector_access(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "lvx"
+            | "lvxl"
+            | "lvebx"
+            | "lvehx"
+            | "lvewx"
+            | "lvlx"
+            | "lvlxl"
+            | "lvrx"
+            | "lvrxl"
+            | "lvsl"
+            | "lvsr"
+            | "stvx"
+            | "stvxl"
+            | "stvebx"
+            | "stvehx"
+            | "stvewx"
+            | "stvlx"
+            | "stvlxl"
+            | "stvrx"
+            | "stvrxl"
+    )
+}
+
+/// Returns whether a mnemonic reaches memory through a base and an index.
+///
+/// The float and vector ones are named apart because they also move a register
+/// out of another bank. What these share is the base, which reads register zero
+/// as the number rather than as a register.
+fn is_indexed_access(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "lbzx"
+            | "lbzux"
+            | "lhzx"
+            | "lhzux"
+            | "lhax"
+            | "lhaux"
+            | "lwzx"
+            | "lwzux"
+            | "lwax"
+            | "lwaux"
+            | "ldx"
+            | "ldux"
+            | "lswx"
+            | "stbx"
+            | "stbux"
+            | "sthx"
+            | "sthux"
+            | "stwx"
+            | "stwux"
+            | "stdx"
+            | "stdux"
+            | "stswx"
+            | "lwarx"
+            | "ldarx"
+            | "stwcx."
+            | "stdcx."
+            | "lhbrx"
+            | "lwbrx"
+            | "ldbrx"
+            | "sthbrx"
+            | "stwbrx"
+            | "stdbrx"
+    )
+}
+
+/// Returns whether a mnemonic takes no operand but the register it writes.
+///
+/// The rest of the form is unused, so printing it names two registers that are
+/// not read.
+fn takes_no_source(mnemonic: &str) -> bool {
+    matches!(mnemonic, "mfcr" | "mfmsr" | "mftb")
+}
+
+/// Returns how a base register is written, where zero means the number itself.
+///
+/// An address formed from a base and an index reads register zero as the
+/// literal zero rather than as its contents, so printing it as a register says
+/// a register is read that is not.
+fn base(ra: u8) -> String {
+    if ra == 0 {
+        "0".to_owned()
+    } else {
+        format!("r{ra}")
+    }
 }
 
 /// Returns whether a mnemonic addresses a cache line rather than a register.
@@ -148,6 +301,11 @@ fn vector_operands(
     }
     // Splatting a lane names which lane in that same field, unsigned.
     if matches!(mnemonic, "vspltb" | "vsplth" | "vspltw") {
+        return Some(write!(f, " v{rt}, v{rb}, {ra}"));
+    }
+    // Converting between floats and fixed point carries the place of the point
+    // in that field, unsigned, so it is a count of bits and not a register.
+    if matches!(mnemonic, "vcfux" | "vcfsx" | "vctuxs" | "vctsxs") {
         return Some(write!(f, " v{rt}, v{rb}, {ra}"));
     }
 
@@ -235,6 +393,81 @@ fn branch_operands(
     }
 }
 
+/// Writes the operands of an instruction of the general purpose form.
+///
+/// This form covers more unrelated instructions than any other, and several of
+/// them spend a field on something that is not a register at all. Returning
+/// nothing leaves the general three register rendering to the caller.
+fn general_operands(
+    f: &mut fmt::Formatter<'_>,
+    mnemonic: &str,
+    instruction: Instruction,
+) -> Option<fmt::Result> {
+    let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
+
+    Some(match instruction.form()? {
+        Form::X if is_compare(mnemonic) => {
+            write!(f, " cr{}, {}, r{ra}, r{rb}", rt >> 2, rt & 1)
+        }
+        // Comparing floats writes a condition field and reads two of the
+        // floating bank, none of which are general purpose registers.
+        Form::X if matches!(mnemonic, "fcmpu" | "fcmpo") => {
+            write!(f, " cr{}, f{ra}, f{rb}", rt >> 2)
+        }
+        // The floating conversions and moves take one source and no second
+        // operand at all, so printing three general registers names two
+        // things that are not there.
+        Form::X if mnemonic.starts_with('f') => write!(f, " f{rt}, f{rb}"),
+        // The shift count of an immediate arithmetic shift sits where the
+        // form otherwise names a register, so printing it as one says a
+        // register is read that is not.
+        Form::X if mnemonic == "srawi" => write!(f, " r{ra}, r{rt}, {rb}"),
+        // A move out of the condition or machine state register, and a read
+        // of the timebase, name only what they write.
+        Form::X if takes_no_source(mnemonic) => write!(f, " r{rt}"),
+        // Moving a special purpose register names it by number, and that
+        // number is one field stored in two halves. Printing the halves as
+        // registers names two that are not read, and loses which register
+        // was meant.
+        Form::X if mnemonic == "mfspr" => write!(f, " r{rt}, {}", instruction.spr()),
+        Form::X if mnemonic == "mtspr" => write!(f, " {}, r{rt}", instruction.spr()),
+        // Ordering takes nothing at all.
+        Form::X if matches!(mnemonic, "eieio" | "sync" | "isync") => Ok(()),
+        // Moving a whole vector to or from memory addresses it through two
+        // general purpose registers, so only the operand moved is a vector.
+        Form::X if is_vector_access(mnemonic) => {
+            write!(f, " v{rt}, {}, r{rb}", base(ra))
+        }
+        // The indexed floating loads and stores name the bank they move
+        // between, which is not the one their address is built from.
+        Form::X if is_floating(mnemonic) => {
+            write!(f, " f{rt}, {}, r{rb}", base(ra))
+        }
+        Form::X | Form::XO if takes_one_source(mnemonic) => {
+            if writes_the_second_field(mnemonic) {
+                write!(f, " r{ra}, r{rt}")
+            } else {
+                write!(f, " r{rt}, r{ra}")
+            }
+        }
+        Form::X if addresses_a_cache_line(mnemonic) => write!(f, " {}, r{rb}", base(ra)),
+        Form::X if writes_the_second_field(mnemonic) => {
+            write!(f, " r{ra}, r{rt}, r{rb}")
+        }
+        // Everything else of this form that reaches memory reads register
+        // zero as the number zero rather than as a register.
+        Form::X if is_indexed_access(mnemonic) => {
+            write!(f, " r{rt}, {}, r{rb}", base(ra))
+        }
+        // Writing the machine state register takes one register and a bit
+        // saying how much of it to write, not three registers.
+        Form::X if matches!(mnemonic, "mtmsr" | "mtmsrd") => {
+            write!(f, " r{rt}, {}", ra & 1)
+        }
+        _ => return None,
+    })
+}
+
 impl fmt::Display for Rendered {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let instruction = self.instruction;
@@ -263,7 +496,7 @@ impl fmt::Display for Rendered {
             Form::B => {
                 write!(
                     f,
-                    " {}, {}",
+                    " {}, {},",
                     instruction.branch_condition(),
                     instruction.branch_condition_bit()
                 )?;
@@ -279,7 +512,13 @@ impl fmt::Display for Rendered {
                 )
             }
             Form::D | Form::DS if is_memory_access(mnemonic) => {
-                write!(f, " r{rt}, {}(r{ra})", instruction.displacement())
+                let bank = if is_floating(mnemonic) { 'f' } else { 'r' };
+                write!(
+                    f,
+                    " {bank}{rt}, {}({})",
+                    instruction.displacement(),
+                    base(ra)
+                )
             }
             // A compare spends the field the others use for a target register
             // on the condition field it writes and the width it compares at.
@@ -293,37 +532,14 @@ impl fmt::Display for Rendered {
             ),
             // The logical immediates take an unsigned field, so sign extending
             // it reports a negative constant where the instruction has none.
+            // They also write the field they would otherwise read.
             Form::D if is_logical_immediate(mnemonic) => {
-                write!(f, " r{rt}, r{ra}, {}", instruction.immediate())
+                write!(f, " r{ra}, r{rt}, {}", instruction.immediate())
             }
             Form::D | Form::DS => {
                 write!(f, " r{rt}, r{ra}, {}", instruction.displacement())
             }
-            Form::X if is_compare(mnemonic) => {
-                write!(f, " cr{}, {}, r{ra}, r{rb}", rt >> 2, rt & 1)
-            }
-            // Comparing floats writes a condition field and reads two of the
-            // floating bank, none of which are general purpose registers.
-            Form::X if matches!(mnemonic, "fcmpu" | "fcmpo") => {
-                write!(f, " cr{}, f{ra}, f{rb}", rt >> 2)
-            }
-            // The floating conversions and moves take one source and no second
-            // operand at all, so printing three general registers names two
-            // things that are not there.
-            Form::X if mnemonic.starts_with('f') => write!(f, " f{rt}, f{rb}"),
-            // The shift count of an immediate arithmetic shift sits where the
-            // form otherwise names a register, so printing it as one says a
-            // register is read that is not.
-            Form::X if mnemonic == "srawi" => write!(f, " r{ra}, r{rt}, {rb}"),
-            Form::X | Form::XO if takes_one_source(mnemonic) => {
-                write!(f, " r{rt}, r{ra}")
-            }
-            Form::X if addresses_a_cache_line(mnemonic) => write!(f, " r{ra}, r{rb}"),
-            // Writing the machine state register takes one register and a bit
-            // saying how much of it to write, not three registers.
-            Form::X if matches!(mnemonic, "mtmsr" | "mtmsrd") => {
-                write!(f, " r{rt}, {}", ra & 1)
-            }
+            Form::X | Form::XO if general_operands(f, mnemonic, instruction).is_some() => Ok(()),
             Form::X | Form::XO => write!(f, " r{rt}, r{ra}, r{rb}"),
             // The rotates name their destination where the other forms name a
             // source, and the rest of their operands are mask bounds rather
@@ -344,6 +560,21 @@ impl fmt::Display for Rendered {
             }
             Form::VX if vector_operands(f, mnemonic, instruction).is_some() => Ok(()),
             Form::VX | Form::VC => write!(f, " v{rt}, v{ra}, v{rb}"),
+            // Shifting a pair of vectors together takes a byte count where the
+            // rest of the form takes a third register, four bits of it rather
+            // than five.
+            Form::VA if mnemonic == "vsldoi" => write!(
+                f,
+                " v{rt}, v{ra}, v{rb}, {}",
+                (instruction.word() >> 6) & 0xf
+            ),
+            // A fused multiply names the register it multiplies by before the
+            // one it adds, which is the reverse of where the two sit.
+            Form::VA if matches!(mnemonic, "vmaddfp" | "vnmsubfp") => write!(
+                f,
+                " v{rt}, v{ra}, v{}, v{rb}",
+                (instruction.word() >> 6) & 0x1f
+            ),
             Form::VA => write!(
                 f,
                 " v{rt}, v{ra}, v{rb}, v{}",
@@ -501,16 +732,17 @@ mod tests {
         assert_eq!(Instruction::decode(0x7c64_1b78).opcode(), Opcode::Or);
     }
 
-    /// Operands print in encoding order, which for this family is the reverse
-    /// of assembler syntax: the word stores the source register where an
-    /// assembler writes the target. Printing what the bits say is the point.
+    /// This family stores its target where every other form of the same shape
+    /// stores a source, so the target is printed first even though it is second
+    /// in the word. Printing the fields in the order they appear named the
+    /// source as the destination, which reverses what the instruction does.
     #[test]
     fn an_encoding_with_no_extended_form_falls_back_to_the_general_one() {
         let word = 0x6083_0005;
         assert_eq!((word >> 21) & 0x1f, 4, "source register field");
         assert_eq!((word >> 16) & 0x1f, 3, "target register field");
 
-        assert_eq!(render(word, 0), "ori r4, r3, 5");
+        assert_eq!(render(word, 0), "ori r3, r4, 5");
     }
 
     /// The destination reaches past what standard vector encoding can name,
