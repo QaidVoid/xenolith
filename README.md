@@ -85,8 +85,16 @@ and swap under a lock, which is stated beside it because it is not quite what
 the hardware does.
 
 With that serviced rather than faked, what a title still asks for falls from 23
-entry points to five: networking twice, formatting a time, the system version,
-and the one call to the video driver. It can also be asked what a title needs:
+entry points to five, and then to none. Networking reports that there is none,
+since saying it started would send a title looking for one. A module lookup
+reports that nothing is loaded here but the title. A time is taken apart by the
+documented arithmetic, a calendar being a definition rather than a property of
+the hardware. And the system version is read out of the title: the code asking
+for it holds `0x200a3200` and goes elsewhere when given less, so what it will
+accept is stated in the artefact rather than assumed.
+
+Every entry point the title reaches is now answered. What stops it, in both
+places it stops, is the Direct3D vertex unpack. It can also be asked what a title needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
 its arguments are in, and carries on as though it had returned nothing. Both
 titles ask for the same nine kernel entry points in the same order before they
