@@ -132,6 +132,88 @@ fn rotate_mask(begin: u8, end: u8) -> u32 {
     mask
 }
 
+/// The carry the exception register is holding, as an expression.
+const CARRY_IN: &str = "((ctx->xer >> 29) & 1)";
+
+/// Writes a sum of three terms, and the carry it produces.
+///
+/// Three terms rather than two is the whole point. Every one of these
+/// instructions adds a carry to a pair, and a carry out of a pair is usually
+/// read off as the result having come out below one of the operands. That test
+/// is only sound for two terms: `~0 + 1` wraps to zero and carries, and adding
+/// that zero to anything looks like it did nothing.
+///
+/// So the two additions are done in turn and either one carrying counts. Found
+/// by running a real function whose `subfc` of a value from itself should have
+/// carried and did not.
+fn carry_sum(out: &mut String, left: &str, right: &str, carry: &str, rt: u32) -> std::fmt::Result {
+    writeln!(
+        out,
+        "    {{ uint64_t left = {left}; uint64_t right = {right};"
+    )?;
+    writeln!(
+        out,
+        "    uint64_t mid = left + right; uint64_t sum = mid + ({carry});"
+    )?;
+    writeln!(
+        out,
+        "    ctx->xer = (ctx->xer & ~0x20000000ull) | ((mid < left || sum < mid) ? 0x20000000ull : 0);"
+    )?;
+    writeln!(out, "    ctx->r[{rt}] = sum; }}")
+}
+
+/// Writes a word rotate, which is not the thirty two bit operation it looks
+/// like.
+///
+/// The architecture rotates the source concatenated with itself, giving a sixty
+/// four bit value holding the rotate twice, and masks that. The mask is written
+/// as two bounds over the low half, so most of the time it selects nothing in
+/// the high half and the result is a thirty two bit value.
+///
+/// Two cases are not that. A mask whose end comes before its beginning wraps
+/// past the last bit and takes in the whole of the high half, so the rotate
+/// writes both halves rather than zero extending into the register. And an
+/// insert leaves alone whatever the mask does not select, which in the ordinary
+/// case is the entire high half, so clearing it there is wrong too.
+///
+/// Both were found by running real functions: one title's code rotates with a
+/// wrapped mask and the halves disagreed.
+fn rotate_code(out: &mut String, instruction: Instruction, places: &str) {
+    let (rt, ra) = (instruction.rt(), instruction.ra());
+    let begin = instruction.mask_begin();
+    let end = instruction.mask_end();
+    let mask = rotate_mask(begin, end);
+    let wraps = begin > end;
+    let inserts = instruction.opcode() == Opcode::Rlwimi;
+
+    let _ = writeln!(out, "    {{ uint32_t value = (uint32_t)ctx->r[{rt}];");
+    let _ = writeln!(out, "    uint32_t places = {places};");
+    let _ = writeln!(
+        out,
+        "    uint32_t rotated = places == 0u ? value : ((value << places) | (value >> (32u - places)));"
+    );
+
+    let low = if inserts {
+        format!("(rotated & {mask}u) | ((uint32_t)ctx->r[{ra}] & ~{mask}u)")
+    } else {
+        format!("rotated & {mask}u")
+    };
+
+    if wraps {
+        let _ = writeln!(
+            out,
+            "    ctx->r[{ra}] = ((uint64_t)rotated << 32) | (uint64_t)({low}); }}"
+        );
+    } else if inserts {
+        let _ = writeln!(
+            out,
+            "    ctx->r[{ra}] = (ctx->r[{ra}] & ~{mask}ull) | (uint64_t)(rotated & {mask}u); }}"
+        );
+    } else {
+        let _ = writeln!(out, "    ctx->r[{ra}] = (uint64_t)({low}); }}");
+    }
+}
+
 /// Writes the statements that set a condition field from a comparison.
 ///
 /// The less than expression is given rather than derived, because an unsigned
@@ -1446,35 +1528,15 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             );
         }
         Opcode::Rlwnm => {
-            let mask = rotate_mask(instruction.mask_begin(), instruction.mask_end());
-            writeln!(out, "    {{ uint32_t value = (uint32_t)ctx->r[{rt}];").ok()?;
-            writeln!(out, "    uint32_t places = (uint32_t)ctx->r[{rb}] & 31u;").ok()?;
-            writeln!(
-                out,
-                "    uint32_t rotated = places == 0u ? value : ((value << places) | (value >> (32u - places)));"
-            )
-            .ok()?;
-            writeln!(out, "    ctx->r[{ra}] = rotated & {mask}u; }}").ok()?;
+            rotate_code(
+                &mut out,
+                instruction,
+                &format!("(uint32_t)ctx->r[{rb}] & 31u"),
+            );
         }
         Opcode::Rlwinm | Opcode::Rlwimi => {
             let places = u32::from(instruction.shift_amount());
-            let mask = rotate_mask(instruction.mask_begin(), instruction.mask_end());
-            let rotated = if places == 0 {
-                format!("(uint32_t)ctx->r[{rt}]")
-            } else {
-                format!(
-                    "(((uint32_t)ctx->r[{rt}] << {places}) | ((uint32_t)ctx->r[{rt}] >> {}))",
-                    32 - places
-                )
-            };
-            if instruction.opcode() == Opcode::Rlwimi {
-                let _ = writeln!(
-                    out,
-                    "    ctx->r[{ra}] = ((uint32_t)ctx->r[{ra}] & ~{mask}u) | ({rotated} & {mask}u);"
-                );
-            } else {
-                let _ = writeln!(out, "    ctx->r[{ra}] = {rotated} & {mask}u;");
-            }
+            rotate_code(&mut out, instruction, &format!("{places}u"));
         }
 
         Opcode::Cmp | Opcode::Cmpi => {
@@ -1936,23 +1998,13 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         }
 
         Opcode::Addc | Opcode::Adde | Opcode::Addze | Opcode::Addme => {
-            let addend = match instruction.opcode() {
-                Opcode::Addc => format!("ctx->r[{rb}]"),
-                Opcode::Adde => format!("ctx->r[{rb}] + ((ctx->xer >> 29) & 1)"),
-                Opcode::Addze => "((ctx->xer >> 29) & 1)".to_owned(),
-                _ => "((ctx->xer >> 29) & 1) + 0xffffffffffffffffull".to_owned(),
+            let (addend, carry) = match instruction.opcode() {
+                Opcode::Addc => (format!("ctx->r[{rb}]"), "0".to_owned()),
+                Opcode::Adde => (format!("ctx->r[{rb}]"), CARRY_IN.to_owned()),
+                Opcode::Addze => ("0".to_owned(), CARRY_IN.to_owned()),
+                _ => ("0xffffffffffffffffull".to_owned(), CARRY_IN.to_owned()),
             };
-            writeln!(
-                out,
-                "    {{ uint64_t left = ctx->r[{ra}]; uint64_t sum = left + ({addend});"
-            )
-            .ok()?;
-            writeln!(
-                out,
-                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (sum < left ? 0x20000000ull : 0);"
-            )
-            .ok()?;
-            writeln!(out, "    ctx->r[{rt}] = sum; }}").ok()?;
+            carry_sum(&mut out, &format!("ctx->r[{ra}]"), &addend, &carry, rt).ok()?;
         }
         Opcode::Subfc | Opcode::Subfe | Opcode::Subfze | Opcode::Subfme => {
             let minuend = match instruction.opcode() {
@@ -1963,19 +2015,9 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             let carry = if matches!(instruction.opcode(), Opcode::Subfc) {
                 "1".to_owned()
             } else {
-                "((ctx->xer >> 29) & 1)".to_owned()
+                CARRY_IN.to_owned()
             };
-            writeln!(
-                out,
-                "    {{ uint64_t sum = ~ctx->r[{ra}] + ({minuend}) + ({carry});"
-            )
-            .ok()?;
-            writeln!(
-                out,
-                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (sum < ({minuend}) ? 0x20000000ull : 0);"
-            )
-            .ok()?;
-            writeln!(out, "    ctx->r[{rt}] = sum; }}").ok()?;
+            carry_sum(&mut out, &format!("~ctx->r[{ra}]"), &minuend, &carry, rt).ok()?;
         }
         Opcode::Mulhw => {
             writeln!(
