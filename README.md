@@ -40,7 +40,15 @@ program stopped on the first thing it did. Each entry a caller uses is now
 lifted from where the caller enters it.
 
 A runtime ships with it that maps guest memory, loads the image, and
-implements what the interface declares. What it does not do is service an
+implements what the interface declares. It can also be asked what a title needs:
+`XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
+its arguments are in, and carries on as though it had returned nothing. Both
+titles ask for the same nine kernel entry points in the same order before they
+go anywhere else, which is the C runtime starting up and is not per title.
+
+That trace is a diagnostic and not an environment. A title told every import
+returned zero believes it, so the run after the first one is a list of what was
+wanted rather than a title running. What it does not do is service an
 import, create a thread, or draw anything, so a title entered at its recorded
 entry point reaches something unimplemented and stops there, naming it.
 

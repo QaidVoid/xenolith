@@ -392,6 +392,25 @@ alone and each cost five of every six functions.
 comparison needs both sides to have finished, and a harness that quietly dropped
 those would report a coverage figure that meant nothing.
 
+## Asking a title what it needs
+
+The container records every import the linker knew about: 492 for one title and
+388 for the other. What a title reaches at startup is a far smaller set, and
+reading the container cannot say which. Running it can.
+
+Setting `XENOLITH_TRACE_IMPORTS` makes the runtime report each import a run
+reaches, with where it was called from and the registers the arguments are in,
+and carry on as though it had returned nothing. Both titles ask for the same
+nine entry points in the same order at different addresses: 204 twice, then 102,
+302, 40, 293, 304, 404, 338, 341, and 293 and 304 after that. That is the C
+runtime starting up, and it is the same runtime in both, so the startup path is
+not per title.
+
+It is a diagnostic and not an environment, which is worth being blunt about. A
+title told that every import returned zero believes it, so everything after the
+first call describes the answer it was given rather than the title. The run is
+bounded for the same reason, and every line of it says trace.
+
 ## What this cannot reach
 
 **The console's vector extension has no execution oracle.** No assembler accepts

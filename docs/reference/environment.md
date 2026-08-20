@@ -4,6 +4,8 @@
 
 | variable | what it names |
 |---|---|
+| `XENOLITH_TRACE_IMPORTS` | set to report every import a built title reaches, rather than stopping at the first |
+| `XENOLITH_TITLE_SAMPLE` | how many functions the real function differential runs, for a deeper sweep |
 | `XENOLITH_XEX_KEY` | the static key, as 32 hexadecimal digits |
 
 Three sources are consulted in order: `--key-file`, this variable, then
