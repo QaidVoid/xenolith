@@ -270,10 +270,29 @@ impl Instruction {
     ///
     /// This one is split three ways rather than two, with its top two bits in
     /// separate single-bit fields at opposite ends of the word.
+    ///
+    /// Which two bits those are is settled by the forms that carry this
+    /// operand. Their identifying masks claim bit six and leave bits five and
+    /// ten, and once the other operands take the bits they need, five and ten
+    /// are the only ones left unaccounted for, which is exactly how many this
+    /// field is short of reaching a hundred and twenty eight registers.
+    ///
+    /// Reading bit six instead put every source of an instruction whose opcode
+    /// happens to set that bit into the upper half of the register file and
+    /// never the lower, which is not something a register allocator produces.
+    ///
+    /// ```
+    /// use xenolith_ppc::Instruction;
+    ///
+    /// // vor128 v127, v0, v0, which is how a vector register is moved
+    /// let instruction = Instruction::decode(0x17e0_02dc);
+    /// assert_eq!(instruction.vector_d(), 127);
+    /// assert_eq!(instruction.vector_a(), instruction.vector_b());
+    /// ```
     #[must_use]
     pub const fn vector_a(self) -> u8 {
         let low = (self.word >> 16) & 0x1f;
-        let bit5 = (self.word >> 6) & 0x1;
+        let bit5 = (self.word >> 5) & 0x1;
         let bit6 = (self.word >> 10) & 0x1;
         register_wide((bit6 << 6) | (bit5 << 5) | low)
     }
@@ -613,8 +632,13 @@ mod extension_tests {
         assert_eq!(field(base | (0x3 << 2)).0, 96, "destination high bits");
 
         assert_eq!(field(base | (0x1f << 16)).1, 31, "first source low bits");
-        assert_eq!(field(base | (1 << 6)).1, 32, "first source bit five");
+        assert_eq!(field(base | (1 << 5)).1, 32, "first source bit five");
         assert_eq!(field(base | (1 << 10)).1, 64, "first source bit six");
+        // Bit six belongs to the opcode of the forms that carry this operand,
+        // so it must not reach the register number. Reading it as one put every
+        // source of an instruction whose opcode sets it into the upper half of
+        // the register file and never the lower.
+        assert_eq!(field(base | (1 << 6)).1, 0, "first source ignores bit six");
 
         assert_eq!(field(base | (0x1f << 11)).2, 31, "second source low bits");
         assert_eq!(field(base | 0x3).2, 96, "second source high bits");
