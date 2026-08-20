@@ -442,6 +442,16 @@ fn guest_assembly() -> String {
     let _ = writeln!(out, "\tlis 1, {}", STACK >> 16);
     let _ = writeln!(out, "\tori 1, 1, {}", STACK & 0xffff);
 
+    // The floating point registers a function may use without saving, cleared
+    // the same way the model's context starts. Left alone they hold whatever
+    // this wrapper last put there while the model reads zero, which is a
+    // difference between the two harnesses rather than between the two models.
+    // A float compare against one of them is how that turned up.
+    out.push_str("\tli 0, 0\n\tstd 0, -8(1)\n");
+    for register in 0..=13 {
+        let _ = writeln!(out, "\tlfd {register}, -8(1)");
+    }
+
     for (at, register) in WATCHED.iter().enumerate() {
         let _ = writeln!(out, "\tld {register}, {}(29)", at * 8);
     }
