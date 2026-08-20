@@ -73,6 +73,24 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
                        uint32_t from) {
     xenolith_function target = xenolith_lookup(address);
     if (target == NULL) {
+        /* Reaching an address is the evidence that it is a function, and one
+         * run reaches many. Setting XENOLITH_TRACE_DISPATCH reports each and
+         * carries on without making the call, so a run collects the whole list
+         * rather than stopping at the first.
+         *
+         * Not making a call the title expected is a lie, like answering an
+         * import with nothing, and everything after the first one describes
+         * the answer given rather than the title. The list is what this is
+         * for. */
+        static int tracing = -1;
+        if (tracing < 0) {
+            tracing = getenv("XENOLITH_TRACE_DISPATCH") != NULL;
+        }
+        if (tracing) {
+            printf("dispatch %#010x from %#010x\n", address, from);
+            fflush(stdout);
+            return;
+        }
         fprintf(stderr,
                 "xenolith: dispatched from %#010x to %#010x, which is not a lifted function\n",
                 from, address);
@@ -250,6 +268,20 @@ static void tls_get_value(xenolith_context *ctx) {
     ctx->r[3] = slot < XENOLITH_TLS_SLOTS ? tls_values[slot] : 0;
 }
 
+/* How fast the console's timebase counts.
+ *
+ * Assumed. The rate is a property of the hardware and is written down nowhere
+ * this can read. What a title does with it is divide by it, so a wrong rate
+ * makes everything timed run at the wrong speed rather than not run.
+ */
+#define XENOLITH_TIMEBASE_HZ 50000000u
+
+static void query_performance_frequency(xenolith_context *ctx) {
+    assumed("the timebase counts at fifty million a second",
+            "the rate is a property of the hardware and is written down nowhere here");
+    ctx->r[3] = XENOLITH_TIMEBASE_HZ;
+}
+
 /* What the runtime answers to, by ordinal within a library.
  *
  * Each entry is here because a title reached it. Nothing is implemented ahead
@@ -264,6 +296,9 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
     switch (ordinal) {
     case 102:
         current_process_type(ctx);
+        return 1;
+    case 131:
+        query_performance_frequency(ctx);
         return 1;
     case 204:
         allocate_virtual_memory(ctx, base);

@@ -63,6 +63,14 @@ pub(crate) struct Args {
     /// evidence, and this is how to give it back.
     #[arg(long = "root", value_name = "ADDRESS")]
     pub(crate) roots: Vec<String>,
+
+    /// Read addresses to treat as functions from a file, one per line.
+    ///
+    /// A run of a built program with `XENOLITH_TRACE_DISPATCH` set reports
+    /// every address it wanted and could not reach. Feeding that back is how
+    /// one run's worth of evidence is used at once.
+    #[arg(long = "roots-from", value_name = "PATH")]
+    pub(crate) roots_from: Option<PathBuf>,
 }
 
 /// Returns a percentage with three decimal places, avoiding a division by zero.
@@ -541,7 +549,27 @@ fn lift_helper_entries<'a>(
 /// going, and some of those leave nothing to have found them by. Reaching one is
 /// the evidence, and this is how it is given back.
 fn named_roots(args: &Args) -> Result<Vec<u32>> {
-    args.roots.iter().map(|text| number(text)).collect()
+    let mut roots: Vec<u32> = args
+        .roots
+        .iter()
+        .map(|text| number(text))
+        .collect::<Result<Vec<_>>>()?;
+
+    if let Some(path) = &args.roots_from {
+        let text = std::fs::read_to_string(path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("reading roots from {}", path.display()))?;
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if !line.is_empty() {
+                roots.push(number(line)?);
+            }
+        }
+    }
+
+    roots.sort_unstable();
+    roots.dedup();
+    Ok(roots)
 }
 
 /// What lifting produced, in the form the report reads it.
