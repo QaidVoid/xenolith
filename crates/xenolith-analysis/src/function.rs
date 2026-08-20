@@ -359,7 +359,7 @@ fn edges_of(
 const LINK_REGISTER: u32 = 8;
 
 /// How many instructions from the start a prologue is looked for within.
-const PROLOGUE_WINDOW: u32 = 4;
+const PROLOGUE_WINDOW: u32 = 8;
 
 /// How many independent signals a prologue must show.
 ///
