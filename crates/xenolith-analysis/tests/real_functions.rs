@@ -9,6 +9,7 @@
 //! No game data is committed. The image is supplied through the environment and
 //! the test skips when it is absent.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use xenolith_analysis::{JumpTable, Origin, analyze};
@@ -520,6 +521,112 @@ fn recovered_tables_agree_with_the_reference() {
 ///
 /// Coverage on its own says how much was missed but nothing about what. These
 /// runs are what the shortfall is made of, so classifying the largest of them
+/// Reports how much of the shortfall could be code at all.
+///
+/// A run that does not decode is data, and no amount of looking for prologues
+/// will claim it. One that does is not therefore code either: a jump table sits
+/// in the same section as what it dispatches to, and every entry in one is an
+/// address that decodes as some instruction or other.
+fn report_decode_rates(image: &xenolith_xex::Image, runs: &[(u32, u32)]) {
+    let (low, high) = (0x8200_0000u32, 0x82c0_0000u32);
+    let mut tallies: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+    let mut addressy = 0u64;
+
+    for (start, end) in runs {
+        let (mut decodable, mut words) = (0u64, 0u64);
+        let mut address = *start;
+        while address < *end {
+            if let Ok(word) = image.u32(address) {
+                words += 1;
+                if !xenolith_ppc::Instruction::decode(word).is_unknown() {
+                    decodable += 1;
+                }
+                if word >= low && word < high && word % 4 == 0 {
+                    addressy += 1;
+                }
+            }
+            address = address.saturating_add(4);
+        }
+        let rate = (decodable * 100).checked_div(words).unwrap_or(0);
+        let bucket = match rate {
+            0..=49 => "under 50%",
+            50..=89 => "50 to 89%",
+            90..=98 => "90 to 98%",
+            _ => "99% or all",
+        };
+        let tally = tallies.entry(bucket).or_default();
+        tally.0 += words;
+        tally.1 += 1;
+    }
+
+    eprintln!("\nunclaimed words that are an address into this section {addressy}");
+    eprintln!("unclaimed words by how much of the run decodes");
+    for name in ["under 50%", "50 to 89%", "90 to 98%", "99% or all"] {
+        let (words, count) = tallies.get(name).copied().unwrap_or_default();
+        eprintln!("  {name:<12} {words:>8} words in {count:>5} runs");
+    }
+}
+
+/// Returns how much a word at an address looks like the start of a function.
+fn prologue_signals(image: &xenolith_xex::Image, address: u32) -> usize {
+    let mut signals = 0;
+
+    for step in 0..8u32 {
+        let Ok(word) = image.u32(address.wrapping_add(step * 4)) else {
+            break;
+        };
+        let decoded = xenolith_ppc::Instruction::decode(word);
+        if decoded.is_unknown() {
+            break;
+        }
+        if decoded.opcode() == xenolith_ppc::Opcode::Mfspr && decoded.spr() == 8 {
+            signals += 1;
+        }
+        if decoded.opcode() == xenolith_ppc::Opcode::Stwu
+            && decoded.rt() == 1
+            && decoded.ra() == 1
+            && decoded.displacement() < 0
+        {
+            signals += 1;
+        }
+    }
+
+    signals
+}
+
+/// Returns addresses the image points at that begin like a function and that no
+/// function claims.
+///
+/// A word anywhere in the file that names an address, where that address begins
+/// like a function, is evidence of a function twice over. Neither the pointer
+/// nor the shape would be enough alone.
+fn pointed_at_but_unclaimed(
+    image: &xenolith_xex::Image,
+    claimed: &std::collections::BTreeSet<u32>,
+) -> std::collections::BTreeSet<u32> {
+    let mut pointed = std::collections::BTreeSet::new();
+
+    for section in image.sections() {
+        let mut address = section.start;
+        let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+        while address < end {
+            if let Ok(word) = image.u32(address) {
+                let reaches_code = word % 4 == 0
+                    && !claimed.contains(&word)
+                    && image
+                        .section_at(word)
+                        .is_some_and(|section| section.kind.is_executable());
+                if reaches_code && prologue_signals(image, word) >= 2 {
+                    pointed.insert(word);
+                }
+            }
+            address = address.saturating_add(4);
+        }
+    }
+
+    pointed
+}
+
 /// is what turns a number into a reason.
 #[test]
 fn reports_the_largest_unclaimed_ranges() {
@@ -576,6 +683,8 @@ fn reports_the_largest_unclaimed_ranges() {
     let unclaimed_targets = targets.iter().filter(|t| !claimed.contains(t)).count();
     eprintln!("table targets    {:>10}", targets.len());
     eprintln!("  unclaimed      {unclaimed_targets:>10}");
+
+    report_decode_rates(&image, &runs);
 
     runs.sort_by_key(|(start, end)| std::cmp::Reverse(end - start));
 
