@@ -14,7 +14,12 @@ xenolith lift default.xex --out ./lifted
 | `lifted.<first>-<last>.c` | a translation unit, named after the address range of the functions in it |
 | `lifted.h` | every function declaration, written once |
 | `xenolith.h` | the runtime interface the emitted code is written against |
-| `Makefile` | builds every unit and archives the objects |
+| `xenolith.c` | a runtime implementing that interface and nothing more |
+| `unlifted.c` | a trap for every address that could not be lifted |
+| `table.c` | every lifted function, for an indirect branch to resolve against |
+| `main.c` | boots the runtime and enters the guest |
+| `image.bin` | the decoded image, which the runtime loads |
+| `Makefile` | builds every unit and links them into a program |
 
 A retail title emits hundreds of megabytes of C. As one file that is a
 translation unit no compiler can build in reasonable time, and a C build
@@ -40,11 +45,18 @@ The larger of the two test titles builds in about two and a half minutes wall
 clock on a machine with enough cores, from 91 units, at `-O2` with `-Wall
 -Wextra`, with no warnings.
 
-The makefile stops at `liblifted.a` rather than attempting a link. Nothing
-implements the runtime interface, so a link would fail, and reporting that
-failure as the build's outcome would say less than it seems to. An archive that
-succeeds states exactly what has been achieved: the code compiles, and it is
-waiting for a runtime.
+The makefile links into a program called `lifted`. That matters for more than
+tidiness: compiling a unit says it is well formed on its own, and only a link
+says twelve thousand functions agree with each other about what exists and that
+nothing is defined twice. Nothing else checks that.
+
+```sh
+./lifted image.bin 0x82090000
+```
+
+The program takes an image and an address, so you can enter anywhere rather than
+only at the recorded entry point. Entering a title at its entry point reaches
+something unimplemented and stops, naming the address.
 
 ## What the emitted C looks like
 
@@ -125,11 +137,11 @@ mnemonic that stopped it, which is where to look once you want to know why.
 
 ## What it cannot do yet
 
-The emitted program calls a runtime that does not exist. `xenolith.h` declares
-the processor context, big endian memory accessors, and the entry points the
-environment has to provide: a trap, an indirect dispatch for a branch whose
-target was not known at lift time, an import call, a reserved load and a
-conditional store, and the time base.
+The runtime that ships with it maps guest memory, loads the image, resolves an
+indirect branch against the table, and reports anything it cannot do. What it
+does not do is everything the console provided: no import is serviced, no thread
+exists, nothing draws.
 
-Implementing those is the work that turns this into something that runs, and it
-has not been started.
+So the program links and runs and stops at the first call into the operating
+system. Implementing those calls is the work that turns this into something that
+plays a game, and it has not been started.

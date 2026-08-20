@@ -29,12 +29,15 @@ exercise them, including the console's own vector forms. What is left is 193
 functions, every one of them stopped by the Direct3D vertex pack or unpack,
 whose type field selects a format this project has no independent reading of.
 
-What that leaves out is the part that matters for running anything. The emitted C
-is written against a runtime interface this project declares and does not
-implement: no guest memory is mapped, no import does anything, no threads exist.
-Around 550 addresses are declared without a definition, mostly functions that
-could not be lifted plus the register save and restore helpers. So it compiles
-and it does not link, which is an honest description of how far this has got.
+It links, and running it gets as far as the first call into the operating
+system. A runtime ships with it that maps guest memory, loads the image, and
+implements what the interface declares. What it does not do is service an
+import, create a thread, or draw anything, so a title entered at its recorded
+entry point reaches something unimplemented and stops there, naming it.
+
+That is the honest description of how far this has got: the translation is
+complete enough to link twelve thousand functions and run them, and there is no
+environment underneath for them to run in.
 
 Two registers are modelled as storage whose architectural effects are not
 honored: masking interrupts does nothing, and a rounding mode written to the
@@ -42,10 +45,10 @@ floating point status register does not change how a later operation rounds.
 Both are stated in the runtime interface beside their declaration rather than
 left to be discovered.
 
-The output is a directory of translation units and a makefile that builds them.
-The larger title emits 91 units and takes a few minutes to compile with
-`make -j`, which is the shape the output has to be in for a build to use more
-than one core.
+The output is a directory of translation units, the runtime, the decoded image,
+and a makefile that links them into a program. The larger title emits 92 units
+and takes a few minutes with `make -j`, which is the shape the output has to be
+in for a build to use more than one core.
 
 ## What is here
 
@@ -132,6 +135,7 @@ xenolith disasm   default.xex --start 0x82090000 --length 256
 xenolith analyze  default.xex
 xenolith lift     default.xex --out ./lifted --blockers
 make -C ./lifted -j
+./lifted/lifted ./lifted/image.bin 0x82090000
 ```
 
 A retail XEX is encrypted, and this project ships no key. Supply one through
@@ -165,8 +169,9 @@ Run those with `--release`. In a debug build they take minutes.
 
 Stated plainly, because a coverage figure implies more than it means:
 
-- **It cannot run anything.** The runtime interface is a declaration. An import
-  is emitted as a call naming a library and an ordinal, and nothing answers it.
+- **It cannot play a game.** The runtime that ships with it maps memory and
+  links, and implements nothing the console provided. An import is a call naming
+  a library and an ordinal, and the runtime reports it and stops.
 - **The console's vector extension has no execution oracle.** No assembler
   accepts VMX128 and no emulator implements it, so those instructions are checked
   against an emitted corpus and by reading, and nothing more.

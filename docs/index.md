@@ -9,11 +9,13 @@ It turns a retail game into C that compiles. It does not yet turn one into a
 game you can play, and the gap between those two things is worth being precise
 about.
 
-The emitted C is written against a runtime interface this project declares and
-does not implement. No guest memory is mapped, no import does anything, no
-threads exist. Around 550 addresses are declared without a definition, mostly
-functions that could not be lifted plus the register save and restore helpers.
-So it compiles, and it does not link.
+It links, and running it gets as far as the first call into the operating
+system. A runtime ships with it that maps guest memory, loads the image, and
+implements what the interface declares. What it does not do is service an
+import, create a thread, or draw anything.
+
+So the translation is complete enough to link twelve thousand functions and run
+them, and there is no environment underneath for them to run in.
 
 Two registers are modelled as storage whose architectural effects are not
 honored, which is a deliberate exception to the rule that nothing is
