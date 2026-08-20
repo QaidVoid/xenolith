@@ -39,8 +39,15 @@ than a third of a title's functions save registers that way, which meant the
 program stopped on the first thing it did. Each entry a caller uses is now
 lifted from where the caller enters it.
 
-A runtime ships with it that maps guest memory, loads the image, and
-implements what the interface declares. It can also be asked what a title needs:
+A runtime ships with it that maps guest memory, loads the image, gives the guest
+a stack, and answers the nine kernel entry points a title's startup reaches:
+reserving and committing memory, the process type, a critical section, thread
+local storage, and the privilege check. Each rests on a documented shape or on
+this runtime having one thread, and the two that rest on neither say so the
+first time they answer.
+
+Both titles now run their whole startup and stop at a computed address no
+discovered function answers to, which is the next thing in the way. It can also be asked what a title needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
 its arguments are in, and carries on as though it had returned nothing. Both
 titles ask for the same nine kernel entry points in the same order before they
@@ -48,9 +55,8 @@ go anywhere else, which is the C runtime starting up and is not per title.
 
 That trace is a diagnostic and not an environment. A title told every import
 returned zero believes it, so the run after the first one is a list of what was
-wanted rather than a title running. What it does not do is service an
-import, create a thread, or draw anything, so a title entered at its recorded
-entry point reaches something unimplemented and stops there, naming it.
+wanted rather than a title running. What it does not do is create a thread or draw
+anything, and it answers nothing beyond what a title has actually reached.
 
 That is the honest description of how far this has got: the translation is
 complete enough to link twelve thousand functions and run them, and there is no
