@@ -10,11 +10,25 @@
 //! prints the values it extracted. Comparing those values catches a field read
 //! from the wrong place, which comparing names cannot.
 //!
-//! Operand order is deliberately not compared. This crate prints operands in
-//! encoding order and an assembler prints them in the order it accepts, and the
-//! two differ for whole families. What is compared is the multiset of values,
-//! which is order independent and still pins every field.
+//! Two comparisons run here, and they reach different things.
+//!
+//! The first compares the multiset of values, sorted. That works over every
+//! encoding the oracle can name, including the ones it spells with an extended
+//! mnemonic that folds an operand into the name, because a sorted comparison
+//! does not care which order the two printed them in.
+//!
+//! Its blind spot is exactly that. It cannot see operands printed in the wrong
+//! order, and for a long time this crate printed the logical operations and the
+//! shifts with their source and target the wrong way round. Every value was
+//! present, so the sorted comparison agreed, and the text said an instruction
+//! wrote the register it read.
+//!
+//! So the second compares the operand text exactly, in order, restricted to
+//! encodings where the oracle chose the same mnemonic. Agreeing on the name
+//! means neither folded an operand into it, and two disassemblers naming the
+//! same instruction should name its operands in the same order.
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::process::Command;
 
@@ -172,6 +186,74 @@ pub(crate) fn values(text: &str) -> Vec<u64> {
     found
 }
 
+/// Returns the operand list alone, in a form that only order can change.
+///
+/// Three things are normalized away, none of which is a claim about the
+/// encoding. Spacing, since the two disassemblers pad differently. The note the
+/// oracle writes in angle brackets after a target it recognizes, which is about
+/// the file rather than the instruction. And how a number is spelled: one side
+/// pads an address to eight digits and the other does not, so every literal is
+/// reduced to its value, narrowed to the width the fields really have.
+///
+/// A number that follows a letter is part of a register name and is left alone.
+pub(crate) fn operand_text(text: &str) -> String {
+    let body = text
+        .split_once(char::is_whitespace)
+        .map_or("", |(_, rest)| rest);
+    let body = body.split('<').next().unwrap_or("");
+    let bytes = body.as_bytes();
+
+    let mut out = String::new();
+    let mut at = 0;
+    let mut previous = b',';
+
+    while at < bytes.len() {
+        let negative = bytes[at] == b'-';
+        let start = at + usize::from(negative);
+        let begins = start < bytes.len()
+            && bytes[start].is_ascii_digit()
+            && !previous.is_ascii_alphanumeric();
+        if !begins {
+            if !bytes[at].is_ascii_whitespace() {
+                out.push(char::from(bytes[at]));
+                previous = bytes[at];
+            }
+            at += 1;
+            continue;
+        }
+
+        let (radix, digits) = if bytes[start..].starts_with(b"0x") {
+            (16, start + 2)
+        } else {
+            (10, start)
+        };
+        let mut end = digits;
+        while end < bytes.len() && (bytes[end] as char).is_digit(radix) {
+            end += 1;
+        }
+        match u64::from_str_radix(&body[digits..end], radix) {
+            Ok(value) => {
+                let value = if negative {
+                    0u64.wrapping_sub(value)
+                } else {
+                    value
+                };
+                let _ = write!(out, "{:x}", value & 0xffff_ffff);
+                previous = b'0';
+            }
+            Err(_) => out.push_str(&body[at..end]),
+        }
+        at = end;
+    }
+
+    out
+}
+
+/// Returns the mnemonic alone.
+pub(crate) fn mnemonic_of(text: &str) -> &str {
+    text.split_whitespace().next().unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +386,106 @@ mod tests {
             "operand values differ from the oracle for {} encodings",
             disagreements.len()
         );
+    }
+
+    /// Compares operand text, in order, against the oracle over real code.
+    ///
+    /// Restricted to encodings the oracle named the same way this crate did.
+    /// A different name means one of the two folded an operand into it, and
+    /// then the operand lists legitimately differ in count and in order. The
+    /// same name leaves nothing to explain a difference.
+    #[test]
+    fn operand_order_agrees_with_the_oracle() {
+        let objdump = require_oracle!();
+
+        let Ok(path) = std::env::var("XENOLITH_PPC_CODE") else {
+            eprintln!("skipping: XENOLITH_PPC_CODE names no code to compare over");
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skipping: {path} could not be read");
+            return;
+        };
+
+        let mut seen = std::collections::BTreeSet::new();
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .filter(|word| seen.insert(*word))
+            .take(20_000)
+            .collect();
+
+        let decoded = decode(&objdump, &words);
+        assert!(!decoded.is_empty(), "the oracle decoded nothing");
+
+        let mut compared = 0u32;
+        let mut named_apart = 0u32;
+        let mut disagreements = Vec::new();
+
+        for entry in &decoded {
+            if entry.text.starts_with(".long") || entry.text.is_empty() {
+                continue;
+            }
+            let instruction = Instruction::decode(entry.word);
+            if instruction.is_unknown() {
+                continue;
+            }
+
+            let ours = instruction.render(entry.address).to_string();
+            if mnemonic_of(&ours) != mnemonic_of(&entry.text) {
+                named_apart += 1;
+                continue;
+            }
+
+            compared += 1;
+            if operand_text(&ours) != operand_text(&entry.text) && disagreements.len() < 10 {
+                disagreements.push(format!(
+                    "{:08x}  ours: {ours:<34} theirs: {}",
+                    entry.word, entry.text
+                ));
+            }
+        }
+
+        eprintln!("named the same        {compared:>8}");
+        eprintln!("named differently     {named_apart:>8}");
+        eprintln!("disagreeing           {:>8}", disagreements.len());
+        for line in &disagreements {
+            eprintln!("  {line}");
+        }
+
+        assert!(
+            compared > 1_000,
+            "too few encodings named alike to say anything"
+        );
+        assert!(
+            disagreements.is_empty(),
+            "operands are printed in a different order from the oracle for {} encodings",
+            disagreements.len()
+        );
+    }
+
+    #[test]
+    fn operand_text_keeps_only_what_order_can_change() {
+        // Spacing differs between the two and says nothing.
+        assert_eq!(
+            operand_text("ori     r3,r4,5"),
+            operand_text("ori r3, r4, 5")
+        );
+        // One side pads an address and the other does not.
+        assert_eq!(
+            operand_text("bl 0x002f0070"),
+            operand_text("bl      0x2f0070 <thing>")
+        );
+        // A negative displacement and its unsigned spelling are one value.
+        assert_eq!(
+            operand_text("stw r14, -152(r1)"),
+            operand_text("stw r14,4294967144(r1)")
+        );
+        // The digits in a register name are part of the name.
+        assert_eq!(operand_text("ori r3, r4, 5"), "r3,r4,5");
+        assert_eq!(operand_text("blr"), "");
+        // Order is the whole point, so it has to survive all of that.
+        assert_ne!(operand_text("ori r3, r4, 5"), operand_text("ori r4, r3, 5"));
     }
 
     #[test]
