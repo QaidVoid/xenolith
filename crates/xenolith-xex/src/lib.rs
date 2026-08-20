@@ -15,6 +15,7 @@ extern crate alloc;
 mod container;
 mod crypto;
 mod error;
+mod exports;
 mod headers;
 mod image;
 mod imports;
@@ -24,6 +25,7 @@ mod security;
 pub use container::{Container, Format, OptionalHeader, OptionalHeaderKey, OptionalHeaderValue};
 pub use crypto::KeyMaterial;
 pub use error::{Error, Result};
+pub use exports::{Export, ExportKind, export};
 pub use headers::{
     BasicBlock, CompressionType, EncryptionType, ExecutionInfo, FileFormatInfo, ImportLibrary,
     NormalCompression, Version, keys,
