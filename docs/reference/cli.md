@@ -90,6 +90,7 @@ xenolith analyze default.xex --tables
 |---|---|
 | `--out <PATH>` | directory to write the emitted C into, required |
 | `--part-size <BYTES>` | bytes of C per translation unit, default 4 MiB |
+| `--root ADDRESS` | treat an address as a function, for one a built program reached and discovery did not |
 | `--blockers` | list the instructions that stopped functions, most blocking first |
 | `--unlifted` | list every function that was not lifted, with what stopped it |
 

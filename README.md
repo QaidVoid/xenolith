@@ -46,8 +46,16 @@ local storage, and the privilege check. Each rests on a documented shape or on
 this runtime having one thread, and the two that rest on neither say so the
 first time they answer.
 
-Both titles now run their whole startup and stop at a computed address no
-discovered function answers to, which is the next thing in the way. It can also be asked what a title needs:
+Both titles run their whole startup. Handed the table of static constructors a
+title calls through, one runs all 217 of them and stops at a kernel call it had
+never got far enough to make.
+
+That table has to be handed over, with `lift --root`, and the reason is worth
+stating. Its entries are functions with no prologue, named only from a run of
+pointers. Claiming every unclaimed address a word in the image names would find
+them, and would also claim 10,269 coincidences in one title, since any aligned
+word in range looks like a pointer to code. That a program reached one is
+evidence; that a number looks like an address is not. It can also be asked what a title needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
 its arguments are in, and carries on as though it had returned nothing. Both
 titles ask for the same nine kernel entry points in the same order before they
