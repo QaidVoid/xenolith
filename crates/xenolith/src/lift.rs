@@ -52,6 +52,17 @@ pub(crate) struct Args {
     /// List every function that was not lifted, with what stopped it.
     #[arg(long)]
     pub(crate) unlifted: bool,
+
+    /// Treat an address as a function, for one a built program reached and
+    /// discovery did not.
+    ///
+    /// A program that dispatches to an address nothing claimed reports where it
+    /// was going. Some of those are functions that leave nothing to have found
+    /// them by: no prologue, and named only from a table of pointers that
+    /// cannot be told apart from any other run of numbers. Reaching one is the
+    /// evidence, and this is how to give it back.
+    #[arg(long = "root", value_name = "ADDRESS")]
+    pub(crate) roots: Vec<String>,
 }
 
 /// Returns a percentage with three decimal places, avoiding a division by zero.
@@ -368,7 +379,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     let loaded = args.source.load()?;
     let image = loaded.image;
     let imports = loaded.imports?;
-    let program = analyze(&image, &[]);
+    let program = analyze(&image, &named_roots(args)?);
 
     if program.function_count() == 0 {
         return Err(miette!(
@@ -522,6 +533,15 @@ fn lift_helper_entries<'a>(
     }
 
     Ok(entries)
+}
+
+/// Returns the addresses named as roots on the command line.
+///
+/// A program that dispatches to an address nothing claimed reports where it was
+/// going, and some of those leave nothing to have found them by. Reaching one is
+/// the evidence, and this is how it is given back.
+fn named_roots(args: &Args) -> Result<Vec<u32>> {
+    args.roots.iter().map(|text| number(text)).collect()
 }
 
 /// What lifting produced, in the form the report reads it.
