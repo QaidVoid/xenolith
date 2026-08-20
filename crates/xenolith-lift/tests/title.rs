@@ -26,7 +26,7 @@ use xenolith_xex::{Container, Image, KeyMaterial};
 /// Every one costs an emulator start and a host process, so this is a sample
 /// rather than a sweep. What makes it worth having is that the sample is drawn
 /// from code nobody here wrote.
-const SAMPLE: usize = 400;
+const SAMPLE: usize = 2000;
 
 /// The registers seeded before a call and read back after it.
 ///
@@ -240,6 +240,20 @@ fn guest_assembly() -> String {
     out.push_str("\tstd 28, 96(1)\n\tstd 29, 104(1)\n\tstd 30, 112(1)\n\tstd 31, 120(1)\n");
     out.push_str("\tmr 31, 3\n\tmr 30, 4\n\tmr 29, 5\n");
 
+    // Everything the calling convention lets a function use without saving is
+    // cleared, not just the registers being watched. The model starts from a
+    // context of zeroes, and any register left holding whatever this wrapper
+    // happened to put there is a difference between the two harnesses. A stack
+    // probe out of one title read the count register scratch and disagreed for
+    // exactly that reason.
+    // The second is this program's own table pointer, which the driver needs
+    // back before it can so much as print, so it goes on the real stack until
+    // the real stack pointer is back too.
+    out.push_str("\tstd 2, 88(1)\n");
+    for register in [0, 2, 11, 12] {
+        let _ = writeln!(out, "\tli {register}, 0");
+    }
+
     // The real stack pointer is kept aside and swapped for the guest one, so
     // that what the function spills lands somewhere the model has too. The
     // callee restores it, since every register from fourteen up is its to save.
@@ -252,7 +266,7 @@ fn guest_assembly() -> String {
     }
     out.push_str("\tli 0, 0\n\tmtxer 0\n\tmtcr 0\n");
     out.push_str("\tmtctr 31\n\tbctrl\n");
-    out.push_str("\tmr 1, 28\n");
+    out.push_str("\tmr 1, 28\n\tld 2, 88(1)\n");
 
     for (at, register) in WATCHED.iter().enumerate() {
         let _ = writeln!(out, "\tstd {register}, {}(30)", at * 8);
@@ -529,7 +543,12 @@ fn build_model(directory: &Path, image: &Image, chosen: &[(u32, String)]) -> Opt
 /// A function handed a state it was never called with can loop forever waiting
 /// on a count that never reaches its end, and one that does has to be given up
 /// on rather than allowed to stop the whole comparison.
-const PATIENCE: &str = "5";
+///
+/// Generous, because a real countdown seeded with a pointer runs to hundreds of
+/// millions of turns, and the compiled model is slower at that than the
+/// emulator is. Cutting it short there would report a defect where there is
+/// only a slow loop.
+const PATIENCE: &str = "25";
 
 /// Runs one address on one side, or nothing when that side could not.
 fn once(
