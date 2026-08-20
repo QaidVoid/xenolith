@@ -54,6 +54,19 @@ const SCRATCH_SIZE: usize = 256;
 /// backwards off a pointer it was handed lands somewhere mapped.
 const SCRATCH_SPAN: usize = 64 << 20;
 
+/// Where the stack the called function is given starts.
+///
+/// A real function spills to its stack and reads back what it spilled, and one
+/// given no stack at all reads whatever the two harnesses happened to leave
+/// where it looked. That is not a disagreement about the instruction set: the
+/// hardware side was reading its own real stack while the model read guest
+/// address zero. Both are pointed at the same swept guest address instead.
+///
+/// High enough that a function indexing below it stays mapped, clear of the
+/// scratch and of the image, and with its top half below the sign bit so that
+/// the two instructions loading it need no more than that.
+const STACK: u32 = 0x4000_0000;
+
 /// The lowest guest address mapped on the hardware side.
 ///
 /// Not zero, since the kernel refuses to map the first pages, and a null
@@ -227,11 +240,19 @@ fn guest_assembly() -> String {
     out.push_str("\tstd 28, 96(1)\n\tstd 29, 104(1)\n\tstd 30, 112(1)\n\tstd 31, 120(1)\n");
     out.push_str("\tmr 31, 3\n\tmr 30, 4\n\tmr 29, 5\n");
 
+    // The real stack pointer is kept aside and swapped for the guest one, so
+    // that what the function spills lands somewhere the model has too. The
+    // callee restores it, since every register from fourteen up is its to save.
+    let _ = writeln!(out, "\tmr 28, 1");
+    let _ = writeln!(out, "\tlis 1, {}", STACK >> 16);
+    let _ = writeln!(out, "\tori 1, 1, {}", STACK & 0xffff);
+
     for (at, register) in WATCHED.iter().enumerate() {
         let _ = writeln!(out, "\tld {register}, {}(29)", at * 8);
     }
     out.push_str("\tli 0, 0\n\tmtxer 0\n\tmtcr 0\n");
     out.push_str("\tmtctr 31\n\tbctrl\n");
+    out.push_str("\tmr 1, 28\n");
 
     for (at, register) in WATCHED.iter().enumerate() {
         let _ = writeln!(out, "\tstd {register}, {}(30)", at * 8);
@@ -337,6 +358,7 @@ int main(int count, char **arguments) {
     int shape = count > 3 ? atoi(arguments[3]) : 0;
     if (shape < 0 || shape >= SHAPE_COUNT) { return 1; }
     static xenolith_context state;
+    state.r[1] = STACK_TOP;
     for (int i = 0; i < WATCHED_COUNT; i++) {
         state.r[WATCHED_LIST[i]] = seeds[shape][i];
     }
@@ -380,6 +402,7 @@ fn filled(template: &str, load: u32, span: usize) -> String {
         .replace("GUEST_LOW", &format!("0x{GUEST_LOW:x}"))
         .replace("GUEST_SPAN", &format!("0x{GUEST_SPAN:x}"))
         .replace("SCRATCH_SIZE", &SCRATCH_SIZE.to_string())
+        .replace("STACK_TOP", &format!("0x{STACK:x}"))
         .replace("SCRATCH_PATTERN", &format!("{{{}}}", pattern.join(", ")))
         .replace("SEED_VALUES", &format!("{{{}}}", sets.join(", ")))
         .replace("SHAPE_COUNT", &SHAPES.to_string())

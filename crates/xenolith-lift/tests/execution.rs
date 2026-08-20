@@ -573,31 +573,40 @@ fn on_the_model(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> Result<Vec<Sta
 /// and nothing carries out unless something is near the top of its range.
 /// The last register always holds the scratch memory, so a load or a store has
 /// somewhere to reach that both sides agree on.
-const SEEDS: [[u64; WATCHED_COUNT]; 4] = [
+const SEEDS: [[u64; WATCHED_COUNT]; 5] = [
+    // The first register is the one most subjects write. It held zero in every
+    // row once, which meant an instruction that reads what it writes was being
+    // checked against a destination that was always already empty. Preserving
+    // the high half and clearing it look identical from there, and an insert
+    // that wrongly cleared it went unseen until a real title exercised one.
     [
-        0,
+        0xaaaa_aaaa_bbbb_bbbb,
         0xdead_beef_cafe_babe,
         0x0123_4567_89ab_cdef,
         MEMORY_BASE as u64,
     ],
     [
-        0,
+        0x0000_0001_0000_0002,
         0x0000_0000_0000_0007,
         0x0000_0000_0000_0003,
         MEMORY_BASE as u64,
     ],
     [
-        0,
+        0xffff_ffff_0000_0000,
         0xffff_ffff_ffff_ffff,
         0x0000_0000_0000_0001,
         MEMORY_BASE as u64,
     ],
     [
-        0,
+        0x0f0f_0f0f_f0f0_f0f0,
         0x8000_0000_8000_0000,
         0xffff_ffff_ffff_fffe,
         MEMORY_BASE as u64,
     ],
+    // Both sources zero. Subtracting zero from zero carries, and the result is
+    // zero too, so every way of reading the carry off the result alone gets it
+    // wrong here and nowhere else. No other row has a zero source.
+    [0x0000_0000_ffff_ffff, 0, 0, MEMORY_BASE as u64],
 ];
 
 /// What the scratch memory holds before each run.
@@ -647,6 +656,17 @@ fn subjects() -> Vec<(u32, &'static str)> {
         (extended(a, b, 0, 104, 0), "neg"),
         (extended(a, b, c, 10, 0), "addc"),
         (extended(a, b, c, 8, 0), "subfc"),
+        // Subtracting a value from itself carries, and the result is zero, so
+        // reading the carry off the result having come out below an operand
+        // reports the opposite. The rest of the family adds the carry as a
+        // third term, where the same reasoning fails the same way.
+        (extended(a, b, b, 8, 0), "subfc from itself"),
+        (extended(a, b, c, 138, 0), "adde"),
+        (extended(a, b, 0, 202, 0), "addze"),
+        (extended(a, b, 0, 234, 0), "addme"),
+        (extended(a, b, c, 136, 0), "subfe"),
+        (extended(a, b, 0, 200, 0), "subfze"),
+        (extended(a, b, 0, 232, 0), "subfme"),
         // The logical and shift operations name their destination in the field
         // the arithmetic uses for a source.
         (extended(b, a, c, 28, 0), "and"),
@@ -695,11 +715,24 @@ fn subjects() -> Vec<(u32, &'static str)> {
         ),
         (
             (21 << 26) | (b << 21) | (a << 16) | (8 << 11) | (4 << 6) | (20 << 1),
+            "rlwinm across",
+        ),
+        // A mask whose end comes before its beginning really does wrap, and
+        // then it reaches into the high half of the register. The subject that
+        // used to carry this name had a mask running four to twenty, which does
+        // not wrap at all, so nothing here tested the case until a real title
+        // did.
+        (
+            (21 << 26) | (b << 21) | (a << 16) | (27 << 6) | (18 << 1),
             "rlwinm wrap",
         ),
         (
             (20 << 26) | (b << 21) | (a << 16) | (4 << 11) | (8 << 6) | (24 << 1),
             "rlwimi",
+        ),
+        (
+            (20 << 26) | (b << 21) | (a << 16) | (27 << 6) | (18 << 1),
+            "rlwimi wrap",
         ),
         (
             (23 << 26) | (b << 21) | (a << 16) | (c << 11) | (29 << 1),
@@ -1304,7 +1337,32 @@ fn sequences() -> Vec<(&'static str, Vec<u32>)> {
     let load = |register: u32, value: u32| (14 << 26) | (register << 21) | (value & 0xffff);
     let ret = 0x4e80_0020;
 
+    // A carry produced by one instruction and consumed by the next. Run alone,
+    // every one of these starts with the carry clear, so the term that adds it
+    // is always adding nothing and the case where the pair carries first can
+    // never come up.
+    let extend = |target: u32, first: u32, second: u32, code: u32| {
+        (31 << 26) | (target << 21) | (first << 16) | (second << 11) | (code << 1)
+    };
+    let carry_out = extend(5, 4, 4, 8);
+
     vec![
+        (
+            "carry into an add",
+            vec![carry_out, extend(3, 4, 6, 138), ret],
+        ),
+        (
+            "carry into a subtract",
+            vec![carry_out, extend(3, 4, 6, 136), ret],
+        ),
+        (
+            "carry into an extend by zero",
+            vec![carry_out, extend(3, 4, 0, 202), ret],
+        ),
+        (
+            "carry into an extend by minus one",
+            vec![carry_out, extend(3, 4, 0, 234), ret],
+        ),
         (
             "branch when greater",
             vec![compare(7, 7), branch(12, 29, 8), load(3, 99), ret],
