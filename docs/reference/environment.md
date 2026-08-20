@@ -4,6 +4,7 @@
 
 | variable | what it names |
 |---|---|
+| `XENOLITH_TRACE_DISPATCH` | set to report every address a built title dispatched to and could not reach, rather than stopping at the first |
 | `XENOLITH_TRACE_IMPORTS` | set to report every import a built title reaches, rather than stopping at the first |
 | `XENOLITH_TITLE_SAMPLE` | how many functions the real function differential runs, for a deeper sweep |
 | `XENOLITH_XEX_KEY` | the static key, as 32 hexadecimal digits |

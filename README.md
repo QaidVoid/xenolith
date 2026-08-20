@@ -50,12 +50,24 @@ Both titles run their whole startup. Handed the table of static constructors a
 title calls through, one runs all 217 of them and stops at a kernel call it had
 never got far enough to make.
 
-That table has to be handed over, with `lift --root`, and the reason is worth
-stating. Its entries are functions with no prologue, named only from a run of
-pointers. Claiming every unclaimed address a word in the image names would find
-them, and would also claim 10,269 coincidences in one title, since any aligned
-word in range looks like a pointer to code. That a program reached one is
-evidence; that a number looks like an address is not. It can also be asked what a title needs:
+Those constructors have to be handed over, and the reason is worth stating.
+They are functions with no prologue, named only from a run of pointers. Claiming
+every unclaimed address a word in the image names would find them and 10,269
+coincidences besides, since any aligned word in range looks like a pointer to
+code. Claiming every entry of every run of such words does no better: of those,
+53 percent are function starts, a fifth point inside a function the way a jump
+table entry does, and claiming one of those would split the function it lands
+in.
+
+So the evidence used is that a program reached the address. Running a built
+title with `XENOLITH_TRACE_DISPATCH` reports every address it wanted and could
+not reach, and `lift --roots-from` takes that back. The two alternate until a
+round finds nothing new, which for one title is three rounds: two addresses,
+then a hundred and twenty, then none.
+
+At the end of that a title lifts 14,474 functions, runs every static constructor
+it has, and stops inside a function that uses the Direct3D vertex unpack. The
+startup path is finished; what stops it now is the coverage gap named above. It can also be asked what a title needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
 its arguments are in, and carries on as though it had returned nothing. Both
 titles ask for the same nine kernel entry points in the same order before they
