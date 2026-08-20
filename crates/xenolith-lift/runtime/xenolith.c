@@ -153,6 +153,12 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* No memory left. */
 #define XENOLITH_STATUS_NO_MEMORY 0xC0000017u
 
+/* What starting networking reports where there is no network to start. */
+#define XENOLITH_STATUS_NO_NETWORK 0xC00000BEu
+
+/* What looking something up reports where there is nothing to look in. */
+#define XENOLITH_STATUS_NOT_FOUND 0xC0000225u
+
 /* Reserving and committing guest memory.
  *
  * The documented shape is what is implemented: two pointers into guest memory
@@ -558,6 +564,77 @@ static void create_waitable(xenolith_context *ctx, uint8_t *base, enum object_ki
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
 
+/* Turning a count of time into the parts of a date.
+ *
+ * The console counts hundreds of nanoseconds from the start of 1601, and this
+ * is the documented arithmetic for taking that apart: the days are separated
+ * from the time of day, the day is walked forward through four hundred year
+ * cycles, and what is left is the month and the day of it.
+ *
+ * Nothing here is assumed. A calendar is a definition rather than a property of
+ * the hardware.
+ */
+static void time_to_fields(xenolith_context *ctx, uint8_t *base) {
+    static const uint16_t before[2][13] = {
+        {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365},
+        {0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366},
+    };
+
+    uint32_t from = (uint32_t)ctx->r[3];
+    uint32_t into = (uint32_t)ctx->r[4];
+    if (from == 0 || into == 0) {
+        return;
+    }
+
+    uint64_t ticks = xenolith_load64(base, from);
+    uint64_t milliseconds = ticks / 10000u;
+    uint64_t days = milliseconds / 86400000u;
+    uint32_t rest = (uint32_t)(milliseconds % 86400000u);
+
+    /* The first of January 1601 was a Monday. */
+    uint32_t weekday = (uint32_t)((days + 1) % 7);
+
+    uint32_t year = 1601;
+    for (;;) {
+        int leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        uint32_t length = leap ? 366u : 365u;
+        if (days < length) {
+            break;
+        }
+        days -= length;
+        year++;
+    }
+
+    int leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    uint32_t month = 1;
+    while (month < 12 && days >= before[leap][month]) {
+        month++;
+    }
+    uint32_t day = (uint32_t)days - before[leap][month - 1] + 1;
+
+    const uint16_t fields[] = {
+        (uint16_t)year,
+        (uint16_t)month,
+        (uint16_t)day,
+        (uint16_t)(rest / 3600000u),
+        (uint16_t)(rest / 60000u % 60u),
+        (uint16_t)(rest / 1000u % 60u),
+        (uint16_t)(rest % 1000u),
+        (uint16_t)weekday,
+    };
+    for (uint32_t at = 0; at < sizeof fields / sizeof *fields; at++) {
+        xenolith_store16(base, into + at * 2, fields[at]);
+    }
+}
+
+/* What the console reports itself as.
+ *
+ * The title says what it wants: it compares what it is told against a number
+ * written into its own code and goes elsewhere when it is smaller. So this is
+ * read out of the title rather than assumed, and is the least it will accept.
+ */
+#define XENOLITH_SYSTEM_VERSION 0x200a3200u
+
 /* What the runtime answers to, by ordinal within a library.
  *
  * Each entry is here because a title reached it. Nothing is implemented ahead
@@ -566,6 +643,22 @@ static void create_waitable(xenolith_context *ctx, uint8_t *base, enum object_ki
  */
 static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
                     uint32_t ordinal) {
+    if (strcmp(library, "xam.xex") == 0) {
+        switch (ordinal) {
+        case 1:
+        case 51:
+            /* Starting networking, of which there is none here. Saying it
+             * started would send a title looking for one. */
+            ctx->r[3] = XENOLITH_STATUS_NO_NETWORK;
+            return 1;
+        case 642:
+            ctx->r[3] = XENOLITH_SYSTEM_VERSION;
+            return 1;
+        default:
+            return 0;
+        }
+    }
+
     if (strcmp(library, "xboxkrnl.exe") != 0) {
         return 0;
     }
@@ -653,6 +746,22 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
     }
     case 303:
         initialize_critical_section(ctx, base);
+        return 1;
+    case 405:
+    case 407:
+        /* Asking for a module by name, and then for something inside it by
+         * ordinal. Nothing is loaded here but the title, so there is no module
+         * to hand back and no address inside one to find. The title reads a
+         * failure and takes the path it has for not finding one. */
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return 1;
+    case 473:
+        /* Telling the graphics hardware where to find something. There is no
+         * graphics hardware, so there is nothing to tell. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 320:
+        time_to_fields(ctx, base);
         return 1;
     case 321: {
         pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
