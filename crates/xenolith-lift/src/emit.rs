@@ -1228,6 +1228,12 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
     // The record bit compares the result against zero afterwards, so the value
     // is computed first and the comparison appended.
     //
+    // Three immediate forms carry no record bit and record anyway, the record
+    // being part of what the opcode is rather than a field inside it. Left to
+    // the bit, they would quietly never set the field, which is how this was
+    // found: a countdown loop tested the field its own subtraction was supposed
+    // to have written and never saw it change.
+    //
     // A conditional store carries a set low bit as part of its spelling rather
     // than as a record bit, and it writes the condition field itself from
     // whether the store happened. Letting the comparison run as well would
@@ -1237,7 +1243,10 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         .form()
         .is_some_and(xenolith_ppc::Form::has_record_bit)
         && instruction.record_bit()
-        || matches!(instruction.opcode(), Opcode::Andi | Opcode::Andis))
+        || matches!(
+            instruction.opcode(),
+            Opcode::Andi | Opcode::Andis | Opcode::AddicRc
+        ))
         && !matches!(instruction.opcode(), Opcode::Stwcx | Opcode::Stdcx);
 
     let recorded = match instruction.opcode() {
@@ -2319,46 +2328,47 @@ fn terminator_code(
 ) {
     let flow = instruction.flow(address);
     let next = address.saturating_add(INSTRUCTION_SIZE);
+    if flow.kind == FlowKind::Continue {
+        return;
+    }
 
-    match flow.kind {
-        FlowKind::Return => out.push_str("    return;\n"),
+    // What the branch does when it is taken, written before the test rather
+    // than inside each arm of it. The condition is wrapped around this once, so
+    // a form that decrements the count register decrements it exactly once
+    // however the test comes out.
+    let taken = match flow.kind {
+        FlowKind::Return => "return;".to_owned(),
         FlowKind::Call => {
+            let mut call = String::new();
             if instruction.link_bit() {
-                let _ = writeln!(out, "    ctx->lr = 0x{next:08x}u;");
+                let _ = write!(call, "ctx->lr = 0x{next:08x}u; ");
             }
             match flow.target {
                 Some(target) => {
                     calls.insert(target);
-                    let _ = writeln!(out, "    {}(ctx, base);", name_of(target));
+                    let _ = write!(call, "{}(ctx, base);", name_of(target));
                 }
                 None => {
-                    let _ = writeln!(out, "    xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr);");
+                    call.push_str("xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr);");
                 }
             }
+            call
         }
-        FlowKind::Branch => {
-            let taken = match flow.target {
-                Some(target) if starts.contains(&target) => format!("goto {};", label_of(target)),
-                // A branch out of the function is a tail call, which returns
-                // once the callee has.
-                Some(target) => {
-                    calls.insert(target);
-                    format!("{}(ctx, base); return;", name_of(target))
-                }
-                None => "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;".to_owned(),
-            };
-
-            if flow.falls_through {
-                let _ = writeln!(out, "    if ({}) {{ {taken} }}", condition_of(instruction));
-            } else {
-                let _ = writeln!(out, "    {taken}");
+        FlowKind::Branch => match flow.target {
+            Some(target) if starts.contains(&target) => format!("goto {};", label_of(target)),
+            // A branch out of the function is a tail call, which returns once
+            // the callee has.
+            Some(target) => {
+                calls.insert(target);
+                format!("{}(ctx, base); return;", name_of(target))
             }
-        }
+            None => "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;".to_owned(),
+        },
         FlowKind::Indirect => {
             let targets = function.resolved.get(&address);
             match targets {
                 Some(targets) if !targets.is_empty() => {
-                    out.push_str("    switch ((uint32_t)ctx->ctr) {\n");
+                    let mut switch = String::from("switch ((uint32_t)ctx->ctr) {\n");
                     let mut seen = std::collections::BTreeSet::new();
                     for target in targets {
                         if !seen.insert(*target) {
@@ -2366,31 +2376,35 @@ fn terminator_code(
                         }
                         if starts.contains(target) {
                             let _ = writeln!(
-                                out,
+                                switch,
                                 "    case 0x{target:08x}u: goto {};",
                                 label_of(*target)
                             );
                         } else {
                             calls.insert(*target);
                             let _ = writeln!(
-                                out,
+                                switch,
                                 "    case 0x{target:08x}u: {}(ctx, base); return;",
                                 name_of(*target)
                             );
                         }
                     }
-                    out.push_str(
-                        "    default: xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;\n    }\n",
+                    switch.push_str(
+                        "    default: xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;\n    }",
                     );
+                    switch
                 }
-                _ => {
-                    out.push_str(
-                        "    xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr);\n    return;\n",
-                    );
-                }
+                _ => "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;".to_owned(),
             }
         }
-        FlowKind::Continue => {}
+        FlowKind::Continue => unreachable!("returned above"),
+    };
+
+    let condition = condition_of(instruction);
+    if condition == "1" {
+        let _ = writeln!(out, "    {taken}");
+    } else {
+        let _ = writeln!(out, "    if ({condition}) {{ {taken} }}");
     }
 }
 
@@ -2416,6 +2430,16 @@ fn continue_at(
 
 /// Returns the C condition a conditional branch tests.
 fn condition_of(instruction: Instruction) -> String {
+    // The unconditional branch has no condition operand. The bits one would sit
+    // in belong to its displacement, so reading them as a condition would turn
+    // a plain branch into whatever its target happened to encode.
+    if !matches!(
+        instruction.opcode(),
+        Opcode::Bc | Opcode::Bclr | Opcode::Bcctr
+    ) {
+        return "1".to_owned();
+    }
+
     let bo = instruction.branch_condition();
     let bi = instruction.branch_condition_bit();
     let field = bi >> 2;
@@ -2426,16 +2450,32 @@ fn condition_of(instruction: Instruction) -> String {
         _ => "so",
     };
 
-    // Bit four of the condition operand says the branch is taken whatever the
-    // condition register holds.
-    if bo & 0b1_0000 != 0 {
-        return "1".to_owned();
+    let mut tests = Vec::new();
+
+    // Bit two clear says the branch decrements the count register and consults
+    // it. The decrement happens whether or not the branch is taken, so this
+    // test goes first, where no other test can short circuit past it.
+    if bo & 0b0_0100 == 0 {
+        // Bit three says the branch wants the count to have reached zero
+        // rather than not to have.
+        let wanted = if bo & 0b0_0010 == 0 { "!=" } else { "==" };
+        tests.push(format!("(--ctx->ctr {wanted} 0)"));
     }
-    // Bit one says the branch is taken when the bit is set rather than clear.
-    if bo & 0b0_1000 != 0 {
-        format!("ctx->cr[{field}].{bit}")
+    // Bit four says the branch is taken whatever the condition register holds.
+    if bo & 0b1_0000 == 0 {
+        // Bit one says the branch is taken when the bit is set rather than
+        // clear.
+        if bo & 0b0_1000 != 0 {
+            tests.push(format!("ctx->cr[{field}].{bit}"));
+        } else {
+            tests.push(format!("!ctx->cr[{field}].{bit}"));
+        }
+    }
+
+    if tests.is_empty() {
+        "1".to_owned()
     } else {
-        format!("!ctx->cr[{field}].{bit}")
+        tests.join(" && ")
     }
 }
 
