@@ -404,6 +404,9 @@ fn vector_access_shape(opcode: Opcode) -> bool {
             | Opcode::Stvewx
             | Opcode::Stewx128
             | Opcode::Vperm
+            | Opcode::Vperm128
+            | Opcode::Vpermwi128
+            | Opcode::Vrlimi128
     )
 }
 
@@ -413,9 +416,19 @@ fn vector_access_shape(opcode: Opcode) -> bool {
 /// set does to a pair of vectors lands here whatever width the lanes are
 /// read at.
 fn reads_two_vectors(opcode: Opcode) -> bool {
+    reads_two_vectors_arithmetic(opcode) || reads_two_vectors_arranging(opcode)
+}
+
+/// The half of that family that computes across a pair of lanes.
+fn reads_two_vectors_arithmetic(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        Opcode::Vand
+        Opcode::Vsl
+            | Opcode::Vsr
+            | Opcode::Vslo
+            | Opcode::Vslo128
+            | Opcode::Vsro
+            | Opcode::Vand
             | Opcode::Vand128
             | Opcode::Vandc
             | Opcode::Vor
@@ -461,7 +474,14 @@ fn reads_two_vectors(opcode: Opcode) -> bool {
             | Opcode::Vsubshs
             | Opcode::Vsubsws
             | Opcode::Vslb
-            | Opcode::Vslh
+    )
+}
+
+/// The half that moves lanes about rather than computing with them.
+fn reads_two_vectors_arranging(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Vslh
             | Opcode::Vslw
             | Opcode::Vslw128
             | Opcode::Vsrb
@@ -567,7 +587,8 @@ fn vector_shape(opcode: Opcode) -> Option<Shape> {
         | Opcode::Vmaddfp
         | Opcode::Vmaddfp128
         | Opcode::Vnmsubfp
-        | Opcode::Vnmsubfp128 => Shape::VectorFromThree,
+        | Opcode::Vnmsubfp128
+        | Opcode::Vmaddcfp128 => Shape::VectorFromThree,
 
         Opcode::Vspltisb | Opcode::Vspltish | Opcode::Vspltisw | Opcode::Vspltisw128 => {
             Shape::VectorFromImmediate
@@ -584,7 +605,11 @@ fn vector_shape(opcode: Opcode) -> Option<Shape> {
         | Opcode::Vcmpgtuw
         | Opcode::Vcmpgtsb
         | Opcode::Vcmpgtsh
-        | Opcode::Vcmpgtsw => Shape::VectorCompare,
+        | Opcode::Vcmpgtsw
+        | Opcode::Vcmpeqfp128
+        | Opcode::Vcmpgtfp128
+        | Opcode::Vcmpgefp128
+        | Opcode::Vcmpequw128 => Shape::VectorCompare,
 
         _ => return None,
     })
@@ -832,6 +857,32 @@ fn vector_access_effect(instruction: Instruction, effect: &mut Effect) {
         // A single element load leaves the rest of the register alone, so it
         // reads what it is about to write into.
         Opcode::Vperm => vector_effect(Shape::VectorFromThree, instruction, effect),
+        // These carry an immediate where a first source would sit, so the bits
+        // an operand shape would read as a register are not one.
+        Opcode::Vpermwi128 => {
+            let (d, _, b, _) = vector_operands(instruction);
+            effect.read(Location::Vector(b));
+            effect.write(Location::Vector(d));
+        }
+        // Inserting leaves the lanes the mask excludes alone, so what it writes
+        // is also something it reads.
+        Opcode::Vrlimi128 => {
+            let (d, _, b, _) = vector_operands(instruction);
+            effect.read(Location::Vector(b));
+            effect.read(Location::Vector(d));
+            effect.write(Location::Vector(d));
+        }
+        // Its control is three bits of its own rather than a full register
+        // field, so the shapes cannot report it.
+        Opcode::Vperm128 => {
+            let (d, a, b, _) = vector_operands(instruction);
+            effect.read(Location::Vector(a));
+            effect.read(Location::Vector(b));
+            effect.read(Location::Vector(
+                u8::try_from((instruction.word() >> 6) & 7).unwrap_or(0),
+            ));
+            effect.write(Location::Vector(d));
+        }
         _ => {}
     }
 }
@@ -909,7 +960,12 @@ fn vector_effect(shape: Shape, instruction: Instruction, effect: &mut Effect) {
         Shape::VectorCompare => {
             effect.read(Location::Vector(a));
             effect.read(Location::Vector(b));
-            if instruction.word() & (1 << 10) != 0 {
+            let records = if instruction.form().is_some_and(Form::is_console_extension) {
+                1 << 6
+            } else {
+                1 << 10
+            };
+            if instruction.word() & records != 0 {
                 effect.write(Location::Condition(6));
             }
         }
@@ -1318,8 +1374,8 @@ mod tests {
 
     #[test]
     fn an_unmodelled_instruction_admits_it() {
-        // vsl v1, v2, v3, a vector shift with no semantics here
-        assert_eq!(effect_of(Instruction::decode(0x1022_19c4)), None);
+        // vpkpx v1, v2, v3, a pixel pack with no semantics here
+        assert_eq!(effect_of(Instruction::decode(0x1022_1b0e)), None);
     }
 
     #[test]
@@ -1331,8 +1387,8 @@ mod tests {
             "nothing is modelled beyond a subset yet"
         );
         assert!(
-            missing.contains(&"vsl"),
-            "the vector shifts are not modelled yet"
+            missing.contains(&"vpkpx"),
+            "the pixel pack is not modelled yet"
         );
         assert!(
             !missing.contains(&"add"),

@@ -846,6 +846,12 @@ fn vector_subjects() -> Vec<(u32, &'static str)> {
         (vector_immediate(0, VECTOR_SECOND, 526), "vupkhsb"),
         (vector_immediate(0, VECTOR_SECOND, 590), "vupkhsh"),
         (vector_immediate(0, VECTOR_SECOND, 654), "vupklsb"),
+        // Shifting the whole register by whole bytes. The forms that shift by
+        // bits are absent: they require every byte of the second operand to
+        // agree in its low three bits, which the shared seeds do not, and
+        // hardware is free to return anything when they do not.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1036), "vslo"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1100), "vsro"),
         // Sliding a window across the pair.
         (vector(VECTOR_FIRST, VECTOR_SECOND, third(5, 44)), "vsldoi"),
         // Single precision across four lanes.

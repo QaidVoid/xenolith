@@ -628,10 +628,66 @@ fn unpack_operation(opcode: Opcode) -> Option<(u32, bool)> {
     })
 }
 
+/// Returns the C for a console form that rearranges words by an immediate.
+///
+/// Where those immediates sit was derived rather than read. Each form's mask
+/// leaves exactly one arrangement of the free bits that fits the fields the
+/// instruction needs, and the values so assembled match what an independently
+/// produced corpus reports for every occurrence in a whole title.
+fn vector_console_arrangement(instruction: Instruction) -> Option<String> {
+    let (d, _, b, _) = vector_operands(instruction);
+    let mut out = String::new();
+
+    // Four words chosen by two bits each, out of an immediate the form splits
+    // across the word. Which end holds which half is settled by the mask
+    // leaving exactly one other place for it, and by the immediates so
+    // assembled matching what an independent corpus reports for all hundred
+    // occurrences in one title.
+    if instruction.opcode() == Opcode::Vpermwi128 {
+        let immediate =
+            (((instruction.word() >> 6) & 7) << 5) | ((instruction.word() >> 16) & 0x1f);
+        let _ = writeln!(out, "    {{ xenolith_vector t;");
+        for lane in 0..4u32 {
+            let from = (immediate >> (6 - 2 * lane)) & 3;
+            let _ = writeln!(
+                out,
+                "    xenolith_vector_set_u32(&t, {lane}, xenolith_vector_u32(&ctx->v[{b}], {from}));"
+            );
+        }
+        let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+        return Some(out);
+    }
+
+    // Rotating one operand by whole words and inserting the lanes a mask
+    // selects, leaving the rest of the destination alone.
+    if instruction.opcode() == Opcode::Vrlimi128 {
+        let mask = (instruction.word() >> 16) & 0xf;
+        let rotate = (instruction.word() >> 6) & 3;
+        let _ = writeln!(out, "    {{ xenolith_vector t = ctx->v[{d}];");
+        for lane in 0..4u32 {
+            if mask & (1 << (3 - lane)) == 0 {
+                continue;
+            }
+            let from = (lane + rotate) % 4;
+            let _ = writeln!(
+                out,
+                "    xenolith_vector_set_u32(&t, {lane}, xenolith_vector_u32(&ctx->v[{b}], {from}));"
+            );
+        }
+        let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+        return Some(out);
+    }
+
+    None
+}
+
 /// Returns the C for a vector instruction that narrows, widens, or slides.
 fn vector_pack(instruction: Instruction) -> Option<String> {
     let (d, a, b, _) = vector_operands(instruction);
     let mut out = String::new();
+    if let Some(code) = vector_console_arrangement(instruction) {
+        return Some(code);
+    }
 
     if let Some((source, signed, saturate)) = pack_operation(instruction.opcode()) {
         let (from, _) = lane_width(source);
@@ -683,6 +739,36 @@ fn vector_pack(instruction: Instruction) -> Option<String> {
             source * 8
         );
         vector_lanes(&mut out, d, count, into, &body);
+        return Some(out);
+    }
+
+    // The whole register moves, so the amount is taken once rather than lane
+    // by lane. It sits in the last lane of the second operand, in the low bits
+    // for a shift by bits and above them for a shift by bytes.
+    if matches!(
+        instruction.opcode(),
+        Opcode::Vsl | Opcode::Vsr | Opcode::Vslo | Opcode::Vslo128 | Opcode::Vsro
+    ) {
+        let left = matches!(
+            instruction.opcode(),
+            Opcode::Vsl | Opcode::Vslo | Opcode::Vslo128
+        );
+        let whole = matches!(
+            instruction.opcode(),
+            Opcode::Vslo | Opcode::Vslo128 | Opcode::Vsro
+        );
+        let amount = if whole {
+            format!("((xenolith_vector_u8(&ctx->v[{b}], 15) >> 3) & 0xf) * 8")
+        } else {
+            format!("xenolith_vector_u8(&ctx->v[{b}], 15) & 7")
+        };
+        let direction = if left { "left" } else { "right" };
+        let _ = writeln!(out, "    {{ xenolith_vector t;");
+        let _ = writeln!(
+            out,
+            "    xenolith_vector_shift_{direction}(&t, &ctx->v[{a}], (unsigned)({amount}));"
+        );
+        let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
         return Some(out);
     }
 
@@ -830,7 +916,15 @@ fn vector_access(instruction: Instruction) -> Option<String> {
         // Every byte of the result is chosen by the matching byte of a third
         // register, which is the one family that reads its indices out of a
         // register rather than out of the encoding.
-        Opcode::Vperm => {
+        Opcode::Vperm | Opcode::Vperm128 => {
+            let c = if instruction.opcode() == Opcode::Vperm128 {
+                // Three bits of its own, so the control is one of the first
+                // eight registers rather than any of the hundred and twenty
+                // eight.
+                (instruction.word() >> 6) & 7
+            } else {
+                c
+            };
             let _ = writeln!(out, "    {{ xenolith_vector t;");
             let _ = writeln!(out, "    for (unsigned lane = 0; lane < 16; lane++) {{");
             let _ = writeln!(
@@ -907,7 +1001,7 @@ fn vector_compare(instruction: Instruction) -> Option<String> {
         _ => ">",
     };
 
-    let records = instruction.word() & (1 << 10) != 0;
+    let records = instruction.word() & records_at(instruction) != 0;
     let mut out = String::new();
 
     if records {
@@ -942,16 +1036,35 @@ fn vector_compare(instruction: Instruction) -> Option<String> {
     Some(out)
 }
 
+/// Returns the bit that makes a comparison record into a condition field.
+///
+/// The standard forms spend the bit every other form spends on a record bit.
+/// The console's forms cannot: their identifying mask claims it. What that mask
+/// leaves free is three bits, two of which the first source takes, and the one
+/// left over is this. It is clear in every occurrence in either title, so what
+/// is checked here is that a comparison which does not record leaves the field
+/// alone.
+fn records_at(instruction: Instruction) -> u32 {
+    if instruction
+        .form()
+        .is_some_and(xenolith_ppc::Form::is_console_extension)
+    {
+        1 << 6
+    } else {
+        1 << 10
+    }
+}
+
 /// Returns the lane width, whether the lanes are floats, and which test a
 /// comparison applies.
 fn comparison(opcode: Opcode) -> Option<(u32, bool, &'static str)> {
     Some(match opcode {
-        Opcode::Vcmpeqfp => (4, true, "=="),
-        Opcode::Vcmpgtfp => (4, true, ">"),
-        Opcode::Vcmpgefp => (4, true, ">="),
+        Opcode::Vcmpeqfp | Opcode::Vcmpeqfp128 => (4, true, "=="),
+        Opcode::Vcmpgtfp | Opcode::Vcmpgtfp128 => (4, true, ">"),
+        Opcode::Vcmpgefp | Opcode::Vcmpgefp128 => (4, true, ">="),
+        Opcode::Vcmpequw | Opcode::Vcmpequw128 => (4, false, "=="),
         Opcode::Vcmpequb => (1, false, "=="),
         Opcode::Vcmpequh => (2, false, "=="),
-        Opcode::Vcmpequw => (4, false, "=="),
         Opcode::Vcmpgtub => (1, false, ">"),
         Opcode::Vcmpgtuh => (2, false, ">"),
         Opcode::Vcmpgtuw => (4, false, ">"),
@@ -1010,6 +1123,17 @@ fn vector_float(instruction: Instruction) -> Option<String> {
         // The standard form multiplies its first and third operands and adds
         // the second. The console's has one register field fewer, so it
         // multiplies its two sources and adds the register it writes.
+        // The console carries a third fused form whose multiply takes the
+        // register it writes rather than adding it.
+        Opcode::Vmaddcfp128 => {
+            let body = format!(
+                "__builtin_fmaf({}, {}, {})",
+                at(a, "f32", "lane"),
+                at(d, "f32", "lane"),
+                at(b, "f32", "lane")
+            );
+            vector_lanes(&mut out, d, 4, "f32", &body);
+        }
         Opcode::Vmaddfp | Opcode::Vmaddfp128 | Opcode::Vnmsubfp | Opcode::Vnmsubfp128 => {
             let console = matches!(
                 instruction.opcode(),

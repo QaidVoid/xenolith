@@ -268,6 +268,35 @@ static inline int64_t xenolith_multiply_high_signed(int64_t left, int64_t right)
     return (int64_t)high;
 }
 
+/* Shifting a whole vector register, across lane boundaries.
+ *
+ * The amount is in bits and may be anything up to the width of the register, so
+ * a byte of the result generally takes bits from two bytes of the source. The
+ * shifts that move whole bytes are the same operation with a multiple of eight.
+ */
+static inline void xenolith_vector_shift_left(xenolith_vector *into,
+                                              const xenolith_vector *from, unsigned bits) {
+    unsigned bytes = bits / 8;
+    unsigned rest = bits % 8;
+    for (unsigned lane = 0; lane < 16; lane++) {
+        unsigned at = lane + bytes;
+        uint32_t high = at < 16 ? from->u8[at] : 0;
+        uint32_t low = at + 1 < 16 ? from->u8[at + 1] : 0;
+        into->u8[lane] = (uint8_t)(((high << 8 | low) >> (8 - rest)) & 0xff);
+    }
+}
+
+static inline void xenolith_vector_shift_right(xenolith_vector *into,
+                                               const xenolith_vector *from, unsigned bits) {
+    unsigned bytes = bits / 8;
+    unsigned rest = bits % 8;
+    for (unsigned lane = 0; lane < 16; lane++) {
+        uint32_t high = lane >= bytes + 1 ? from->u8[lane - bytes - 1] : 0;
+        uint32_t low = lane >= bytes ? from->u8[lane - bytes] : 0;
+        into->u8[lane] = (uint8_t)(((high << 8 | low) >> rest) & 0xff);
+    }
+}
+
 /* Clamping a wider intermediate back into a lane.
  *
  * The saturating forms of the vector arithmetic stop at the end of the range

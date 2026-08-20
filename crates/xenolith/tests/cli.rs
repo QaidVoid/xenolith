@@ -611,8 +611,8 @@ fn lift_succeeds_when_only_some_functions_lift() {
         0x3821_0060,
         0x4e80_0020,
         0x6000_0000,
-        // vsl, a vector shift the model does not express
-        0x1022_19c4,
+        // vpkpx, a pixel pack the model does not express
+        0x1022_1b0e,
         0x4e80_0020,
     ];
 
@@ -639,7 +639,7 @@ fn lift_succeeds_when_only_some_functions_lift() {
         "the refusal should be reported: {stdout}"
     );
     assert!(
-        stdout.contains("vsl"),
+        stdout.contains("vpkpx"),
         "what blocked it should be named: {stdout}"
     );
 }

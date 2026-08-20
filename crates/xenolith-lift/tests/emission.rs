@@ -248,8 +248,8 @@ fn a_tail_call_returns_after_calling() {
 /// that is right except in one place compiles and runs and is wrong.
 #[test]
 fn one_unmodelled_instruction_stops_the_whole_function() {
-    // addi r3, r0, 1 then vsl, which has no semantics here, then blr
-    let outcome = lift_entry(&[0x3860_0001, 0x1000_01c4, 0x4e80_0020]);
+    // addi r3, r0, 1 then vpkpx, which has no semantics here, then blr
+    let outcome = lift_entry(&[0x3860_0001, 0x1000_030e, 0x4e80_0020]);
 
     let complaint = outcome.expect_err("it should not lift");
     assert!(
@@ -266,7 +266,7 @@ fn other_functions_still_lift() {
         0x4800_0009,
         0x4e80_0020,
         // a function holding something unmodelled
-        0x1000_01c4,
+        0x1000_030e,
         0x4e80_0020,
     ];
     let image = image_of(&words);
