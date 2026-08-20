@@ -427,6 +427,88 @@ fn prologue_signals(image: &Image, address: u32, helpers: &Helpers) -> usize {
     signals
 }
 
+/// Returns whether an address holds an import thunk the loader never patched.
+///
+/// A container records where each import is called through, and leaves behind
+/// four words there: two describing which library and ordinal is wanted, and
+/// then a branch through the count register for whatever writes the address in
+/// to use. What is written in is the console's business and never happened
+/// here, so the description is still there to read.
+///
+/// The shape is exact. Across a title's whole image every one of the addresses
+/// the import records name matches it, and nothing that is not one of them
+/// does.
+fn is_import_thunk(image: &Image, address: u32) -> bool {
+    let (Ok(library), Ok(ordinal), Ok(into_count), Ok(branch)) = (
+        image.u32(address),
+        image.u32(address.wrapping_add(4)),
+        image.u32(address.wrapping_add(8)),
+        image.u32(address.wrapping_add(12)),
+    ) else {
+        return false;
+    };
+
+    library >> 24 == 0x01
+        && ordinal >> 24 == 0x02
+        && library & 0x00ff_ffff == ordinal & 0x00ff_ffff
+        && into_count == 0x7d69_03a6
+        && branch == 0x4e80_0420
+}
+
+/// Returns the branches into an import thunk that nothing claimed.
+///
+/// A call to an import too far away to reach goes through one of these, and
+/// nothing in the image names it: what names it is a pointer the title writes
+/// while it runs. So neither scanning for a prologue nor reading the image
+/// finds one, and a program reaching one has nowhere to go.
+///
+/// What makes this safe to claim is the target. An unpatched import thunk is
+/// four exact words, and a branch to one is a branch to an import.
+fn scan_for_import_branches(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32> {
+    let mut claimed = BTreeSet::new();
+    for blocks in walked.values() {
+        for block in blocks {
+            let mut address = block.start;
+            while address < block.end {
+                claimed.insert(address);
+                address = address.saturating_add(4);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    for section in image.sections() {
+        if !section.kind.is_executable() {
+            continue;
+        }
+        let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+        let mut at = section.start;
+        while at < end {
+            let address = at;
+            at = at.saturating_add(4);
+            if claimed.contains(&address) {
+                continue;
+            }
+            let Ok(word) = image.u32(address) else {
+                continue;
+            };
+            let instruction = Instruction::decode(word);
+            if instruction.opcode() != Opcode::B || instruction.link_bit() {
+                continue;
+            }
+            if instruction
+                .flow(address)
+                .target
+                .is_some_and(|target| is_import_thunk(image, target))
+            {
+                found.push(address);
+            }
+        }
+    }
+
+    found
+}
+
 /// Returns addresses the image points at that jump straight to a function.
 ///
 /// A trampoline is one unconditional branch and nothing else, which is what a
@@ -592,6 +674,13 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         let mut added = false;
 
         for address in scan_for_prologues(image, &helpers, &walked) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+                slot.insert(Origin::Scanned);
+                added = true;
+            }
+        }
+
+        for address in scan_for_import_branches(image, &walked) {
             if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
                 slot.insert(Origin::Scanned);
                 added = true;
