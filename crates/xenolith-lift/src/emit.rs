@@ -236,6 +236,41 @@ fn long_mask(begin: u32, end: u32) -> u64 {
     mask
 }
 
+/// Returns what a trap compares, signed and unsigned.
+///
+/// The word forms compare the low halves of their operands and the doubleword
+/// forms compare the whole of them, so the width is part of the comparison
+/// rather than something applied afterwards.
+fn trap_operands(
+    long: bool,
+    immediate: bool,
+    ra: u32,
+    rb: u32,
+    displacement: i32,
+) -> ((String, String), (String, String)) {
+    let (signed_cast, unsigned_cast) = if long {
+        ("(int64_t)", "(uint64_t)")
+    } else {
+        ("(int64_t)(int32_t)", "(uint64_t)(uint32_t)")
+    };
+    let right = if immediate {
+        (
+            format!("({signed_cast}({displacement}))"),
+            format!("({unsigned_cast}({displacement}))"),
+        )
+    } else {
+        (
+            format!("({signed_cast}ctx->r[{rb}])"),
+            format!("({unsigned_cast}ctx->r[{rb}])"),
+        )
+    };
+
+    (
+        (format!("({signed_cast}ctx->r[{ra}])"), right.0),
+        (format!("({unsigned_cast}ctx->r[{ra}])"), right.1),
+    )
+}
+
 /// Writes the statements that set a condition field from a comparison.
 ///
 /// The less than expression is given rather than derived, because an unsigned
@@ -1910,8 +1945,58 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
 
         // A trap that fires leaves the function, which emitted code cannot
         // express, so where it goes is the environment's to decide.
+        //
+        // Whether it fires is a comparison the encoding names, and emitting the
+        // call without it made every trap unconditional. Compilers put one of
+        // these after a division to catch a zero divisor, so the emitted code
+        // stopped on the check rather than on the fault it was checking for.
         Opcode::Tw | Opcode::Twi | Opcode::Td | Opcode::Tdi => {
-            writeln!(out, "    xenolith_trap(ctx, base, 0x{address:08x}u);").ok()?;
+            let long = matches!(instruction.opcode(), Opcode::Td | Opcode::Tdi);
+            let immediate = matches!(instruction.opcode(), Opcode::Twi | Opcode::Tdi);
+            let (signed, unsigned) = trap_operands(long, immediate, ra, rb, displacement);
+
+            // An immediate compared without a sign has a lowest and a highest
+            // value it can be, and the compilers reach for both. Trapping on
+            // below zero or above the largest is how they spell a comparison
+            // they only half want, and writing those out gives the C compiler a
+            // test it can see is never true.
+            // Zero is the lowest at either width, and all ones is the
+            // highest, which is what a displacement of minus one becomes once
+            // it is extended and read without a sign.
+            let (lowest, highest) = if immediate {
+                (displacement == 0, displacement == -1)
+            } else {
+                (false, false)
+            };
+
+            // The five bits each name a comparison, and the trap fires when any
+            // of the ones set holds.
+            let mut tests = Vec::new();
+            for (bit, operator, pair, dead) in [
+                (0b1_0000, "<", &signed, false),
+                (0b0_1000, ">", &signed, false),
+                (0b0_0100, "==", &signed, false),
+                (0b0_0010, "<", &unsigned, lowest),
+                (0b0_0001, ">", &unsigned, highest),
+            ] {
+                if rt & bit != 0 && !dead {
+                    tests.push(format!("{} {operator} {}", pair.0, pair.1));
+                }
+            }
+
+            if tests.is_empty() {
+                // Nothing it names can hold, so it never fires and there is
+                // nothing to write.
+            } else if rt & 0b1_1111 == 0b1_1111 {
+                writeln!(out, "    xenolith_trap(ctx, base, 0x{address:08x}u);").ok()?;
+            } else {
+                writeln!(
+                    out,
+                    "    if ({}) {{ xenolith_trap(ctx, base, 0x{address:08x}u); }}",
+                    tests.join(" || ")
+                )
+                .ok()?;
+            }
         }
 
         // Storing a float as an integer word takes the low half of the register
