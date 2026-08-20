@@ -270,6 +270,27 @@ Stated plainly, because a coverage figure implies more than it means:
   purpose emulator does not share, so it is stated from the documentation rather
   than checked against hardware.
 
+## What is borrowed
+
+One thing here could not be recovered from the artefact and is not original.
+
+An Xbox 360 title imports from the kernel by ordinal and never by name. The
+names are nowhere in the container: searching a decoded image for any of them
+finds nothing, because nothing in the file ever held them. So the catalogue in
+`crates/xenolith-xex/src/exports.rs`, which says that `xboxkrnl.exe` ordinal 204
+is `NtAllocateVirtualMemory`, is transcribed from the export tables of the Xenia
+project.
+
+It is an interface catalogue rather than an implementation: what each entry
+point is called and which number it answers to, the same kind of fact as a
+system call number. No code of theirs is used, and nothing here says what any of
+those entry points do. Their licence is reproduced in full at the head of that
+file, which is where it has to be, and it forbids using their name to endorse
+this, so nothing here should be read as their endorsement of it.
+
+Everything else in this repository is recovered from the container, checked
+against the oracles above, or reported as unrecovered.
+
 ## Licence
 
 Dual licensed under either of
@@ -285,4 +306,4 @@ terms or conditions.
 
 The instruction table is written from published architecture documentation and
 the public record for the console's extension. It derives from no existing
-decoder.
+decoder. The kernel export catalogue is the one exception and is credited above.

@@ -686,6 +686,22 @@ fn reports_the_largest_unclaimed_ranges() {
 
     report_decode_rates(&image, &runs);
 
+    let pointed = pointed_at_but_unclaimed(&image, &claimed);
+    eprintln!(
+        "addresses pointed at, looking like functions, unclaimed {}",
+        pointed.len()
+    );
+    // Discovery is meant to reach everything the image itself points at. One
+    // that begins like a function and that some word in the file names, and
+    // that nothing claimed, is a function that was missed, and there is no
+    // reason for one to exist.
+    assert!(
+        pointed.is_empty(),
+        "{} addresses the image points at begin like functions and are claimed by none: {:?}",
+        pointed.len(),
+        pointed.iter().take(8).collect::<Vec<_>>()
+    );
+
     runs.sort_by_key(|(start, end)| std::cmp::Reverse(end - start));
 
     eprintln!("\nlargest unclaimed runs");
