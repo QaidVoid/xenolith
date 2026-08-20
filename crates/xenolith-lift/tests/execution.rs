@@ -45,9 +45,33 @@ const MEMORY_SIZE: usize = 64;
 /// Callee saved and outside the watched set, so nothing under test can name it.
 const OUTPUT_REGISTER: u32 = 31;
 
-/// Bytes each run reports: the watched registers, the condition register, and
-/// the exception register.
-const RESULT_BYTES: usize = (WATCHED_COUNT + 2) * 8 + MEMORY_SIZE;
+/// How many vector registers are watched.
+const WATCHED_VECTOR_COUNT: usize = 3;
+
+/// The vector registers under test, destination first.
+const WATCHED_VECTORS: [u32; WATCHED_VECTOR_COUNT] = [1, 2, 3];
+
+/// The three by name, so a subject reads as the operands it names.
+const VECTOR_DESTINATION: u32 = 1;
+const VECTOR_FIRST: u32 = 2;
+const VECTOR_SECOND: u32 = 3;
+
+/// Where the vector seeds sit in the scratch page.
+///
+/// Past the window that is compared, so seeding them cannot disturb what a
+/// store is checked against, and sixteen byte aligned because the loads that
+/// read them ignore the low bits of an address rather than faulting on them.
+const VECTOR_SEED_OFFSET: u32 = 128;
+
+/// Bytes each run reports: the watched registers, the condition register, the
+/// exception register, the watched vectors, and the scratch memory.
+///
+/// A multiple of sixteen, so the vector slot of every run stays aligned for the
+/// stores that write it.
+const RESULT_BYTES: usize = (WATCHED_COUNT + 2) * 8 + WATCHED_VECTOR_COUNT * 16 + MEMORY_SIZE;
+
+/// Where the vectors sit within one run's report.
+const VECTOR_RESULT_OFFSET: usize = (WATCHED_COUNT + 2) * 8;
 
 /// Bits of the exception register this project models.
 ///
@@ -64,6 +88,8 @@ pub struct State {
     pub condition: u32,
     /// The bits of the exception register this project models.
     pub exception: u64,
+    /// The watched vector registers, in the order of `WATCHED_VECTORS`.
+    pub vectors: [[u8; 16]; WATCHED_VECTOR_COUNT],
     /// The scratch memory afterwards, so a store can be seen.
     pub memory: [u8; MEMORY_SIZE],
 }
@@ -132,6 +158,12 @@ fn guest_assembly(words: &[u32], seeds: usize) -> String {
                 let offset = base + at * 8;
                 let _ = writeln!(out, "\tld {register}, {offset}(30)");
             }
+            // The vector seeds live in the scratch page, so they are reached
+            // the same way the scratch memory is.
+            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
+                let offset = VECTOR_SEED_OFFSET as usize + at * 16;
+                let _ = writeln!(out, "\tli 0, {offset}\n\tlvx {register}, 29, 0");
+            }
             // Start from a cleared condition and exception register, so that
             // what is read back afterwards was written by the instruction.
             let _ = writeln!(out, "\tli 0, 0\n\tmtxer 0\n\tmtcr 0");
@@ -146,9 +178,17 @@ fn guest_assembly(words: &[u32], seeds: usize) -> String {
             let _ = writeln!(out, "\tmfcr 0\n\tstw 0, {cr_at}({OUTPUT_REGISTER})");
             let _ = writeln!(out, "\tmfxer 0\n\tstd 0, {xer_at}({OUTPUT_REGISTER})");
 
+            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
+                let offset = VECTOR_RESULT_OFFSET + at * 16;
+                let _ = writeln!(
+                    out,
+                    "\tli 0, {offset}\n\tstvx {register}, {OUTPUT_REGISTER}, 0"
+                );
+            }
+
             // The scratch memory afterwards, so that a store can be seen.
             for at in (0..MEMORY_SIZE).step_by(8) {
-                let to = xer_at + 8 + at;
+                let to = VECTOR_RESULT_OFFSET + WATCHED_VECTOR_COUNT * 16 + at;
                 let _ = writeln!(out, "\tld 0, {at}(29)\n\tstd 0, {to}({OUTPUT_REGISTER})");
             }
             let _ = writeln!(
@@ -182,7 +222,8 @@ void run(const uint64_t *seeds, uint64_t *out);
 int main(void) {
     static const uint64_t seeds[SEED_WORDS] = SEED_VALUES;
     static const unsigned char pattern[MEMORY_SIZE] = MEMORY_PATTERN;
-    static uint64_t out[RESULT_WORDS];
+    static const unsigned char vectors[VECTOR_SEED_BYTES] = VECTOR_SEEDS;
+    static uint64_t out[RESULT_WORDS] __attribute__((aligned(16)));
 
     void *scratch = mmap((void *)(uintptr_t)MEMORY_BASE, 4096,
                          PROT_READ | PROT_WRITE,
@@ -192,6 +233,7 @@ int main(void) {
         return 1;
     }
     memcpy(scratch, pattern, MEMORY_SIZE);
+    memcpy((unsigned char *)scratch + VECTOR_SEED_OFFSET, vectors, VECTOR_SEED_BYTES);
 
     run(seeds, out);
 
@@ -204,7 +246,12 @@ int main(void) {
         printf(" %08llx %016llx ",
                (unsigned long long)(r[WATCHED_COUNT] >> 32),
                (unsigned long long)r[WATCHED_COUNT + 1]);
-        const unsigned char *m = (const unsigned char *)(r + WATCHED_COUNT + 2);
+        const unsigned char *v = (const unsigned char *)(r + WATCHED_COUNT + 2);
+        for (int b = 0; b < VECTOR_SEED_BYTES; b++) {
+            printf("%02x", v[b]);
+        }
+        printf(" ");
+        const unsigned char *m = v + VECTOR_SEED_BYTES;
         for (int b = 0; b < MEMORY_SIZE; b++) {
             printf("%02x", m[b]);
         }
@@ -232,6 +279,34 @@ fn driver_for(seeds: &[[u64; WATCHED_COUNT]], count: usize) -> String {
         .replace("RESULT_SLOTS", &(RESULT_BYTES / 8).to_string())
         .replace("RESULT_COUNT", &count.to_string())
         .replace("WATCHED_COUNT", &WATCHED.len().to_string())
+        .replace("VECTOR_SEED_OFFSET", &VECTOR_SEED_OFFSET.to_string())
+        .replace(
+            "VECTOR_SEED_BYTES",
+            &(WATCHED_VECTOR_COUNT * 16).to_string(),
+        )
+        .replace("VECTOR_SEEDS", &format!("{{{}}}", vector_seed().join(", ")))
+}
+
+/// Returns the bytes the watched vector registers start each run holding.
+///
+/// Every lane differs from every other, and the three registers differ from
+/// each other, so an operation that takes the wrong lane or the wrong register
+/// brings back something visibly wrong rather than another copy of the same
+/// number. The floating point families read these bits as floats, so the
+/// patterns are chosen to be ordinary finite values rather than shapes that
+/// would land on an infinity or a value that is not a number.
+fn vector_seed() -> Vec<String> {
+    let mut bytes = Vec::new();
+    for register in 0..WATCHED_VECTOR_COUNT {
+        for lane in 0..4u32 {
+            let exponent = 0x3e + u32::try_from(register).unwrap_or(0);
+            let word = (exponent << 24) | (0x10 << 16) | (lane << 12) | (0x0123 + lane);
+            for byte in word.to_be_bytes() {
+                bytes.push(byte.to_string());
+            }
+        }
+    }
+    bytes
 }
 
 /// Runs each encoding on emulated hardware, once per seed.
@@ -286,7 +361,9 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
 
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() != WATCHED.len() + 3 {
+        // The registers, the condition register, the exception register, the
+        // vectors, and the memory.
+        if fields.len() != WATCHED.len() + 4 {
             continue;
         }
         let number = |at: usize| {
@@ -305,6 +382,21 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
 
         let hex = fields
             .get(WATCHED.len() + 2)
+            .ok_or_else(|| format!("no vectors in {line:?}"))?;
+        let mut vectors = [[0u8; 16]; WATCHED_VECTOR_COUNT];
+        for (at, register) in vectors.iter_mut().enumerate() {
+            for (byte, slot) in register.iter_mut().enumerate() {
+                let start = (at * 16 + byte) * 2;
+                let pair = hex
+                    .get(start..start + 2)
+                    .ok_or_else(|| format!("short vectors in {line:?}"))?;
+                *slot = u8::from_str_radix(pair, 16)
+                    .map_err(|error| format!("bad vectors in {line:?}: {error}"))?;
+            }
+        }
+
+        let hex = fields
+            .get(WATCHED.len() + 3)
             .ok_or_else(|| format!("no memory in {line:?}"))?;
         let mut memory = [0u8; MEMORY_SIZE];
         for (at, slot) in memory.iter_mut().enumerate() {
@@ -319,6 +411,7 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
             registers,
             condition: u32::try_from(condition).unwrap_or(0),
             exception: exception & EXCEPTION_MODELLED,
+            vectors,
             memory,
         });
     }
@@ -373,6 +466,13 @@ fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
         MEMORY_SIZE,
         pattern.join(", ")
     );
+    let seeded = vector_seed();
+    let _ = writeln!(
+        out,
+        "static const unsigned char vectors[{}] = {{{}}};",
+        seeded.len(),
+        seeded.join(", ")
+    );
 
     out.push_str("\nint main(void) {\n");
     let _ = writeln!(
@@ -397,6 +497,12 @@ fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
             for (register, value) in WATCHED.iter().zip(seed) {
                 let _ = writeln!(out, "        ctx->r[{register}] = {value}ull;");
             }
+            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "        for (unsigned b = 0; b < 16; b++) {{ xenolith_vector_set_u8(&ctx->v[{register}], b, vectors[{at} * 16 + b]); }}"
+                );
+            }
             out.push_str(&code);
 
             out.push_str("        printf(\"%016llx\", (unsigned long long)state.r[3]);\n");
@@ -409,6 +515,14 @@ fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
             out.push_str(
                 "        printf(\" %08llx %016llx \", (unsigned long long)packed(&state), (unsigned long long)state.xer);\n",
             );
+            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
+                let _ = at;
+                let _ = writeln!(
+                    out,
+                    "        for (unsigned b = 0; b < 16; b++) {{ printf(\"%02x\", xenolith_vector_u8(&state.v[{register}], b)); }}"
+                );
+            }
+            out.push_str("        printf(\" \");\n");
             let _ = writeln!(
                 out,
                 "        for (int b = 0; b < {MEMORY_SIZE}; b++) {{ printf(\"%02x\", memory[0x{MEMORY_BASE:x} + b]); }}"
@@ -433,7 +547,7 @@ fn on_the_model(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> Result<Vec<Sta
         .map_err(|error| format!("writing the model program: {error}"))?;
 
     let built = Command::new(compiler)
-        .args(["-std=c17", "-O1", "-o"])
+        .args(["-std=c17", "-O1", "-lm", "-o"])
         .arg(directory.join("model"))
         .arg(directory.join("model.c"))
         .output()
@@ -514,7 +628,7 @@ const fn extended(target: u32, first: u32, second: u32, code: u32, record: u32) 
 
 /// The instructions this harness runs, paired with what they are.
 fn subjects() -> Vec<(u32, &'static str)> {
-    let (a, b, c, d) = (WATCHED[0], WATCHED[1], WATCHED[2], WATCHED[3]);
+    let (a, b, c, _d) = (WATCHED[0], WATCHED[1], WATCHED[2], WATCHED[3]);
 
     vec![
         // Nothing at all, which is the smallest thing the two sides can agree
@@ -596,6 +710,19 @@ fn subjects() -> Vec<(u32, &'static str)> {
         ((10 << 26) | (6 << 23) | (b << 16) | 0x0007, "cmpli"),
         (extended(6 << 2, b, c, 0, 0), "cmp"),
         (extended(6 << 2, b, c, 32, 0), "cmpl"),
+    ]
+    .into_iter()
+    .chain(memory_subjects())
+    .chain(vector_subjects())
+    .collect()
+}
+
+/// The instructions that reach memory, addressed through the register holding
+/// the scratch buffer.
+fn memory_subjects() -> Vec<(u32, &'static str)> {
+    let (a, b, c, d) = (WATCHED[0], WATCHED[1], WATCHED[2], WATCHED[3]);
+
+    vec![
         // Memory, addressed through the register holding the scratch buffer.
         // A load that reads the wrong width or the wrong byte order brings back
         // something visibly wrong, since the buffer holds a pattern.
@@ -630,6 +757,147 @@ fn subjects() -> Vec<(u32, &'static str)> {
         // itself for want of a wider type to hold it in.
         (extended(a, b, c, 73, 0), "mulhd"),
         (extended(a, b, c, 9, 0), "mulhdu"),
+    ]
+}
+
+/// Builds a vector instruction of the standard extension.
+///
+/// The console's own forms are absent on purpose. Neither assembler accepts one
+/// and the emulator does not implement them, so running them here would test
+/// nothing and reporting a figure that folded them in would imply a check that
+/// did not happen.
+const fn vector(a: u32, b: u32, code: u32) -> u32 {
+    (4 << 26) | (VECTOR_DESTINATION << 21) | (a << 16) | (b << 11) | code
+}
+
+/// Returns an extended opcode with the bit that makes a comparison record into
+/// a condition field.
+const fn recording(code: u32) -> u32 {
+    (1 << 10) | code
+}
+
+/// Returns the extended opcode of a four operand form, with the third source
+/// folded into the bits it occupies.
+const fn third(register: u32, code: u32) -> u32 {
+    (register << 6) | code
+}
+
+/// Builds a vector instruction that carries an immediate where the first source
+/// would sit.
+const fn vector_immediate(immediate: u32, b: u32, code: u32) -> u32 {
+    (4 << 26) | (VECTOR_DESTINATION << 21) | (immediate << 16) | (b << 11) | code
+}
+
+/// The vector instructions this harness runs.
+fn vector_subjects() -> Vec<(u32, &'static str)> {
+    vec![
+        // Bit by bit, which is the same whatever the lanes are read as.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1028), "vand"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1092), "vandc"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1156), "vor"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1284), "vnor"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1220), "vxor"),
+        // Lane by lane, wrapping.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 0), "vaddubm"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 64), "vadduhm"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 128), "vadduwm"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1024), "vsububm"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1088), "vsubuhm"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1152), "vsubuwm"),
+        // Lane by lane, stopping at the end of the range.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 512), "vaddubs"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 576), "vadduhs"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 768), "vaddsbs"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 832), "vaddshs"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 896), "vaddsws"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1536), "vsububs"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1600), "vsubuhs"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1792), "vsubsbs"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1856), "vsubshs"),
+        // Shifts and rotates, whose count comes from the matching lane.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 260), "vslh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 388), "vsrh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 836), "vsrah"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 68), "vrlh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 132), "vrlw"),
+        // Choosing between lanes.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 66), "vmaxuh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 322), "vmaxsh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 578), "vminuh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 834), "vminsh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1090), "vavguh"),
+        // Moving lanes about.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 12), "vmrghb"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 76), "vmrghh"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 140), "vmrghw"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 268), "vmrglb"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 396), "vmrglw"),
+        (vector_immediate(0x1f, VECTOR_SECOND, 780), "vspltisb"),
+        (vector_immediate(0x1f, VECTOR_SECOND, 844), "vspltish"),
+        (vector_immediate(0x1f, VECTOR_SECOND, 908), "vspltisw"),
+        (vector_immediate(9, VECTOR_SECOND, 524), "vspltb"),
+        (vector_immediate(2, VECTOR_SECOND, 652), "vspltw"),
+        // Narrowing and widening.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 14), "vpkuhum"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 78), "vpkuwum"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 142), "vpkuhus"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 398), "vpkshss"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 270), "vpkshus"),
+        (vector_immediate(0, VECTOR_SECOND, 526), "vupkhsb"),
+        (vector_immediate(0, VECTOR_SECOND, 590), "vupkhsh"),
+        (vector_immediate(0, VECTOR_SECOND, 654), "vupklsb"),
+        // Sliding a window across the pair.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, third(5, 44)), "vsldoi"),
+        // Single precision across four lanes.
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 10), "vaddfp"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 74), "vsubfp"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1034), "vmaxfp"),
+        (vector(VECTOR_FIRST, VECTOR_SECOND, 1098), "vminfp"),
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, third(VECTOR_SECOND, 46)),
+            "vmaddfp",
+        ),
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, third(VECTOR_SECOND, 47)),
+            "vnmsubfp",
+        ),
+        // Rounding, which the emulator and the host both do exactly.
+        (vector_immediate(0, VECTOR_SECOND, 522), "vrfin"),
+        (vector_immediate(0, VECTOR_SECOND, 586), "vrfiz"),
+        (vector_immediate(0, VECTOR_SECOND, 650), "vrfip"),
+        (vector_immediate(0, VECTOR_SECOND, 714), "vrfim"),
+        // Between fixed point and single precision, with a scale.
+        (vector_immediate(2, VECTOR_SECOND, 842), "vcfsx"),
+        (vector_immediate(2, VECTOR_SECOND, 778), "vcfux"),
+        (vector_immediate(2, VECTOR_SECOND, 970), "vctsxs"),
+        (vector_immediate(2, VECTOR_SECOND, 906), "vctuxs"),
+        // Comparisons, in the form that also writes a condition field.
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, recording(198)),
+            "vcmpeqfp.",
+        ),
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, recording(710)),
+            "vcmpgtfp.",
+        ),
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, recording(134)),
+            "vcmpequw.",
+        ),
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, recording(902)),
+            "vcmpgtsw.",
+        ),
+        // Choosing between two under a mask, which is the one that reads three.
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, third(VECTOR_SECOND, 42)),
+            "vsel",
+        ),
+        // Permuting bytes by an index out of a third register.
+        (
+            vector(VECTOR_FIRST, VECTOR_SECOND, third(VECTOR_SECOND, 43)),
+            "vperm",
+        ),
     ]
 }
 
@@ -761,6 +1029,10 @@ fn sequence_assembly(sequences: &[(&str, Vec<u32>)], seeds: &[[u64; WATCHED_COUN
                 let offset = base + slot * 8;
                 let _ = writeln!(out, "\tld {register}, {offset}(30)");
             }
+            for (slot, register) in WATCHED_VECTORS.iter().enumerate() {
+                let offset = VECTOR_SEED_OFFSET as usize + slot * 16;
+                let _ = writeln!(out, "\tli 0, {offset}\n\tlvx {register}, 29, 0");
+            }
             let _ = writeln!(out, "\tli 0, 0\n\tmtxer 0\n\tmtcr 0");
             let _ = writeln!(out, "\tbl seq{at}");
 
@@ -772,8 +1044,15 @@ fn sequence_assembly(sequences: &[(&str, Vec<u32>)], seeds: &[[u64; WATCHED_COUN
             let xer_at = cr_at + 8;
             let _ = writeln!(out, "\tmfcr 0\n\tstw 0, {cr_at}({OUTPUT_REGISTER})");
             let _ = writeln!(out, "\tmfxer 0\n\tstd 0, {xer_at}({OUTPUT_REGISTER})");
+            for (slot, register) in WATCHED_VECTORS.iter().enumerate() {
+                let offset = VECTOR_RESULT_OFFSET + slot * 16;
+                let _ = writeln!(
+                    out,
+                    "\tli 0, {offset}\n\tstvx {register}, {OUTPUT_REGISTER}, 0"
+                );
+            }
             for byte in (0..MEMORY_SIZE).step_by(8) {
-                let to = xer_at + 8 + byte;
+                let to = VECTOR_RESULT_OFFSET + WATCHED_VECTOR_COUNT * 16 + byte;
                 let _ = writeln!(out, "\tld 0, {byte}(29)\n\tstd 0, {to}({OUTPUT_REGISTER})");
             }
             let _ = writeln!(
@@ -843,14 +1122,11 @@ fn sequences_on_hardware(
 /// effect is on which instruction runs next, which no single instruction's
 /// registers can show, and the code for one is written by the emitter from the
 /// graph rather than by the model from the encoding.
-fn sequences_on_the_model(
+/// Builds the host program that runs each lifted sequence.
+fn sequence_program(
     sequences: &[(&str, Vec<u32>)],
     seeds: &[[u64; WATCHED_COUNT]],
-) -> Result<Vec<State>, String> {
-    let Some(compiler) = host_compiler() else {
-        return Err("skip: no host C compiler is installed".to_owned());
-    };
-
+) -> Result<String, String> {
     let pattern: Vec<String> = memory_seed().iter().map(u8::to_string).collect();
     let mut out =
         String::from("#include \"xenolith.h\"\n#include <stdio.h>\n#include <string.h>\n\n");
@@ -876,6 +1152,13 @@ fn sequences_on_the_model(
         "static const unsigned char pattern[{}] = {{{}}};",
         MEMORY_SIZE,
         pattern.join(", ")
+    );
+    let seeded = vector_seed();
+    let _ = writeln!(
+        out,
+        "static const unsigned char vectors[{}] = {{{}}};",
+        seeded.len(),
+        seeded.join(", ")
     );
     out.push('\n');
 
@@ -909,6 +1192,12 @@ fn sequences_on_the_model(
             for (register, value) in WATCHED.iter().zip(seed) {
                 let _ = writeln!(out, "        state.r[{register}] = {value}ull;");
             }
+            for (at, register) in WATCHED_VECTORS.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "        for (unsigned b = 0; b < 16; b++) {{ xenolith_vector_set_u8(&state.v[{register}], b, vectors[{at} * 16 + b]); }}"
+                );
+            }
             let _ = writeln!(out, "        {name}(&state, memory);");
             out.push_str("        printf(\"%016llx\", (unsigned long long)state.r[3]);\n");
             for register in &WATCHED[1..] {
@@ -920,6 +1209,13 @@ fn sequences_on_the_model(
             out.push_str(
                 "        printf(\" %08llx %016llx \", (unsigned long long)packed(&state), (unsigned long long)state.xer);\n",
             );
+            for register in &WATCHED_VECTORS {
+                let _ = writeln!(
+                    out,
+                    "        for (unsigned b = 0; b < 16; b++) {{ printf(\"%02x\", xenolith_vector_u8(&state.v[{register}], b)); }}"
+                );
+            }
+            out.push_str("        printf(\" \");\n");
             let _ = writeln!(
                 out,
                 "        for (int b = 0; b < {MEMORY_SIZE}; b++) {{ printf(\"%02x\", memory[0x{MEMORY_BASE:x} + b]); }}"
@@ -929,6 +1225,19 @@ fn sequences_on_the_model(
     }
     out.push_str("    return 0;\n}\n");
 
+    Ok(out)
+}
+
+fn sequences_on_the_model(
+    sequences: &[(&str, Vec<u32>)],
+    seeds: &[[u64; WATCHED_COUNT]],
+) -> Result<Vec<State>, String> {
+    let Some(compiler) = host_compiler() else {
+        return Err("skip: no host C compiler is installed".to_owned());
+    };
+
+    let out = sequence_program(sequences, seeds)?;
+
     let directory = workspace("sequence-model")?;
     std::fs::write(directory.join("xenolith.h"), RUNTIME_HEADER)
         .map_err(|error| format!("writing the header: {error}"))?;
@@ -936,7 +1245,7 @@ fn sequences_on_the_model(
         .map_err(|error| format!("writing the model program: {error}"))?;
 
     let built = Command::new(compiler)
-        .args(["-std=c17", "-O1", "-Wno-infinite-recursion", "-o"])
+        .args(["-std=c17", "-O1", "-Wno-infinite-recursion", "-lm", "-o"])
         .arg(directory.join("model"))
         .arg(directory.join("model.c"))
         .output()

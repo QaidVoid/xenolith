@@ -1021,10 +1021,13 @@ fn vector_float(instruction: Instruction) -> Option<String> {
                 at(right, "f32", "lane"),
                 at(addend, "f32", "lane"),
             );
+            // The multiply and the add round once between them rather than
+            // twice, so writing them as two operations gives an answer one
+            // place out for some inputs. Hardware said so, four runs in.
             let body = if matches!(instruction.opcode(), Opcode::Vmaddfp | Opcode::Vmaddfp128) {
-                format!("{left} * {right} + {addend}")
+                format!("__builtin_fmaf({left}, {right}, {addend})")
             } else {
-                format!("-({left} * {right} - {addend})")
+                format!("-__builtin_fmaf({left}, {right}, -({addend}))")
             };
             vector_lanes(&mut out, d, 4, "f32", &body);
         }

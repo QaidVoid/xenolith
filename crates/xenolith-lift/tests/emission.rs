@@ -798,7 +798,7 @@ fn the_vector_lane_operations_lift() {
     );
     assert!(
         emitted.contains(
-            "xenolith_vector_f32(&ctx->v[2], lane) * xenolith_vector_f32(&ctx->v[4], lane) + xenolith_vector_f32(&ctx->v[3], lane)"
+            "__builtin_fmaf(xenolith_vector_f32(&ctx->v[2], lane), xenolith_vector_f32(&ctx->v[4], lane), xenolith_vector_f32(&ctx->v[3], lane))"
         ),
         "the fused multiply took the wrong operands: {emitted}"
     );
@@ -919,7 +919,7 @@ fn a_console_fused_multiply_reads_what_it_writes() {
 
     assert!(
         emitted.contains(
-            "xenolith_vector_f32(&ctx->v[126], lane) * xenolith_vector_f32(&ctx->v[0], lane) + xenolith_vector_f32(&ctx->v[11], lane)"
+            "__builtin_fmaf(xenolith_vector_f32(&ctx->v[126], lane), xenolith_vector_f32(&ctx->v[0], lane), xenolith_vector_f32(&ctx->v[11], lane))"
         ),
         "the accumulate source was not the register written: {emitted}"
     );
