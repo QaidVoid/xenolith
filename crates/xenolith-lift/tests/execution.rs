@@ -560,7 +560,7 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
 /// since nothing here reads one.
 const RUNTIME_STUBS: &str = "\
     void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
-    void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
+    void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; exit(9); }\n\
     void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o) { (void)c; (void)b; (void)l; (void)o; }\n\
     uint32_t xenolith_reserve32(const uint8_t *b, uint32_t a) { return xenolith_load32(b, a); }\n\
     uint64_t xenolith_reserve64(const uint8_t *b, uint32_t a) { return xenolith_load64(b, a); }\n\
@@ -623,8 +623,9 @@ fn report_state(out: &mut String) {
 /// Writes the host C that runs each encoding through this project's model.
 fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
     let pattern: Vec<String> = memory_seed().iter().map(u8::to_string).collect();
-    let mut out =
-        String::from("#include \"xenolith.h\"\n#include <stdio.h>\n#include <string.h>\n\n");
+    let mut out = String::from(
+        "#include \"xenolith.h\"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n",
+    );
     out.push_str(RUNTIME_STUBS);
     // The condition register is packed the way the architecture packs it, so the
     // two sides can be compared as one number.
@@ -819,6 +820,15 @@ fn subjects() -> Vec<(u32, &'static str)> {
         (extended(a, b, c, 489, 0), "divd"),
         (extended(a, b, c, 457, 0), "divdu"),
         (extended(a, b, 0, 104, 0), "neg"),
+        // A trap whose condition never holds, so nothing traps on either side.
+        // The model used to call the trap whatever the condition said, which
+        // the stub turns into an exit, so a run that should have finished does
+        // not. Only the case that does not fire can be checked here: one that
+        // does takes the process with it on both sides.
+        ((3 << 26) | (2 << 21) | (b << 16), "twi never"),
+        ((2 << 26) | (2 << 21) | (b << 16), "tdi never"),
+        (extended(2, b, b, 4, 0), "tw never"),
+        (extended(2, b, b, 68, 0), "td never"),
         (extended(a, b, c, 10, 0), "addc"),
         (extended(a, b, c, 8, 0), "subfc"),
         // Subtracting a value from itself carries, and the result is zero, so
@@ -1421,8 +1431,9 @@ fn sequence_program(
     seeds: &[[u64; WATCHED_COUNT]],
 ) -> Result<String, String> {
     let pattern: Vec<String> = memory_seed().iter().map(u8::to_string).collect();
-    let mut out =
-        String::from("#include \"xenolith.h\"\n#include <stdio.h>\n#include <string.h>\n\n");
+    let mut out = String::from(
+        "#include \"xenolith.h\"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n",
+    );
     out.push_str(RUNTIME_STUBS);
     out.push_str(
         "static uint32_t packed(const xenolith_context *ctx) {\n\

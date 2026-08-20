@@ -13,7 +13,7 @@
 //! No game data is committed. The title, the toolchain, and the emulator all
 //! come from the environment and every test skips when they are absent.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,12 +21,23 @@ use std::process::Command;
 use xenolith_lift::{Imports, RUNTIME_HEADER, RUNTIME_SOURCE, lift, name_of};
 use xenolith_xex::{Container, Image, KeyMaterial};
 
+/// The most instructions an entry may hold, for the few kept past the ordinary
+/// size because of what they dispatch through.
+const MOST_INSTRUCTIONS: u32 = 400;
+
+/// How many functions one entry may reach before it is passed over.
+///
+/// An entry brings everything it calls with it, and a few of them reach most of
+/// the program. Building that for one comparison costs more than the comparison
+/// is worth.
+const CLOSURE_LIMIT: usize = 48;
+
 /// How many functions to run.
 ///
 /// Every one costs an emulator start and a host process, so this is a sample
 /// rather than a sweep. What makes it worth having is that the sample is drawn
 /// from code nobody here wrote.
-const SAMPLE: usize = 2000;
+const SAMPLE: usize = 4000;
 
 /// The registers seeded before a call and read back after it.
 ///
@@ -187,11 +198,36 @@ fn workspace(name: &str) -> PathBuf {
 /// reaches an import would leave the part of the program this can account for.
 /// The point is not to run the hardest functions but to run ones nobody here
 /// wrote.
-fn candidates(image: &Image, wanted: usize) -> Vec<(u32, String)> {
+fn candidates(image: &Image, wanted: usize) -> (Vec<u32>, BTreeMap<u32, String>) {
     let program = xenolith_analysis::analyze(image, &[]);
-    let mut found = Vec::new();
+    let imports = Imports::new();
 
+    // Lifted once and keyed by address, since a function reached from several
+    // callers has to be emitted exactly once however many reach it.
+    let mut bodies: BTreeMap<u32, xenolith_lift::Lifted> = BTreeMap::new();
+    let mut by_address = BTreeMap::new();
     for function in program.functions() {
+        by_address.insert(function.start, function);
+    }
+    let lift_at = |address: u32, bodies: &mut BTreeMap<u32, xenolith_lift::Lifted>| -> bool {
+        if bodies.contains_key(&address) {
+            return true;
+        }
+        let Some(function) = by_address.get(&address) else {
+            return false;
+        };
+        let Ok(lifted) = lift(image, function, &imports) else {
+            return false;
+        };
+        bodies.insert(address, lifted);
+        true
+    };
+
+    let mut entries = Vec::new();
+    for start in by_address.keys().copied().collect::<Vec<_>>() {
+        let Some(function) = by_address.get(&start) else {
+            continue;
+        };
         // Small enough that a disagreement can be read, and large enough to do
         // something.
         let instructions: u32 = function
@@ -199,33 +235,139 @@ fn candidates(image: &Image, wanted: usize) -> Vec<(u32, String)> {
             .iter()
             .map(|block| (block.end - block.start) / 4)
             .sum();
-        if !(4..=48).contains(&instructions) {
+        if !(4..=48).contains(&instructions) && !(49..=MOST_INSTRUCTIONS).contains(&instructions) {
             continue;
         }
-        let Ok(lifted) = lift(image, function, &Imports::new()) else {
+        if !lift_at(start, &mut bodies) {
+            continue;
+        }
+        // A function is kept past the ordinary size only for what it holds
+        // that nothing else here reaches. A jump table is the whole reason for
+        // this: the recovery behind one is compared against another project's
+        // tables and has never been run, and a function dispatching through one
+        // is rarely as short as forty eight instructions.
+        let table = bodies
+            .get(&start)
+            .is_some_and(|lifted| lifted.code.contains("switch ((uint32_t)ctx->ctr)"));
+        if instructions > 48 && !table {
+            continue;
+        }
+
+        let Some(closure) = reached_from(start, &mut bodies, &lift_at) else {
             continue;
         };
-        if !lifted.calls.is_empty() {
+
+        // A recovered jump table is welcome, and an indirect branch nothing
+        // recovered is not: the model would stop at it while the hardware
+        // followed whatever the register held. The two are told apart by the
+        // switch, since each one contributes exactly one dispatch to its
+        // default arm.
+        let Some(code) = bodies.get(&start).map(|lifted| &lifted.code) else {
+            continue;
+        };
+        let tables = code.matches("switch ((uint32_t)ctx->ctr)").count();
+        if code.matches("xenolith_dispatch").count() != tables {
             continue;
         }
-        if ["xenolith_dispatch", "xenolith_import", "xenolith_trap"]
-            .iter()
-            .any(|escape| lifted.code.contains(escape))
-        {
+
+        // Reading the time base gives whatever the clock says, which is a
+        // different number on each side by design. The instruction differential
+        // leaves it out for the same reason.
+        if closure.iter().any(|address| {
+            bodies
+                .get(address)
+                .is_some_and(|lifted| lifted.code.contains("xenolith_timebase"))
+        }) {
             continue;
         }
-        found.push((function.start, lifted.code));
+        entries.push(start);
     }
 
-    // Spread over the whole code section rather than taken from the front of
-    // it. Functions near each other were written together and do the same
-    // kinds of thing, so the first hundred are a far narrower test than a
-    // hundred drawn from end to end.
-    if found.len() <= wanted {
-        return found;
+    let eligible = entries.len();
+    let entries = spread(entries, wanted);
+
+    // Only what the chosen entries actually reach is emitted.
+    let mut needed = BTreeSet::new();
+    let mut pending = entries.clone();
+    while let Some(address) = pending.pop() {
+        if !needed.insert(address) {
+            continue;
+        }
+        if let Some(lifted) = bodies.get(&address) {
+            pending.extend(lifted.calls.iter().copied());
+        }
     }
-    let stride = found.len() / wanted;
-    found.into_iter().step_by(stride).take(wanted).collect()
+    let pool = needed
+        .into_iter()
+        .filter_map(|address| {
+            bodies
+                .get(&address)
+                .map(|lifted| (address, lifted.code.clone()))
+        })
+        .collect();
+
+    println!(
+        "functions eligible to run {eligible}, of which {} chosen",
+        entries.len()
+    );
+    // What the extension was for: an entry that calls, and one holding a
+    // recovered jump table, were both refused outright before.
+    let calling = entries
+        .iter()
+        .filter(|address| bodies.get(address).is_some_and(|l| !l.calls.is_empty()))
+        .count();
+    let tabled = entries
+        .iter()
+        .filter(|address| {
+            bodies
+                .get(address)
+                .is_some_and(|l| l.code.contains("switch ((uint32_t)ctx->ctr)"))
+        })
+        .count();
+    println!("of those, {calling} call and {tabled} hold a jump table");
+    (entries, pool)
+}
+
+/// Returns a sample drawn from end to end rather than from the front.
+///
+/// Functions near each other were written together and do the same kinds of
+/// thing, so the first hundred are a far narrower test than a hundred drawn
+/// across the whole code section.
+fn spread(entries: Vec<u32>, wanted: usize) -> Vec<u32> {
+    if entries.len() <= wanted {
+        return entries;
+    }
+    let stride = entries.len() / wanted;
+    entries.into_iter().step_by(stride).take(wanted).collect()
+}
+
+/// Returns everything one entry reaches, or nothing when that is too much.
+///
+/// All of it has to be emitted with the entry, or the model stops at the first
+/// call while the hardware runs on. Bounded, because a few entries reach most
+/// of the program and building that for one comparison costs more than the
+/// comparison is worth.
+fn reached_from(
+    start: u32,
+    bodies: &mut BTreeMap<u32, xenolith_lift::Lifted>,
+    lift_at: &impl Fn(u32, &mut BTreeMap<u32, xenolith_lift::Lifted>) -> bool,
+) -> Option<BTreeSet<u32>> {
+    let mut closure = BTreeSet::new();
+    let mut pending = vec![start];
+
+    while let Some(address) = pending.pop() {
+        if !closure.insert(address) {
+            continue;
+        }
+        if closure.len() > CLOSURE_LIMIT || !lift_at(address, bodies) {
+            return None;
+        }
+        if let Some(lifted) = bodies.get(&address) {
+            pending.extend(lifted.calls.iter().copied());
+        }
+    }
+
+    Some(closure)
 }
 
 /// The assembly that seeds the registers, calls a guest function, and stores
@@ -356,8 +498,13 @@ const MODEL_DRIVER: &str = r#"
 #include <stdlib.h>
 #include <string.h>
 
-xenolith_function xenolith_lookup(uint32_t address) { (void)address; return 0; }
 xenolith_function chosen(uint32_t address);
+
+/* A computed target is looked up among the functions emitted beside this, so a
+ * recovered jump table lands on one rather than stopping. Anything else leaves
+ * what this harness accounts for, and the runtime reports it and stops, which
+ * is what tells a missing table apart from a wrong answer. */
+xenolith_function xenolith_lookup(uint32_t address) { return chosen(address); }
 
 int main(int count, char **arguments) {
     if (count < 3) { return 1; }
@@ -488,13 +635,13 @@ fn build_guest(directory: &Path, image: &Image) -> Option<PathBuf> {
 }
 
 /// Builds the model side over the functions chosen.
-fn build_model(directory: &Path, image: &Image, chosen: &[(u32, String)]) -> Option<PathBuf> {
+fn build_model(directory: &Path, image: &Image, pool: &BTreeMap<u32, String>) -> Option<PathBuf> {
     let compiler = host_compiler()?;
     let _ = std::fs::write(directory.join("xenolith.h"), RUNTIME_HEADER);
     let _ = std::fs::write(directory.join("xenolith.c"), RUNTIME_SOURCE);
 
     let mut lifted = String::from("#include \"xenolith.h\"\n\n");
-    for (address, _) in chosen {
+    for address in pool.keys() {
         let _ = writeln!(
             lifted,
             "void {}(xenolith_context *ctx, uint8_t *base);",
@@ -502,13 +649,15 @@ fn build_model(directory: &Path, image: &Image, chosen: &[(u32, String)]) -> Opt
         );
     }
     lifted.push('\n');
-    for (_, code) in chosen {
+    for code in pool.values() {
         lifted.push_str(code);
         lifted.push('\n');
     }
-    // The driver reaches a function by address, over the ones lifted here.
+    // Every function emitted here, not only the ones entered directly. The
+    // runtime reaches a computed target through this, so a jump table arriving
+    // at a function in the pool resolves rather than stopping.
     lifted.push_str("xenolith_function chosen(uint32_t address) {\n    switch (address) {\n");
-    for (address, _) in chosen {
+    for address in pool.keys() {
         let _ = writeln!(
             lifted,
             "    case {address:#010x}u: return {};",
@@ -550,30 +699,39 @@ fn build_model(directory: &Path, image: &Image, chosen: &[(u32, String)]) -> Opt
 /// only a slow loop.
 const PATIENCE: &str = "25";
 
-/// Runs one address on one side, or nothing when that side could not.
+/// What the runtime exits with when it reaches an import nothing implements.
+///
+/// Told apart from every other way of not finishing, because it is the one that
+/// says nothing about the model. The environment is unimplemented on purpose
+/// and reaching it is a run that cannot be compared, not a disagreement.
+const UNIMPLEMENTED: i32 = 3;
+
+/// Runs one address on one side, or the code it stopped with.
 fn once(
     program: &Path,
     address: u32,
     shape: usize,
     image: &Path,
     emulator: Option<&str>,
-) -> Option<State> {
+) -> Result<State, i32> {
     let mut command = Command::new("timeout");
     command.arg(PATIENCE);
     if let Some(emulator) = emulator {
         command.arg(emulator);
     }
     command.arg(program);
-    let ran = command
+    let Ok(ran) = command
         .arg(format!("{address:#010x}"))
         .arg(image)
         .arg(shape.to_string())
         .output()
-        .ok()?;
+    else {
+        return Err(-1);
+    };
     if !ran.status.success() {
-        return None;
+        return Err(ran.status.code().unwrap_or(-1));
     }
-    parse(&String::from_utf8_lossy(&ran.stdout))
+    parse(&String::from_utf8_lossy(&ran.stdout)).ok_or(-2)
 }
 
 /// Runs functions out of a shipped title on hardware and through the model.
@@ -593,11 +751,16 @@ fn the_model_runs_what_the_title_holds() {
         return;
     }
 
-    let chosen = candidates(&image, SAMPLE);
+    let (chosen, pool) = candidates(&image, SAMPLE);
     assert!(
         chosen.len() >= SAMPLE / 2,
         "only {} functions were safe to run, which is too few to say anything",
         chosen.len()
+    );
+    println!(
+        "entries {} of {SAMPLE} wanted, functions emitted with them {}",
+        chosen.len(),
+        pool.len()
     );
 
     // Two directories, because both sides write a driver and a build that
@@ -609,7 +772,7 @@ fn the_model_runs_what_the_title_holds() {
     let Some(guest) = build_guest(&workspace("title-guest"), &image) else {
         return;
     };
-    let Some(model) = build_model(&workspace("title-model"), &image, &chosen) else {
+    let Some(model) = build_model(&workspace("title-model"), &image, &pool) else {
         return;
     };
     let emulator = emulator().expect("checked above");
@@ -618,7 +781,7 @@ fn the_model_runs_what_the_title_holds() {
     // of them. Run across the machine rather than one at a time.
     let jobs: Vec<(u32, usize)> = chosen
         .iter()
-        .flat_map(|(address, _)| (0..SHAPES).map(move |shape| (*address, shape)))
+        .flat_map(|address| (0..SHAPES).map(move |shape| (*address, shape)))
         .collect();
     let lanes = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let size = jobs.len().div_ceil(lanes);
@@ -632,16 +795,25 @@ fn the_model_runs_what_the_title_holds() {
                 scope.spawn(move || {
                     let mut out = Vec::new();
                     for (address, shape) in chunk {
-                        let Some(theirs) =
+                        let Ok(theirs) =
                             once(guest, *address, *shape, image_path, Some(emulator))
                         else {
                             continue;
                         };
-                        let Some(ours) = once(model, *address, *shape, image_path, None) else {
-                            out.push((*address, Some(format!(
-                                "{address:#010x} shape {shape} finished on hardware and not through the model"
-                            ))));
-                            continue;
+                        let ours = match once(model, *address, *shape, image_path, None) {
+                            Ok(state) => state,
+                            // An unimplemented import is not a disagreement.
+                            // Everything else is: the hardware got to the end
+                            // and the model did not, which for a computed
+                            // target means the table behind it was not fully
+                            // recovered.
+                            Err(UNIMPLEMENTED) => continue,
+                            Err(code) => {
+                                out.push((*address, Some(format!(
+                                    "{address:#010x} shape {shape} finished on hardware and not through the model, which stopped with {code}"
+                                ))));
+                                continue;
+                            }
                         };
                         if theirs == ours {
                             out.push((*address, None));
