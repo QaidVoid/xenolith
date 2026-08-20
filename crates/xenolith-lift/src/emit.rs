@@ -628,6 +628,43 @@ fn unpack_operation(opcode: Opcode) -> Option<(u32, bool)> {
     })
 }
 
+/// Returns the C for unpacking a packed vertex format, if the format is one
+/// this project has settled rather than taken from elsewhere.
+fn vector_vertex_unpack(instruction: Instruction) -> Option<String> {
+    let (d, _, b, _) = vector_operands(instruction);
+    let mut out = String::new();
+
+    // Unpacking a packed vertex format. The type field selects which, and only
+    // one of them is settled well enough to write down.
+    //
+    // Type zero takes the last word as four bytes and puts each into the low
+    // mantissa bits of one, giving a float between one and one plus a part in
+    // eight million. The game's own constant table proves it: what it multiplies
+    // the result by is 32896.5039, and two to the twenty third over two hundred
+    // and fifty five is 32896.502, the same number to the precision a float
+    // holds. Nothing else about that instruction would produce that constant.
+    //
+    // The byte order falls out of the same reading. A colour is stored with
+    // alpha first, and the lanes come out red, green, blue, alpha, which is the
+    // ordering a wrong reading would not have produced.
+    if instruction.opcode() == Opcode::Vupkd3d128 {
+        if (instruction.word() >> 16) & 0x1f != 0 {
+            return None;
+        }
+        let _ = writeln!(out, "    {{ xenolith_vector t;");
+        for (lane, byte) in [13u32, 14, 15, 12].into_iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "    xenolith_vector_set_u32(&t, {lane}, xenolith_vector_u8(&ctx->v[{b}], {byte}) | 0x3f800000u);"
+            );
+        }
+        let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+        return Some(out);
+    }
+
+    None
+}
+
 /// Returns the C for a console form that rearranges words by an immediate.
 ///
 /// Where those immediates sit was derived rather than read. Each form's mask
@@ -686,6 +723,9 @@ fn vector_pack(instruction: Instruction) -> Option<String> {
     let (d, a, b, _) = vector_operands(instruction);
     let mut out = String::new();
     if let Some(code) = vector_console_arrangement(instruction) {
+        return Some(code);
+    }
+    if let Some(code) = vector_vertex_unpack(instruction) {
         return Some(code);
     }
 

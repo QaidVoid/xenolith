@@ -580,7 +580,8 @@ fn vector_shape(opcode: Opcode) -> Option<Shape> {
         | Opcode::Vupklsb
         | Opcode::Vupklsb128
         | Opcode::Vupkhsh
-        | Opcode::Vupklsh => Shape::VectorFromOne,
+        | Opcode::Vupklsh
+        | Opcode::Vupkd3d128 => Shape::VectorFromOne,
 
         Opcode::Vsel
         | Opcode::Vsel128
