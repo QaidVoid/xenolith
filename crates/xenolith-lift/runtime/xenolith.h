@@ -435,4 +435,17 @@ xenolith_function xenolith_lookup(uint32_t address);
  */
 uint8_t *xenolith_boot(const char *image, uint32_t load_address);
 
+/* Where the guest's stack pointer starts.
+ *
+ * A title expects to have been given one. Entered with the register at zero it
+ * still runs, because its first frame subtracts from zero and wraps to the top
+ * of a space this maps all of, but every frame it takes then sits somewhere
+ * nothing chose. Naming a stack costs nothing and makes where it lives a
+ * decision rather than an accident.
+ *
+ * Clear of where the image loads, and far enough below the top that the
+ * linkage area a caller writes above the pointer is inside the space.
+ */
+#define XENOLITH_STACK_TOP 0x70000000u
+
 #endif /* XENOLITH_H */

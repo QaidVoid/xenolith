@@ -229,6 +229,14 @@ int main(int count, char **arguments) {
     }
 
     static xenolith_context state;
+
+    /* A title expects to have been given a stack. Left at zero the first frame
+     * subtracts from it and wraps to the top of the space, which works only
+     * because all of it is mapped, and puts every frame somewhere nothing
+     * chose. The linkage area a caller writes sits above the pointer, so the
+     * pointer starts below the top rather than at it. */
+    state.r[1] = XENOLITH_STACK_TOP - 64;
+
     entered(&state, base);
     return 0;
 }
