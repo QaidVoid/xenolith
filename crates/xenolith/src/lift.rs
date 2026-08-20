@@ -410,6 +410,17 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         }
     }
 
+    let entries = lift_helper_entries(
+        &image,
+        &program,
+        &imports,
+        &mut referenced,
+        &mut emitted,
+        &mut units,
+        &mut blocking,
+        &mut refused,
+    )?;
+
     let sizes = units.finish()?;
 
     // Everything the emitted code names is declared, which is more than the
@@ -448,6 +459,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         args,
         &Outcome {
             lifted,
+            entries,
             thunks,
             refused,
             blocking,
@@ -459,10 +471,57 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Emits a body for every helper entry the output names, returning how many.
+///
+/// A call into a register save helper lands partway through one, and discovery
+/// does not claim those: a call to a helper is a call to the helper rather than
+/// to a function beginning wherever the caller entered it. Left without a body
+/// they became traps, and since better than a third of a title's functions save
+/// registers this way, the program stopped on the first thing it did.
+///
+/// These are counted apart from the discovered functions, because they are
+/// entries into one rather than functions the analysis found.
+#[expect(clippy::too_many_arguments, reason = "one pass over what lifting left")]
+fn lift_helper_entries<'a>(
+    image: &xenolith_xex::Image,
+    program: &'a xenolith_analysis::Program,
+    imports: &xenolith_lift::Imports,
+    referenced: &mut BTreeSet<u32>,
+    emitted: &mut BTreeSet<u32>,
+    units: &mut Units,
+    blocking: &mut BTreeMap<&'a str, u64>,
+    refused: &mut Vec<Unlifted>,
+) -> Result<u64> {
+    let mut entries = 0u64;
+
+    for address in referenced.difference(emitted).copied().collect::<Vec<_>>() {
+        let Some(function) = xenolith_analysis::helper_entry(image, program.helpers(), address)
+        else {
+            continue;
+        };
+        match lift(image, &function, imports) {
+            Ok(result) => {
+                entries += 1;
+                referenced.extend(result.calls);
+                emitted.insert(address);
+                units.push(address, &result.code)?;
+            }
+            Err(unlifted) => {
+                *blocking.entry(unlifted.mnemonic).or_default() += 1;
+                refused.push(unlifted);
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
 /// What lifting produced, in the form the report reads it.
 struct Outcome<'a> {
     /// How many functions were emitted.
     lifted: u64,
+    /// How many helper entries were emitted beside them.
+    entries: u64,
     /// How many of those were import thunks rather than translated code.
     thunks: u64,
     /// The functions that were not emitted, and what stopped each.
@@ -486,6 +545,7 @@ fn report(args: &Args, outcome: &Outcome<'_>) {
     );
     println!("    import thunks  {:>10}", outcome.thunks);
     println!("  not lifted       {:>10}", outcome.refused.len());
+    println!("helper entries     {:>10}", outcome.entries);
     println!("declarations       {:>10}", outcome.declarations);
     println!("units              {:>10}", outcome.sizes.len());
     println!(
@@ -493,7 +553,8 @@ fn report(args: &Args, outcome: &Outcome<'_>) {
         outcome.sizes.iter().copied().max().unwrap_or(0)
     );
     println!("\nwritten to {}", args.out.display());
-    println!("build it with make -j, which links into a program");
+    println!("build it with make -j8, which links into a program");
+    println!("give -j a number: a job for each unit is more than a machine has");
     println!("that program stops at the first import, since none is implemented");
 
     if args.blockers {
