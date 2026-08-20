@@ -9,12 +9,13 @@
 //! emitted code needs; nothing here provides it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_analysis::analyze;
-use xenolith_lift::{RUNTIME_HEADER, Unlifted, declaration_of, lift};
+use xenolith_lift::{RUNTIME_HEADER, RUNTIME_SOURCE, Unlifted, declaration_of, lift, name_of};
 
 use crate::input::{Source, number};
 
@@ -173,40 +174,169 @@ fn clear_units(directory: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// Returns the makefile that builds the emitted units.
-///
-/// It stops at an archive. Nothing implements the runtime interface the units
-/// are written against, so a link step would fail and reporting that failure as
-/// the build's outcome would say less than it seems to.
-fn makefile() -> String {
-    format!(
-        "# Emitted by xenolith. Run with -j to build the units in parallel.\n\
-         #\n\
-         # This stops at an archive rather than a link. The units call a runtime\n\
-         # that xenolith declares and does not implement, so there is nothing to\n\
-         # link them against yet.\n\
-         \n\
-         CC ?= cc\n\
-         AR ?= ar\n\
-         CFLAGS ?= -O2 -Wall -Wextra -Wno-infinite-recursion\n\
-         \n\
-         SOURCES := $(wildcard lifted.*.c)\n\
-         OBJECTS := $(SOURCES:.c=.o)\n\
-         \n\
-         all: liblifted.a\n\
-         \n\
-         liblifted.a: $(OBJECTS)\n\
-         \t$(AR) rcs $@ $(OBJECTS)\n\
-         \n\
-         %.o: %.c {DECLARATIONS} xenolith.h\n\
-         \t$(CC) $(CFLAGS) -c -o $@ $<\n\
-         \n\
-         clean:\n\
-         \trm -f $(OBJECTS) liblifted.a\n\
-         \n\
-         .PHONY: all clean\n"
-    )
+/// Writes one of the files the build needs.
+fn write_into(directory: &Path, name: &str, text: &str) -> Result<()> {
+    let path = directory.join(name);
+    std::fs::write(&path, text)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("writing {}", path.display()))
 }
+
+/// Writes the decoded image, which the runtime loads rather than compiling in.
+fn write_bytes_into(directory: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let path = directory.join(name);
+    std::fs::write(&path, bytes)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("writing {}", path.display()))
+}
+
+/// The program that boots the runtime and enters the guest.
+///
+/// It takes an address so that a caller can enter anywhere rather than only at
+/// the entry point, which is what running one function of a title against
+/// emulated hardware needs.
+const BOOT_PROGRAM: &str = r#"/* Emitted by xenolith: boot the runtime and enter the guest.
+ *
+ * This links and it does not play a game. The first import the guest reaches
+ * ends it, which is an accurate account of how far the translation has got.
+ */
+
+#include "lifted.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int count, char **arguments) {
+    const char *image = count > 1 ? arguments[1] : "image.bin";
+    uint32_t address = ENTRY_POINT;
+    if (count > 2) {
+        address = (uint32_t)strtoul(arguments[2], 0, 0);
+    }
+    if (address == 0) {
+        fprintf(stderr, "xenolith: no entry point was recorded, name one\n");
+        return 1;
+    }
+
+    uint8_t *base = xenolith_boot(image, LOAD_ADDRESS);
+    if (base == 0) {
+        return 1;
+    }
+
+    xenolith_function entered = xenolith_lookup(address);
+    if (entered == 0) {
+        fprintf(stderr, "xenolith: %#010x is not a lifted function\n", address);
+        return 1;
+    }
+
+    static xenolith_context state;
+    entered(&state, base);
+    return 0;
+}
+"#;
+
+/// Returns that program with the addresses this title uses.
+fn main_program(base: u32, entry: Option<u32>) -> String {
+    BOOT_PROGRAM
+        .replace(
+            "ENTRY_POINT",
+            &entry.map_or_else(|| "0".to_owned(), |address| format!("{address:#010x}u")),
+        )
+        .replace("LOAD_ADDRESS", &format!("{base:#010x}u"))
+}
+
+/// Writes everything the build needs besides the units themselves.
+///
+/// The traps, the table, and the image are all specific to one title, so they
+/// are written here rather than shipped, and the runtime that reads them is
+/// shipped rather than written here.
+fn write_support(
+    out: &Path,
+    image: &xenolith_xex::Image,
+    referenced: &BTreeSet<u32>,
+    emitted: &BTreeSet<u32>,
+) -> Result<()> {
+    // Everything the emitted code names but did not get a body becomes a trap,
+    // so the program links and says where it went rather than walking past the
+    // thing that is missing.
+    let missing: Vec<u32> = referenced.difference(emitted).copied().collect();
+    let mut traps = String::from(
+        "/* Emitted by xenolith: the addresses that could not be lifted.\n\
+         \x20*\n\
+         \x20* Each is defined rather than left out so that the program links, and each\n\
+         \x20* traps rather than returning so that reaching one is reported instead of\n\
+         \x20* being walked past.\n\
+         \x20*/\n\n#include \"lifted.h\"\n\n",
+    );
+    for address in &missing {
+        let _ = writeln!(
+            traps,
+            "void {}(xenolith_context *ctx, uint8_t *base) {{ xenolith_trap(ctx, base, {address:#010x}u); }}",
+            name_of(*address)
+        );
+    }
+    write_into(out, "unlifted.c", &traps)?;
+
+    // Only the lift knows which addresses became functions, so the table an
+    // indirect branch resolves against is written here.
+    let mut table = String::from(
+        "/* Emitted by xenolith: every address that became a function.\n\
+         \x20*\n\
+         \x20* Sorted, so an address is found by halving rather than by walking.\n\
+         \x20*/\n\n#include \"lifted.h\"\n\n         typedef struct entry {\n    uint32_t address;\n    xenolith_function function;\n} entry;\n\n         static const entry entries[] = {\n",
+    );
+    for address in emitted {
+        let _ = writeln!(table, "    {{ {address:#010x}u, {} }},", name_of(*address));
+    }
+    table.push_str(
+        "};\n\n         xenolith_function xenolith_lookup(uint32_t address) {\n         \x20   size_t low = 0, high = sizeof entries / sizeof *entries;\n         \x20   while (low < high) {\n         \x20       size_t middle = low + (high - low) / 2;\n         \x20       if (entries[middle].address == address) { return entries[middle].function; }\n         \x20       if (entries[middle].address < address) { low = middle + 1; } else { high = middle; }\n         \x20   }\n         \x20   return 0;\n         }\n",
+    );
+    write_into(out, "table.c", &table)?;
+
+    // The runtime loads the image rather than having it compiled in, since a
+    // title is tens of megabytes and a C array of it would be neither quick to
+    // build nor readable.
+    write_bytes_into(out, "image.bin", image.bytes())?;
+    write_into(
+        out,
+        "main.c",
+        &main_program(image.base_address(), image.entry_point()),
+    )?;
+
+    Ok(())
+}
+
+/// The makefile that builds what was emitted.
+///
+/// It links now rather than stopping at an archive. A unit compiling says it is
+/// well formed on its own; only a link says the units agree with each other
+/// about what exists and that nothing is defined twice.
+const BUILD_FILE: &str = r"# Emitted by xenolith. Run with -j to build the units in parallel.
+#
+# This links into a program. That program will not play a game: nothing here
+# services an import, so the first one the guest reaches ends it. What linking
+# proves is that the emitted code is complete, which compiling a unit at a time
+# does not.
+
+CC ?= cc
+CFLAGS ?= -O2 -Wall -Wextra -Wno-infinite-recursion
+LDLIBS ?= -lm
+
+SOURCES := $(wildcard lifted.*.c) unlifted.c table.c xenolith.c main.c
+OBJECTS := $(SOURCES:.c=.o)
+
+all: lifted
+
+lifted: $(OBJECTS)
+	$(CC) $(CFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
+
+%.o: %.c lifted.h xenolith.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(OBJECTS) lifted
+
+.PHONY: all clean
+";
 
 /// Runs the lift subcommand.
 ///
@@ -243,15 +373,22 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .into_diagnostic()
         .wrap_err_with(|| format!("making {}", args.out.display()))?;
     clear_units(&args.out)?;
-    std::fs::write(args.out.join("xenolith.h"), RUNTIME_HEADER)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("writing the runtime header into {}", args.out.display()))?;
+    for (name, text) in [
+        ("xenolith.h", RUNTIME_HEADER),
+        ("xenolith.c", RUNTIME_SOURCE),
+    ] {
+        let path = args.out.join(name);
+        std::fs::write(&path, text)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("writing {}", path.display()))?;
+    }
 
     let mut lifted = 0u64;
     let mut thunks = 0u64;
     let mut refused = Vec::new();
     let mut blocking: BTreeMap<&str, u64> = BTreeMap::new();
     let mut referenced: BTreeSet<u32> = BTreeSet::new();
+    let mut emitted: BTreeSet<u32> = BTreeSet::new();
     let mut units = Units::new(&args.out, budget);
 
     for function in program.functions() {
@@ -263,6 +400,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
                     thunks += 1;
                 }
                 referenced.extend(result.calls);
+                emitted.insert(function.start);
                 units.push(function.start, &result.code)?;
             }
             Err(unlifted) => {
@@ -303,10 +441,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .into_diagnostic()
         .wrap_err_with(|| format!("writing {}", path.display()))?;
 
-    let path = args.out.join("Makefile");
-    std::fs::write(&path, makefile())
-        .into_diagnostic()
-        .wrap_err_with(|| format!("writing {}", path.display()))?;
+    write_support(&args.out, &image, &referenced, &emitted)?;
+    write_into(&args.out, "Makefile", BUILD_FILE)?;
 
     report(
         args,
@@ -357,8 +493,8 @@ fn report(args: &Args, outcome: &Outcome<'_>) {
         outcome.sizes.iter().copied().max().unwrap_or(0)
     );
     println!("\nwritten to {}", args.out.display());
-    println!("build it with make -j, which stops at an archive");
-    println!("nothing here can run it yet, since the interface is a declaration");
+    println!("build it with make -j, which links into a program");
+    println!("that program stops at the first import, since none is implemented");
 
     if args.blockers {
         // The instruction that appears most is not the one to model next. The

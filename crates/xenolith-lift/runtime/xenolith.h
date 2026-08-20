@@ -13,6 +13,7 @@
 #ifndef XENOLITH_H
 #define XENOLITH_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* How many registers each bank holds. The vector bank is the console's, which
@@ -411,5 +412,22 @@ uint8_t xenolith_conditional64(uint8_t *base, uint32_t address, uint64_t value);
  * a program whose timing loops never finish.
  */
 uint64_t xenolith_timebase(void);
+
+/* Where an address becomes the function lifted for it.
+ *
+ * Only the lift knows which addresses it emitted, so the table is written
+ * beside the code rather than here. Anything not in it is not a function this
+ * program has.
+ */
+xenolith_function xenolith_lookup(uint32_t address);
+
+/* Mapping guest memory and loading the image into it.
+ *
+ * Emitted code reaches memory by adding a guest address to a base, so the base
+ * has to be a mapping wide enough that any address it could form indexes
+ * inside it. Returns the base, or a null pointer if the image could not be
+ * read.
+ */
+uint8_t *xenolith_boot(const char *image, uint32_t load_address);
 
 #endif /* XENOLITH_H */

@@ -453,9 +453,88 @@ fn lift_emits_c_for_a_crafted_image() {
         out.join("xenolith.h").is_file(),
         "the runtime header should be written beside the code"
     );
+    for name in [
+        "Makefile",
+        "xenolith.h",
+        "xenolith.c",
+        "lifted.h",
+        "unlifted.c",
+        "table.c",
+        "main.c",
+        "image.bin",
+    ] {
+        assert!(
+            out.join(name).is_file(),
+            "{name} should be written beside the code"
+        );
+    }
+}
+
+/// Compiling a unit says it is well formed on its own. Only a link says the
+/// units agree with each other about what exists and that nothing is defined
+/// twice, which is the thing twelve thousand functions can get wrong.
+#[test]
+fn what_was_emitted_links_into_a_program() {
+    // mflr r12; stwu r1, -96(r1); li r3, 7; addi r1, r1, 96; blr
+    const WORDS: [u32; 5] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x3860_0007,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let usable = Command::new("make")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !usable {
+        eprintln!("skipping the link: make is not installed");
+        return;
+    }
+
+    let source = std::env::temp_dir().join("xenolith-link.bin");
+    let out = std::env::temp_dir().join("xenolith-link-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = WORDS.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let (ok, _, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        out.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting should succeed: {stderr}");
+
+    let built = Command::new("make")
+        .arg("-C")
+        .arg(&out)
+        .output()
+        .expect("make should run");
     assert!(
-        out.join("Makefile").is_file(),
-        "a build file should be written beside the code"
+        built.status.success(),
+        "the emitted program did not link:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(
+        out.join("lifted").is_file(),
+        "the link should have produced a program"
+    );
+
+    // Entering the one function it holds runs translated code and comes back.
+    let ran = Command::new(out.join("lifted"))
+        .arg(out.join("image.bin"))
+        .arg("0x82000000")
+        .output()
+        .expect("the program should run");
+    assert!(
+        ran.status.success(),
+        "entering a lifted function should return: {}",
+        String::from_utf8_lossy(&ran.stderr)
     );
 }
 

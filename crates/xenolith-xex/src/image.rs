@@ -372,6 +372,16 @@ impl Image {
         self.base_address
     }
 
+    /// Returns the whole decoded image.
+    ///
+    /// Every other accessor here reads through a guest address. This hands the
+    /// bytes over as they are, for a caller that has to put them somewhere a
+    /// guest address will later index into.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// Returns the length of the image in bytes.
     #[must_use]
     pub fn size(&self) -> usize {

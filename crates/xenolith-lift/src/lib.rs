@@ -19,6 +19,13 @@ mod emit;
 /// The interface emitted code is written against, shipped alongside it.
 pub const RUNTIME_HEADER: &str = include_str!("../runtime/xenolith.h");
 
+/// An implementation of that interface, enough to link and no more.
+///
+/// It maps guest memory and reports what it declines to do. No import is
+/// serviced and no thread exists, so a program built against it stops at the
+/// first call into the operating system.
+pub const RUNTIME_SOURCE: &str = include_str!("../runtime/xenolith.c");
+
 pub use effect::{Effect, Location, effect_of, is_modelled, unmodelled};
 pub use emit::{
     Imported, Imports, Lifted, Unlifted, code_for, declaration_of, is_liftable, lift, name_of,
