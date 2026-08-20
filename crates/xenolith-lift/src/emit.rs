@@ -214,6 +214,28 @@ fn rotate_code(out: &mut String, instruction: Instruction, places: &str) {
     }
 }
 
+/// Returns the mask a doubleword rotate keeps, given where it begins and ends.
+///
+/// Bits are numbered from the most significant, and a mask whose end comes
+/// before its beginning wraps around rather than being empty, the same as the
+/// word forms.
+fn long_mask(begin: u32, end: u32) -> u64 {
+    let bit = |at: u32| 1u64 << (63 - at.min(63));
+    let end = end.min(63);
+    let mut mask = 0u64;
+    let mut at = begin.min(63);
+
+    loop {
+        mask |= bit(at);
+        if at == end {
+            break;
+        }
+        at = if at == 63 { 0 } else { at + 1 };
+    }
+
+    mask
+}
+
 /// Writes the statements that set a condition field from a comparison.
 ///
 /// The less than expression is given rather than derived, because an unsigned
@@ -1855,16 +1877,17 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             let bound = u32::from(instruction.long_mask_bound());
             // The left shifting form bounds the end of the mask and the right
             // shifting ones bound its beginning.
-            let mask: u64 = if instruction.opcode() == Opcode::Rldicr {
-                if bound >= 63 {
-                    u64::MAX
-                } else {
-                    u64::MAX << (63 - bound)
-                }
-            } else if bound >= 64 {
-                0
-            } else {
-                u64::MAX >> bound
+            //
+            // The clearing and inserting forms bound only the beginning, and
+            // the end is not the last bit but wherever the shift left off. Both
+            // took the mask to run to the end, which for an insert overwrote
+            // everything the shift had moved past instead of leaving it. Found
+            // by running a conversion out of a real title, whose result was
+            // right in the bits the mask covered and wrong after them.
+            let mask = match instruction.opcode() {
+                Opcode::Rldicr => long_mask(0, bound),
+                Opcode::Rldicl => long_mask(bound, 63),
+                _ => long_mask(bound, 63u32.saturating_sub(places)),
             };
             let rotated = if places == 0 {
                 format!("ctx->r[{rt}]")
@@ -2076,9 +2099,18 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             } else {
                 "+"
             };
+            // Fused, so the product and the sum round once between them
+            // rather than twice. Writing it as a multiply followed by an add is
+            // a place out for some inputs, which is how the vector form of this
+            // was caught and then the scalar form after it.
+            let addend = if operator == "-" {
+                format!("-ctx->f[{rb}].f64")
+            } else {
+                format!("ctx->f[{rb}].f64")
+            };
             writeln!(
                 out,
-                "    ctx->f[{rt}].f64 = {sign}((ctx->f[{ra}].f64 * ctx->f[{frc}].f64) {operator} ctx->f[{rb}].f64);"
+                "    ctx->f[{rt}].f64 = {sign}__builtin_fma(ctx->f[{ra}].f64, ctx->f[{frc}].f64, {addend});"
             )
             .ok()?;
         }
@@ -2094,9 +2126,17 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             } else {
                 "+"
             };
+            // Fused at single precision, so one rounding for the whole of it.
+            // Rounding a double fused result down to single afterwards would
+            // round twice and is not the same operation.
+            let addend = if operator == "-" {
+                format!("-(float)ctx->f[{rb}].f64")
+            } else {
+                format!("(float)ctx->f[{rb}].f64")
+            };
             writeln!(
                 out,
-                "    ctx->f[{rt}].f64 = (double)({sign}(((float)ctx->f[{ra}].f64 * (float)ctx->f[{frc}].f64) {operator} (float)ctx->f[{rb}].f64));"
+                "    ctx->f[{rt}].f64 = (double)({sign}__builtin_fmaf((float)ctx->f[{ra}].f64, (float)ctx->f[{frc}].f64, {addend}));"
             )
             .ok()?;
         }
