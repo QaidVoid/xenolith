@@ -69,11 +69,13 @@ void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
 /* An address unknown when the code was emitted, resolved against the functions
  * that were. One that is not among them is not something this program can
  * reach, and guessing would be worse than stopping. */
-void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
+                       uint32_t from) {
     xenolith_function target = xenolith_lookup(address);
     if (target == NULL) {
-        fprintf(stderr, "xenolith: dispatched to %#010x, which is not a lifted function\n",
-                address);
+        fprintf(stderr,
+                "xenolith: dispatched from %#010x to %#010x, which is not a lifted function\n",
+                from, address);
         exit(2);
     }
     target(ctx, base);

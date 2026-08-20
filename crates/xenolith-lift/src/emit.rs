@@ -2516,7 +2516,10 @@ fn terminator_code(
                     let _ = write!(call, "{}(ctx, base);", name_of(target));
                 }
                 None => {
-                    call.push_str("xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr);");
+                    let _ = write!(
+                        call,
+                        "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr, 0x{address:08x}u);"
+                    );
                 }
             }
             call
@@ -2529,7 +2532,9 @@ fn terminator_code(
                 calls.insert(target);
                 format!("{}(ctx, base); return;", name_of(target))
             }
-            None => "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;".to_owned(),
+            None => format!(
+                "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr, 0x{address:08x}u); return;"
+            ),
         },
         FlowKind::Indirect => {
             let targets = function.resolved.get(&address);
@@ -2556,12 +2561,15 @@ fn terminator_code(
                             );
                         }
                     }
-                    switch.push_str(
-                        "    default: xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;\n    }",
+                    let _ = write!(
+                        switch,
+                        "    default: xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr, 0x{address:08x}u); return;\n    }}"
                     );
                     switch
                 }
-                _ => "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr); return;".to_owned(),
+                _ => format!(
+                    "xenolith_dispatch(ctx, base, (uint32_t)ctx->ctr, 0x{address:08x}u); return;"
+                ),
             }
         }
         FlowKind::Continue => unreachable!("returned above"),

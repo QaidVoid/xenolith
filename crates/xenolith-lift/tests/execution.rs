@@ -559,7 +559,7 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
 /// one thread and nothing to lose it to, and a time base that stands still,
 /// since nothing here reads one.
 const RUNTIME_STUBS: &str = "\
-    void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
+    void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a, uint32_t f) { (void)c; (void)b; (void)a; (void)f; }\n\
     void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; exit(9); }\n\
     void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o, const char *n) { (void)c; (void)b; (void)l; (void)o; (void)n; }\n\
     uint32_t xenolith_reserve32(const uint8_t *b, uint32_t a) { return xenolith_load32(b, a); }\n\

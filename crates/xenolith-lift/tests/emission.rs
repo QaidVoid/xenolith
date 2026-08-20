@@ -107,7 +107,7 @@ fn compiles(name: &str, emitted: &str) -> Result<(), String> {
     let source = directory.join("lifted.c");
     let program = format!(
         "#include \"xenolith.h\"\n\n\
-         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a, uint32_t f) {{ (void)c; (void)b; (void)a; (void)f; }}\n\
          void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
          void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o, const char *n) {{ (void)c; (void)b; (void)l; (void)o; (void)n; }}\n\
          uint32_t xenolith_reserve32(const uint8_t *b, uint32_t a) {{ return xenolith_load32(b, a); }}\n\
@@ -863,7 +863,7 @@ fn an_unaligned_vector_load_takes_the_right_bytes() {
 
     let program = format!(
         "#include \"xenolith.h\"\n#include <stdio.h>\n\
-         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a, uint32_t f) {{ (void)c; (void)b; (void)a; (void)f; }}\n\
          void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\n\
          {emitted}\n\
          int main(void) {{\n\
@@ -943,7 +943,7 @@ fn the_saturating_bounds_are_where_the_range_ends() {
 
     let program = format!(
         "#include \"xenolith.h\"\n#include <stdio.h>\n\
-         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a, uint32_t f) {{ (void)c; (void)b; (void)a; (void)f; }}\n\
          void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\n\
          {emitted}\n\
          int main(void) {{\n\

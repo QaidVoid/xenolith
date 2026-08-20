@@ -380,7 +380,8 @@ void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address);
  * whose table could not be read has one path rather than many. Implemented by
  * the environment, not here.
  */
-void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address);
+void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
+                       uint32_t from);
 
 /* Where a call to an imported function goes.
  *

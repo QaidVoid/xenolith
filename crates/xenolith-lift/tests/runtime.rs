@@ -62,7 +62,8 @@ fn the_interface_compiles_with_warnings_enabled() {
     let program = r#"
 #include "xenolith.h"
 
-void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address, uint32_t from) {
+    (void)from;
     (void)ctx;
     (void)base;
     (void)address;
@@ -95,7 +96,8 @@ fn memory_access_uses_the_guest_byte_order() {
 #include "xenolith.h"
 #include <stdlib.h>
 
-void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address, uint32_t from) {
+    (void)from;
     (void)ctx;
     (void)base;
     (void)address;
