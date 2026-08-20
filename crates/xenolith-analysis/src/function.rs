@@ -427,6 +427,62 @@ fn prologue_signals(image: &Image, address: u32, helpers: &Helpers) -> usize {
     signals
 }
 
+/// Returns addresses the image points at that jump straight to a function.
+///
+/// A trampoline is one unconditional branch and nothing else, which is what a
+/// linker leaves behind when a call has to reach further than its displacement
+/// allows. It has no prologue, so scanning for one never finds it, and nothing
+/// calls it directly, so discovery never reaches it. What names it is a word
+/// somewhere in the image, and a program that reaches one at runtime through
+/// that word finds nothing there and stops.
+///
+/// Three things have to hold together before one is claimed: the word is an
+/// address in executable memory, the instruction there is an unconditional
+/// branch that does not take the link, and what it branches to is already known
+/// to be a function. Any one alone is weak and all three together are not
+/// something data does by accident.
+fn scan_for_trampolines(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32> {
+    let starts: BTreeSet<u32> = walked.keys().copied().collect();
+    let mut found = Vec::new();
+
+    for section in image.sections() {
+        let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+        let mut at = section.start;
+        while at < end {
+            at = at.saturating_add(4);
+            let Ok(word) = image.u32(at.wrapping_sub(4)) else {
+                continue;
+            };
+            let candidate = word;
+            if candidate % 4 != 0 || starts.contains(&candidate) || !is_executable(image, candidate)
+            {
+                continue;
+            }
+            let Ok(first) = image.u32(candidate) else {
+                continue;
+            };
+            let instruction = Instruction::decode(first);
+            if instruction.opcode() != Opcode::B || instruction.link_bit() {
+                continue;
+            }
+            // Where it goes has to be code, and need not already be known: a
+            // trampoline claimed here is a tail call to its target, so
+            // discovery walks on to it. That is how the function behind one
+            // gets found, and several of them keep their frame in the red zone
+            // and so leave no prologue to have found them by.
+            let flow = instruction.flow(candidate);
+            if flow
+                .target
+                .is_some_and(|target| starts.contains(&target) || is_executable(image, target))
+            {
+                found.push(candidate);
+            }
+        }
+    }
+
+    found
+}
+
 /// Returns addresses that look like functions in ranges nothing claimed.
 ///
 /// Discovery reaches what direct calls reach. Anything called only through a
@@ -536,6 +592,13 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         let mut added = false;
 
         for address in scan_for_prologues(image, &helpers, &walked) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+                slot.insert(Origin::Scanned);
+                added = true;
+            }
+        }
+
+        for address in scan_for_trampolines(image, &walked) {
             if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
                 slot.insert(Origin::Scanned);
                 added = true;
