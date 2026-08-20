@@ -561,7 +561,7 @@ fn parse(text: &str) -> Result<Vec<State>, String> {
 const RUNTIME_STUBS: &str = "\
     void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; }\n\
     void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) { (void)c; (void)b; (void)a; exit(9); }\n\
-    void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o) { (void)c; (void)b; (void)l; (void)o; }\n\
+    void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o, const char *n) { (void)c; (void)b; (void)l; (void)o; (void)n; }\n\
     uint32_t xenolith_reserve32(const uint8_t *b, uint32_t a) { return xenolith_load32(b, a); }\n\
     uint64_t xenolith_reserve64(const uint8_t *b, uint32_t a) { return xenolith_load64(b, a); }\n\
     uint8_t xenolith_conditional32(uint8_t *b, uint32_t a, uint32_t v) { xenolith_store32(b, a, v); return 1; }\n\

@@ -91,7 +91,7 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address) {
  * mistaken for a title running.
  */
 void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
-                     uint32_t ordinal) {
+                     uint32_t ordinal, const char *name) {
     static int tracing = -1;
     static unsigned long reached = 0;
 
@@ -101,7 +101,8 @@ void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
     }
 
     if (!tracing) {
-        fprintf(stderr, "xenolith: %s ordinal %u is not implemented\n", library, ordinal);
+        fprintf(stderr, "xenolith: %s ordinal %u (%s) is not implemented\n", library,
+                ordinal, name ? name : "unnamed");
         exit(3);
     }
 
@@ -114,8 +115,8 @@ void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
     /* Where it was called from, and the registers the calling convention puts
      * arguments in. Which of them mean anything depends on the import, and
      * nothing here knows which, so all of them are reported. */
-    printf("trace %s ordinal %-5u from %#010llx  args", library, ordinal,
-           (unsigned long long)ctx->lr);
+    printf("trace %s %-34s ordinal %-5u from %#010llx  args", library,
+           name ? name : "unnamed", ordinal, (unsigned long long)ctx->lr);
     for (int at = 3; at <= 10; at++) {
         printf(" %016llx", (unsigned long long)ctx->r[at]);
     }

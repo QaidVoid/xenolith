@@ -255,8 +255,12 @@ fn print_import_records(container: &Container<'_>, image: &Image) -> Result<()> 
             ImportKind::Slot => "slot",
         };
         println!(
-            "    {:#010x}  {kind:<6} {:<16} ordinal {}",
-            import.address, import.library, import.ordinal
+            "    {:#010x}  {kind:<6} {:<16} ordinal {:<5} {}",
+            import.address,
+            import.library,
+            import.ordinal,
+            xenolith_xex::export(import.library, u32::from(import.ordinal))
+                .map_or("", |export| export.name)
         );
     }
 

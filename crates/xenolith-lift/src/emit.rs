@@ -2681,9 +2681,13 @@ fn import_thunk(address: u32, imported: &Imported) -> Lifted {
         "void {}(xenolith_context *ctx, uint8_t *base) {{",
         name_of(address)
     );
+    // Named where the catalogue has a name for it, so that a program reporting
+    // what it wanted says something a reader can act on rather than a number.
+    let named = xenolith_xex::export(&imported.library, u32::from(imported.ordinal))
+        .map_or_else(|| "0".to_owned(), |export| string_literal(export.name));
     let _ = writeln!(
         code,
-        "    xenolith_import(ctx, base, {}, {});",
+        "    xenolith_import(ctx, base, {}, {}, {named});",
         string_literal(&imported.library),
         imported.ordinal
     );
