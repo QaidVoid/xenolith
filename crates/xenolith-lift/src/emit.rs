@@ -1754,9 +1754,14 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
 
         // Zeroing a block is the one cache instruction with an effect a
         // program can see, so it is the one that is not nothing.
+        //
+        // The long form shares this opcode and is told apart by the field the
+        // other forms spend on a register. It clears four times as much, and
+        // reading it as the short form would leave most of a block untouched.
         Opcode::Dcbz => {
+            let size = if rt == 1 { 128 } else { 32 };
             let _ = writeln!(out, "    address = {};", indexed_address(ra, rb));
-            let _ = writeln!(out, "    xenolith_zero_block(base, address);");
+            let _ = writeln!(out, "    xenolith_zero_block(base, address, {size});");
         }
 
         // Cache hints change no register this model describes, and control

@@ -74,22 +74,88 @@ fn location_of(name: &str) -> Option<Location> {
     }
 }
 
+/// Returns whether a vector store writes a register rather than memory.
+///
+/// The same intrinsic does both. When its first argument is a register of the
+/// context, the instruction moved a vector between registers. When it is an
+/// address built on the memory base, the instruction stored to guest memory and
+/// writes no register at all.
+fn stores_into_a_register(statement: &str) -> bool {
+    let Some(rest) = statement.trim_start().strip_prefix("simde_mm_store") else {
+        return false;
+    };
+    let Some(open) = rest.find('(') else {
+        return false;
+    };
+    let argument = rest[open + 1..].trim_start();
+    argument
+        .strip_prefix("(simde__m128i*)")
+        .unwrap_or(argument)
+        .starts_with("ctx.")
+}
+
+/// Returns the place a name held in a local stands for.
+///
+/// The corpus keeps a few of the context's registers in locals for the length
+/// of a function rather than reaching them through it, so they read as bare
+/// names with no `ctx.` in front.
+fn local_of(word: &str) -> Option<Location> {
+    match word {
+        "ctr" => Some(Location::Count),
+        "xer" => Some(Location::Exception),
+        _ => word
+            .strip_prefix("cr")
+            .and_then(|field| field.parse::<u8>().ok())
+            .filter(|field| *field < 8)
+            .map(Location::Condition),
+    }
+}
+
 /// Returns every place a statement names, in the order they appear.
+///
+/// Two spellings reach the same registers. Most are written as a field of the
+/// context, and the few held in locals appear as bare words, which have to be
+/// matched at a word boundary so that a name inside a longer identifier is not
+/// mistaken for one.
 fn places(statement: &str) -> Vec<(usize, Location)> {
     let mut found = Vec::new();
-    let mut rest = statement;
-    let mut consumed = 0;
+    let mut at = 0;
 
-    while let Some(at) = rest.find("ctx.") {
-        let after = &rest[at + 4..];
-        let end = after
-            .find(|c: char| !c.is_ascii_alphanumeric())
-            .unwrap_or(after.len());
-        if let Some(location) = location_of(&after[..end]) {
-            found.push((consumed + at, location));
+    while at < statement.len() {
+        let rest = &statement[at..];
+        let Some(offset) = rest.find(|c: char| c.is_ascii_alphabetic() || c == '_') else {
+            break;
+        };
+        let start = at + offset;
+        let tail = &statement[start..];
+        let end = start
+            + tail
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(tail.len());
+
+        if &statement[start..end] == "ctx" && statement[end..].starts_with('.') {
+            let after = &statement[end + 1..];
+            let stop = after
+                .find(|c: char| !c.is_ascii_alphanumeric())
+                .unwrap_or(after.len());
+            if let Some(location) = location_of(&after[..stop]) {
+                found.push((start, location));
+            }
+            at = end + 1 + stop;
+            continue;
         }
-        consumed += at + 4;
-        rest = after;
+
+        // A word after a field selector belongs to whatever it selects from.
+        let selected = start
+            .checked_sub(1)
+            .and_then(|before| statement.as_bytes().get(before))
+            == Some(&b'.');
+        if !selected {
+            if let Some(location) = local_of(&statement[start..end]) {
+                found.push((start, location));
+            }
+        }
+        at = end.max(start + 1);
     }
 
     found
@@ -109,7 +175,14 @@ fn assigns_first(statement: &str) -> bool {
         return true;
     }
 
-    let Some(rest) = trimmed.strip_prefix("ctx.") else {
+    let head = trimmed
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or("");
+    if head != "ctx" && local_of(head).is_none() {
+        return false;
+    }
+    let Some(rest) = trimmed.get(head.len()..) else {
         return false;
     };
     let end = rest.find([' ', '=']).unwrap_or(rest.len());
@@ -201,10 +274,7 @@ fn parse(text: &str) -> Vec<Emitted> {
         let comparing = line.contains(".compare<")
             || line.contains(".compare(")
             || line.contains(".setFromMask(");
-        // A vector store writes through a pointer to its first argument, which
-        // reads like any other mention of that register unless it is known that
-        // the call stores rather than loads.
-        let storing_through_a_pointer = line.contains("_mm_store_si128((simde__m128i*)ctx.");
+        let storing_through_a_pointer = stores_into_a_register(line);
         let written = if comparing || storing_through_a_pointer || assigns_first(line) {
             named.first().map(|(_, location)| *location)
         } else {
@@ -237,6 +307,9 @@ fn parse(text: &str) -> Vec<Emitted> {
 /// spellings would report hundreds of disagreements that are only disagreements
 /// about names.
 const ALIASES: &[(&str, &str)] = &[
+    ("mfocrf", "mfcr"),
+    ("mtocrf", "mtcrf"),
+    ("dcbzl", "dcbz"),
     ("li", "addi"),
     ("lis", "addis"),
     ("la", "addi"),
@@ -306,6 +379,11 @@ fn is_injected(statement: &str) -> bool {
         return false;
     }
     if name.starts_with("PPC_") || name.starts_with("simde") || name.starts_with("__") {
+        return false;
+    }
+    // Clearing or copying a block of guest memory is what an instruction did,
+    // not something the other project inserted.
+    if name == "memset" || name == "memcpy" {
         return false;
     }
 
@@ -450,6 +528,23 @@ fn outside_the_oracle(instruction: Instruction, spelling: &str) -> bool {
         return true;
     }
 
+    // The corpus keeps the link register on the host's call stack rather than
+    // in the context, so a move to or from it emits nothing at all and names
+    // neither the register it reads nor the one it writes.
+    if matches!(instruction.opcode(), Opcode::Mfspr | Opcode::Mtspr) && instruction.spr() == 8 {
+        return true;
+    }
+
+    // It does not represent the machine state register either, and emits
+    // nothing for a move to or from it. That leaves the destination of a read
+    // holding whatever it held before, where this model at least round trips.
+    if matches!(
+        instruction.opcode(),
+        Opcode::Mfmsr | Opcode::Mtmsr | Opcode::Mtmsrd
+    ) {
+        return true;
+    }
+
     // The console spells a timing hint as a register combined with itself. That
     // does write the register, with the value it already held, and is modelled
     // as such. The corpus emits nothing for it instead. Both readings are
@@ -576,12 +671,16 @@ fn without_the_recorded_read(
     ours: &BTreeSet<Location>,
 ) -> BTreeSet<Location> {
     let mut reads = theirs.clone();
-    if !effect.writes().contains(&Location::Condition(0)) {
+    let records = effect
+        .writes()
+        .iter()
+        .any(|location| matches!(location, Location::Condition(_)));
+    if !records {
         return reads;
     }
 
     for written in effect.writes() {
-        if matches!(written, Location::General(_)) {
+        if matches!(written, Location::General(_) | Location::Vector(_)) {
             reads.remove(written);
             if theirs.contains(written) && ours.contains(written) {
                 reads.insert(*written);

@@ -270,16 +270,16 @@ static inline int64_t xenolith_multiply_high_signed(int64_t left, int64_t right)
 
 /* Zeroing a data cache block.
  *
- * The block size is implementation defined, and this console uses 32 bytes for
- * this instruction, which is why it carries a separate one for 128. A general
- * purpose emulator does not share that size, so this is the one instruction
- * here with no oracle behind it.
+ * The block size is implementation defined. This console spells two of them
+ * with one opcode and a field that selects between them: 32 bytes, and 128 for
+ * the long form. The address is aligned down to whichever was asked for.
+ *
+ * A general purpose emulator does not share either size, so this is the one
+ * instruction here with no execution oracle behind it.
  */
-#define XENOLITH_CACHE_BLOCK 32
-
-static inline void xenolith_zero_block(uint8_t *base, uint32_t address) {
-    uint32_t start = address & ~(uint32_t)(XENOLITH_CACHE_BLOCK - 1);
-    for (unsigned byte = 0; byte < XENOLITH_CACHE_BLOCK; byte++) {
+static inline void xenolith_zero_block(uint8_t *base, uint32_t address, uint32_t size) {
+    uint32_t start = address & ~(size - 1);
+    for (uint32_t byte = 0; byte < size; byte++) {
         base[start + byte] = 0;
     }
 }

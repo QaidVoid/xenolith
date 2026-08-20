@@ -683,7 +683,7 @@ fn zeroing_a_block_stays_inside_it() {
          int main(void) {\n\
          \x20 static uint8_t memory[256];\n\
          \x20 for (unsigned i = 0; i < 256; i++) { memory[i] = 0xaa; }\n\
-         \x20 xenolith_zero_block(memory, 100);\n\
+         \x20 xenolith_zero_block(memory, 100, 32);\n\
          \x20 unsigned first = 256, last = 0, count = 0;\n\
          \x20 for (unsigned i = 0; i < 256; i++) {\n\
          \x20   if (memory[i] == 0) { if (i < first) first = i; last = i; count++; }\n\
