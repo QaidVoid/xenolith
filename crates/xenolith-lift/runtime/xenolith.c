@@ -747,6 +747,20 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
     case 245:
         resume_thread(ctx);
         return 1;
+    case 251: {
+        /* Releasing one object and waiting on another, which a title uses to
+         * hand work to a thread and wait for the answer without missing the
+         * reply. The console does the two with nothing in between. Here they
+         * are two steps, which differs only for a title that depends on no
+         * other thread being let go between them. */
+        struct object *released = object_of((uint32_t)ctx->r[3]);
+        struct object *waited = object_of((uint32_t)ctx->r[4]);
+        if (released != NULL) {
+            signal_object(released, 1);
+        }
+        ctx->r[3] = waited == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(waited);
+        return 1;
+    }
     case 253: {
         struct object *found = object_of((uint32_t)ctx->r[3]);
         ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(found);
