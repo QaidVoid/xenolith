@@ -101,6 +101,42 @@ void xenolith_unlifted(xenolith_context *ctx, uint8_t *base, uint32_t address) {
     exit(2);
 }
 
+/* Whether this run is collecting the addresses it wanted rather than calling
+ * them.
+ *
+ * Reaching an address is the evidence that it is a function, and one run
+ * reaches many. Setting XENOLITH_TRACE_DISPATCH reports each and carries on
+ * without making the call, so a run collects the whole list rather than
+ * stopping at the first.
+ *
+ * Not making a call the title expected is a lie, like answering an import with
+ * nothing, and everything after the first one describes the answer given rather
+ * than the title. The list is what this is for.
+ */
+static int collecting_addresses(void) {
+    static int tracing = -1;
+    if (tracing < 0) {
+        tracing = getenv("XENOLITH_TRACE_DISPATCH") != NULL;
+    }
+    return tracing;
+}
+
+/* Reports an address a run wanted and no emitted function answers to.
+ *
+ * Both callers print the same line when collecting, because both are asking the
+ * same question and `lift --roots-from` reads one list.
+ */
+static void wanted_but_not_lifted(uint32_t address, uint32_t from, const char *what) {
+    if (collecting_addresses()) {
+        printf("dispatch %#010x from %#010x\n", address, from);
+        fflush(stdout);
+        return;
+    }
+    fprintf(stderr, "xenolith: %s %#010x from %#010x, which is not a lifted function\n",
+            what, address, from);
+    exit(2);
+}
+
 /* An address unknown when the code was emitted, resolved against the functions
  * that were. One that is not among them is not something this program can
  * reach, and guessing would be worse than stopping. */
@@ -108,28 +144,8 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
                        uint32_t from) {
     xenolith_function target = xenolith_lookup(address);
     if (target == NULL) {
-        /* Reaching an address is the evidence that it is a function, and one
-         * run reaches many. Setting XENOLITH_TRACE_DISPATCH reports each and
-         * carries on without making the call, so a run collects the whole list
-         * rather than stopping at the first.
-         *
-         * Not making a call the title expected is a lie, like answering an
-         * import with nothing, and everything after the first one describes
-         * the answer given rather than the title. The list is what this is
-         * for. */
-        static int tracing = -1;
-        if (tracing < 0) {
-            tracing = getenv("XENOLITH_TRACE_DISPATCH") != NULL;
-        }
-        if (tracing) {
-            printf("dispatch %#010x from %#010x\n", address, from);
-            fflush(stdout);
-            return;
-        }
-        fprintf(stderr,
-                "xenolith: dispatched from %#010x to %#010x, which is not a lifted function\n",
-                from, address);
-        exit(2);
+        wanted_but_not_lifted(address, from, "dispatched to");
+        return;
     }
     target(ctx, base);
 }
@@ -442,9 +458,16 @@ static void *run_guest_thread(void *given) {
         state.r[3] = self->argument;
     }
 
+    /* A thread whose start was never lifted would otherwise do nothing and
+     * exit, which looks exactly like a thread that ran and finished. Every
+     * thread a title starts goes through a shim it names at runtime, so that
+     * one address decides whether any guest thread runs at all, and silence
+     * about it is worse than stopping. */
     uint32_t at = self->startup != 0 ? self->startup : self->entry;
     xenolith_function body = xenolith_lookup(at);
-    if (body != NULL) {
+    if (body == NULL) {
+        wanted_but_not_lifted(at, self->entry, "started a thread at");
+    } else {
         body(&state, self->base);
     }
 
