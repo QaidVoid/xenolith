@@ -25,6 +25,8 @@ Measured against two retail titles:
 | emitted C compiles | yes, all of it | yes, all of it |
 | helper entries emitted beside them | 50 | 60 |
 | runs its whole startup | yes | yes |
+| reaches the graphics driver | yes | yes |
+| draws anything | no | no |
 
 The scalar and vector instruction sets are modelled as far as these two titles
 exercise them, including the console's own vector forms. What is left is 21
@@ -40,11 +42,11 @@ program stopped on the first thing it did. Each entry a caller uses is now
 lifted from where the caller enters it.
 
 A runtime ships with it that maps guest memory, loads the image, gives the guest
-a stack, and answers the nine kernel entry points a title's startup reaches:
-reserving and committing memory, the process type, a critical section, thread
-local storage, and the privilege check. Each rests on a documented shape or on
-this runtime having one thread, and the two that rest on neither say so the
-first time they answer.
+a stack, and answers every kernel entry point either title reaches on the way
+through its own startup and into the graphics driver. Memory, threads, the
+objects threads wait on, time, and the video driver's bookkeeping. Each rests on
+a documented shape, on something read out of the artefact, or on an assumption,
+and every assumption says so the first time it is acted on.
 
 Both titles run their whole startup. Handed the table of static constructors a
 title calls through, one runs all 217 of them and stops at a kernel call it had
@@ -148,11 +150,55 @@ title made had failed, silently, and it was asking for the memory it was going
 to draw into.
 
 With each read the way it is documented, a title gets its eleven megabytes and
-goes on into the graphics driver. That is where it stops now, on the call that
-starts the engines, and the entry points beyond it are the ring buffer, the
-display mode, the interrupt callback and the rest of the same family. Nothing
-here talks to graphics hardware yet, so that is the next body of work rather
-than the next bug.
+goes on into the graphics driver: the ring buffer, the display mode, the
+interrupt callback and the rest of that family.
+
+Two of those were worth more than the code they took.
+
+The display mode hands back a structure, and the shape of one is not in the
+container. It did not have to be guessed. A title reads the structure straight
+after asking for it, and what it reads says where the fields are: two words at
+the front taken as whole numbers, and twelve bytes on a value loaded into a
+floating register, added to one half and truncated. Rounding to nearest is what
+happens to a refresh rate and not much else, and the one half is in the title's
+own constant pool where it can be read off. So the offsets are derived from the
+artefact. Only the numbers written into them are assumed, and the runtime says
+which those are while it runs.
+
+The other was a defect of the same family as the threads that ran nothing. A
+title converts an address before handing it to the graphics hardware, by
+clearing the top three bits, because on the console those bits choose which view
+of memory an address is and the hardware wants the memory rather than the view.
+The heap here was above that boundary, so the conversion lost information: the
+runtime was handed `0x164e003c` for memory it had placed at `0x364e003c`, wrote
+where it was told, and the title read somewhere else. No fault, no wrong value,
+nothing to see. Every buffer a title ever handed the hardware had the same
+problem. The heap now lives where that conversion is the identity, which also
+makes it the size the console's memory actually was, so a title asking for more
+than one held is told no as it would have been.
+
+Past those, a title writes drawing commands into a ring buffer and waits for the
+hardware to work through them. Where it publishes how far it has written is
+recoverable: it stores to one address fenced on both sides, and that address is
+a graphics register. Nothing here consumes those commands, so the runtime copies
+that pointer to the place a title reads progress from, which reports the
+commands consumed the moment they are written. They are consumed by nothing, and
+that is said while it runs rather than left to be inferred.
+
+A title also waits to be told a frame finished, and the number that says which
+interrupt happened matters: its handler compares against one and returns without
+doing anything otherwise. That number is read out of the title rather than
+assumed, and with it the handler runs its own body instead of quietly declining
+to.
+
+Where it stops now is the far side of all that. The handler walks a queue of
+work it submitted, and for each entry expects a completion routine that whatever
+consumed the commands was supposed to have written there. The marker a title
+poisons those entries with is the case its own code treats as an error. Nothing
+consumed anything, so nothing was written, so nothing retires and a title will
+not queue more. Getting past that means modelling what the command processor
+does to memory rather than answering another entry point, which is a different
+kind of work and has not been started.
 
 A built title can also be asked what it needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
