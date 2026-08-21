@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 
 /* How many calls a trace reports before giving up.
  *
@@ -782,19 +783,88 @@ static struct {
     uint32_t callback_argument;
 } graphics;
 
-/* Where a title reads how far the hardware has got, answered as having got to
- * the end.
+/* Where a title says how far it has written into the ring buffer.
  *
- * A title writes commands and then waits until the hardware reports it has
- * consumed them. Nothing consumes them here, so a truthful answer is that it
- * has consumed none, and a title told that waits for a hardware that does not
- * exist. Reporting the buffer as drained is the assumption that keeps a title
- * running, and it is an assumption rather than a fact.
+ * The console maps the graphics hardware's registers into the address space, and
+ * a title publishes the ring buffer's write pointer by storing to one of them,
+ * fenced on both sides so the hardware sees the commands before the pointer.
+ * Nothing here is hardware, so that store lands in ordinary memory and the value
+ * can be read back out of it.
  */
-static void report_the_ring_drained(uint8_t *base) {
-    if (graphics.read_back_at != 0) {
-        xenolith_store32(base, graphics.read_back_at, graphics.ring_size);
+#define XENOLITH_RING_WRITE_POINTER 0x7fc80714u
+
+/* Reports the hardware as having consumed whatever the title has written.
+ *
+ * A title writes commands into the ring buffer and then waits for the hardware
+ * to work through them, watching the place it asked for progress to be reported
+ * to. Nothing here consumes those commands. A truthful report is that none were
+ * consumed, and a title given that waits forever on hardware that is not there.
+ *
+ * So the title's own write pointer is copied to the place it reads progress
+ * from, which says the commands were consumed the moment they were written.
+ * They were consumed by nothing. That is the assumption, and it is what lets a
+ * title past its own waiting rather than any claim that something was drawn.
+ *
+ * It runs on its own thread because nothing calls back into the runtime while a
+ * title spins, so there is no other moment to do it in.
+ */
+/* Tells a title the display finished a frame.
+ *
+ * The hardware interrupts when it reaches the end of a frame, and the kernel
+ * calls what the title registered for it. A title uses that to retire the work
+ * it had in flight, and until it happens the count of outstanding work never
+ * falls and the title will not queue more.
+ *
+ * Nothing here interrupts, so this is the runtime saying it instead. Which is a
+ * claim about timing rather than about anything drawn: the frame it reports is
+ * one where nothing was rendered.
+ */
+static void raise_the_graphics_interrupt(uint8_t *base) {
+    static _Thread_local xenolith_context state;
+    static _Thread_local uint32_t stack;
+
+    if (graphics.callback == 0) {
+        return;
     }
+
+    xenolith_function body = xenolith_lookup(graphics.callback);
+    if (body == NULL) {
+        wanted_but_not_lifted(graphics.callback, 0, "answered an interrupt at");
+        return;
+    }
+
+    if (stack == 0) {
+        stack = take_thread_stack();
+    }
+    state.r[1] = stack - 64;
+    /* What the interrupt was, and what the title asked to be handed back. */
+    state.r[3] = 0;
+    state.r[4] = graphics.callback_argument;
+    body(&state, base);
+}
+
+static void *drain_the_ring(void *given) {
+    uint8_t *base = given;
+    unsigned ticks = 0;
+
+    assumed("the graphics hardware keeps up with the title",
+            "nothing here reads the commands a title writes, so the only "
+            "alternative is a title waiting forever");
+
+    while (graphics.read_back_at != 0) {
+        uint32_t written = xenolith_load32(base, XENOLITH_RING_WRITE_POINTER);
+        xenolith_store32(base, graphics.read_back_at, written);
+
+        /* A display finishes a frame sixty times a second. This one finishes
+         * nothing, at the same rate. */
+        if (++ticks % 160 == 0) {
+            raise_the_graphics_interrupt(base);
+        }
+
+        struct timespec briefly = {0, 100000};
+        nanosleep(&briefly, NULL);
+    }
+    return NULL;
 }
 
 /* What the display is, written into the structure a title hands over.
@@ -1064,10 +1134,14 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         graphics.ring_at = (uint32_t)ctx->r[3];
         graphics.ring_size = 1u << ((uint32_t)ctx->r[4] & 0x1f);
         return 1;
-    case 438:
+    case 438: {
         graphics.read_back_at = (uint32_t)ctx->r[3];
-        report_the_ring_drained(base);
+        pthread_t draining;
+        if (pthread_create(&draining, NULL, drain_the_ring, base) == 0) {
+            pthread_detach(draining);
+        }
         return 1;
+    }
     case 469:
         graphics.callback = (uint32_t)ctx->r[3];
         graphics.callback_argument = (uint32_t)ctx->r[4];
