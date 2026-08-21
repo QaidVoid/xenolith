@@ -611,7 +611,7 @@ fn report(args: &Args, outcome: &Outcome<'_>) {
     println!("\nwritten to {}", args.out.display());
     println!("build it with make -j8, which links into a program");
     println!("give -j a number: a job for each unit is more than a machine has");
-    println!("that program stops at the first import, since none is implemented");
+    println!("run it with the image beside it to start at the recorded entry point");
 
     if args.blockers {
         // The instruction that appears most is not the one to model next. The
