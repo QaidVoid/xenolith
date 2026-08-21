@@ -191,14 +191,32 @@ doing anything otherwise. That number is read out of the title rather than
 assumed, and with it the handler runs its own body instead of quietly declining
 to.
 
-Where it stops now is the far side of all that. The handler walks a queue of
-work it submitted, and for each entry expects a completion routine that whatever
-consumed the commands was supposed to have written there. The marker a title
-poisons those entries with is the case its own code treats as an error. Nothing
-consumed anything, so nothing was written, so nothing retires and a title will
-not queue more. Getting past that means modelling what the command processor
-does to memory rather than answering another entry point, which is a different
-kind of work and has not been started.
+Getting past that meant reading the commands rather than answering another entry
+point. What a title writes into the buffer says how: a header holding a kind and
+a length, then that many words. The lengths those two fields give land exactly on
+the next header, packet after packet, with nothing left over, which is what says
+the reading is right. Most of the packets set hardware state or draw and there is
+nothing here for either, so they are read for their length and passed over. One
+carries an address and a value, and that one is done, because a value appearing
+where a title is waiting for it is the whole of how it learns its work was
+reached.
+
+Two more things a title watches turned out to be readable the same way. It waits
+to be told a frame finished, and the number saying which interrupt that is
+decides whether its own handler does anything: one number runs what a title left
+to be run, another retires the work it had in flight, and a third does nothing at
+all. And beside the place it asks for the read pointer, it names how big a block
+that sits in, which comes out at sixty four bytes with the pointer sixty bytes
+in. The word at the front of that block is a count of how far the hardware has
+worked through what it was given. A title sets it behind where it wants to get to
+and waits for it to catch up, so leaving it still says the hardware stopped.
+
+With those, a title finishes setting up its display, asks for what it drew to be
+shown, and goes looking for its files. That is where it stops now, on opening
+one, which is a subsystem rather than an entry point and has not been started.
+Nothing has been drawn at any point: every frame reported finished here was
+empty, and what the graphics work bought is a title that gets past waiting rather
+than a title that renders.
 
 A built title can also be asked what it needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
