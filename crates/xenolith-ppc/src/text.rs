@@ -338,6 +338,29 @@ fn is_compare(mnemonic: &str) -> bool {
     matches!(mnemonic, "cmp" | "cmpl" | "cmpi" | "cmpli")
 }
 
+/// Returns whether a mnemonic combines one condition bit with another.
+///
+/// These name three bits of the condition register, one written and two read,
+/// where the rest of this form names a condition and a branch target. Printing
+/// the form's two operands drops the third outright, so the text says which bit
+/// was written and only half of what it was written from.
+fn combines_condition_bits(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "crand" | "crandc" | "creqv" | "crnand" | "crnor" | "cror" | "crorc" | "crxor"
+    )
+}
+
+/// Returns whether a mnemonic opens with the conditions it traps on.
+///
+/// That field is a mask of which comparisons should trap, not a register
+/// number. Printing it as a register names one the instruction never reads and
+/// loses which comparisons were asked for, which is the whole of what a trap
+/// says.
+fn traps_on_a_condition(mnemonic: &str) -> bool {
+    matches!(mnemonic, "tw" | "twi" | "td" | "tdi")
+}
+
 /// Returns whether a mnemonic takes an unsigned immediate.
 ///
 /// The logical operations combine bits rather than counting, so their immediate
@@ -364,12 +387,18 @@ fn compare_operand(mnemonic: &str, instruction: Instruction) -> String {
 /// Extended mnemonics are a spelling convention, not different instructions.
 /// The decoder always reports the underlying operation, and only the text
 /// changes here.
+///
+/// A spelling that replaces the mnemonic has to carry the variant bits itself,
+/// since it is written instead of the name they would otherwise be added to.
+/// Dropping the record bit here spells a move that sets a condition field as
+/// one that does not, and the two read the same everywhere but the one place
+/// the difference matters.
 fn extended(f: &mut fmt::Formatter<'_>, instruction: Instruction) -> Option<fmt::Result> {
     let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
 
     match instruction.opcode() {
         // An or of a register with itself moves it.
-        Opcode::Or if rt == rb => Some(write!(f, "mr r{ra}, r{rt}")),
+        Opcode::Or if rt == rb => Some(write!(f, "mr{} r{ra}, r{rt}", suffixes(instruction))),
         // Adding zero to register zero, discarding the result, does nothing.
         Opcode::Ori if rt == 0 && ra == 0 && instruction.immediate() == 0 => Some(write!(f, "nop")),
         // Adding an immediate to nothing loads it.
@@ -464,8 +493,49 @@ fn general_operands(
         Form::X if matches!(mnemonic, "mtmsr" | "mtmsrd") => {
             write!(f, " r{rt}, {}", ra & 1)
         }
+        Form::X if traps_on_a_condition(mnemonic) => write!(f, " {rt}, r{ra}, r{rb}"),
+        // Writing the floating status and control register names which of its
+        // fields to write, and takes the value from the floating bank. The mask
+        // saying which fields, and the two bits either side of it, sit where
+        // this form otherwise names registers, so printing three general ones
+        // names none of the four things actually there.
+        Form::X if mnemonic == "mtfsf" => {
+            let word = instruction.word();
+            write!(
+                f,
+                " {}, f{rb}, {}, {}",
+                (word >> 17) & 0xff,
+                (word >> 25) & 1,
+                (word >> 16) & 1
+            )
+        }
         _ => return None,
     })
+}
+
+/// Writes the operands of a floating arithmetic instruction.
+///
+/// This form carries a third register in a field the others leave empty, and
+/// which of the four registers an instruction actually uses depends on the
+/// instruction rather than the form. Printing all of them names registers that
+/// are never read.
+fn floating_operands(
+    f: &mut fmt::Formatter<'_>,
+    mnemonic: &str,
+    instruction: Instruction,
+) -> fmt::Result {
+    let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
+    let third = (instruction.word() >> 6) & 0x1f;
+
+    match mnemonic {
+        "fmul" | "fmuls" => write!(f, " f{rt}, f{ra}, f{third}"),
+        "fmadd" | "fmadds" | "fmsub" | "fmsubs" | "fnmadd" | "fnmadds" | "fnmsub" | "fnmsubs"
+        | "fsel" => {
+            write!(f, " f{rt}, f{ra}, f{third}, f{rb}")
+        }
+        "fsqrt" | "fsqrts" | "fres" | "frsqrte" => write!(f, " f{rt}, f{rb}"),
+        _ => write!(f, " f{rt}, f{ra}, f{rb}"),
+    }
 }
 
 impl fmt::Display for Rendered {
@@ -503,6 +573,9 @@ impl fmt::Display for Rendered {
                 branch_operands(f, instruction, self.address)
             }
             Form::SC => Ok(()),
+            Form::XL if combines_condition_bits(mnemonic) => {
+                write!(f, " {rt}, {ra}, {rb}")
+            }
             Form::XL => {
                 write!(
                     f,
@@ -536,6 +609,9 @@ impl fmt::Display for Rendered {
             Form::D if is_logical_immediate(mnemonic) => {
                 write!(f, " r{ra}, r{rt}, {}", instruction.immediate())
             }
+            Form::D if traps_on_a_condition(mnemonic) => {
+                write!(f, " {rt}, r{ra}, {}", instruction.displacement())
+            }
             Form::D | Form::DS => {
                 write!(f, " r{rt}, r{ra}, {}", instruction.displacement())
             }
@@ -546,18 +622,7 @@ impl fmt::Display for Rendered {
             // than registers. Only the two that take a variable rotate spend an
             // operand on a register at all.
             Form::M | Form::MDS | Form::MD | Form::XS => rotate_operands(f, instruction),
-            Form::A => {
-                let third = (instruction.word() >> 6) & 0x1f;
-                match mnemonic {
-                    "fmul" | "fmuls" => write!(f, " f{rt}, f{ra}, f{third}"),
-                    "fmadd" | "fmadds" | "fmsub" | "fmsubs" | "fnmadd" | "fnmadds" | "fnmsub"
-                    | "fnmsubs" | "fsel" => {
-                        write!(f, " f{rt}, f{ra}, f{third}, f{rb}")
-                    }
-                    "fsqrt" | "fsqrts" | "fres" | "frsqrte" => write!(f, " f{rt}, f{rb}"),
-                    _ => write!(f, " f{rt}, f{ra}, f{rb}"),
-                }
-            }
+            Form::A => floating_operands(f, mnemonic, instruction),
             Form::VX if vector_operands(f, mnemonic, instruction).is_some() => Ok(()),
             Form::VX | Form::VC => write!(f, " v{rt}, v{ra}, v{rb}"),
             // Shifting a pair of vectors together takes a byte count where the
@@ -721,6 +786,42 @@ mod tests {
         assert_eq!(render(0x6000_0000, 0), "nop");
         assert_eq!(render(0x3860_0005, 0), "li r3, 5");
         assert_eq!(render(0x7c64_1b78, 0), "mr r4, r3");
+    }
+
+    /// The field a trap opens with says which comparisons should trap. Printed
+    /// as a register it names one that is never read, and the instruction reads
+    /// as trapping on nothing in particular.
+    #[test]
+    fn a_trap_names_the_conditions_it_traps_on() {
+        assert_eq!(render(0x0979_6417, 0), "tdi 11, r25, 25623");
+        assert_eq!(render(0x0c09_7d26, 0), "twi 0, r9, 32038");
+    }
+
+    /// Combining condition bits reads two and writes one. The form it shares
+    /// with the branches has room for two operands, so printing the form's
+    /// shape drops the third and loses what was combined with what.
+    #[test]
+    fn combining_condition_bits_names_all_three() {
+        assert_eq!(render(0x4fa6_6242, 0), "creqv 29, 6, 12");
+        assert_eq!(render(0x4c8a_9842, 0), "crnor 4, 10, 19");
+    }
+
+    /// Writing the floating status and control register names a mask of fields,
+    /// a value out of the floating bank, and a bit either side of the mask.
+    /// None of the four is a general purpose register.
+    #[test]
+    fn writing_the_floating_control_register_names_its_mask() {
+        assert_eq!(render(0xfc21_c58f, 0), "mtfsf. 16, f24, 0, 1");
+    }
+
+    /// A spelling that replaces the mnemonic still has to say that the
+    /// instruction sets a condition field, since the oracle this is otherwise
+    /// checked against normalizes the record bit away before comparing and so
+    /// cannot see it missing.
+    #[test]
+    fn an_extended_mnemonic_keeps_the_record_bit() {
+        assert_eq!(render(0x7c6b_1b79, 0), "mr. r11, r3");
+        assert_eq!(render(0x7c6b_1b78, 0), "mr r11, r3");
     }
 
     /// An extended mnemonic changes the text and nothing else. The decoder

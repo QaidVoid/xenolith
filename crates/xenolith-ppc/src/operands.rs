@@ -144,6 +144,10 @@ pub(crate) fn values(text: &str) -> Vec<u64> {
     let body = text
         .split_once(char::is_whitespace)
         .map_or("", |(_, rest)| rest);
+    // Reduced before the digits are read, since the oracle's spelling of a
+    // condition bit holds two numbers that are not operands, and reading them
+    // as operands counts three of them as six.
+    let body = condition_bits(body);
     let mut found: Vec<u64> = Vec::new();
     let bytes = body.as_bytes();
     let mut at = 0;
@@ -186,6 +190,53 @@ pub(crate) fn values(text: &str) -> Vec<u64> {
     found
 }
 
+/// Returns the value a condition name stands for, as the field holds it.
+fn condition_value(name: &str) -> Option<u32> {
+    match name {
+        "lt" => Some(0),
+        "gt" => Some(1),
+        "eq" => Some(2),
+        "so" => Some(3),
+        _ => None,
+    }
+}
+
+/// Rewrites the oracle's spelling of a condition bit as the number it stands
+/// for.
+///
+/// A conditional branch selects one bit out of one condition register field.
+/// This crate prints the number that field holds. The oracle spells the same
+/// number as `4*cr3+so`, and for the first field spells it as the condition
+/// alone. Both name the same bit of the same field, so reducing one spelling to
+/// the other compares what the encoding says rather than how two disassemblers
+/// chose to write it down.
+fn condition_bits(body: &str) -> String {
+    let mut out = String::new();
+
+    for (index, operand) in body.split(',').enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let trimmed = operand.trim();
+        let value = trimmed
+            .strip_prefix("4*cr")
+            .and_then(|rest| rest.split_once('+'))
+            .and_then(|(field, condition)| {
+                Some(field.parse::<u32>().ok()? * 4 + condition_value(condition)?)
+            })
+            .or_else(|| condition_value(trimmed));
+
+        match value {
+            Some(value) => {
+                let _ = write!(out, "{value}");
+            }
+            None => out.push_str(operand),
+        }
+    }
+
+    out
+}
+
 /// Returns the operand list alone, in a form that only order can change.
 ///
 /// Three things are normalized away, none of which is a claim about the
@@ -201,6 +252,7 @@ pub(crate) fn operand_text(text: &str) -> String {
         .split_once(char::is_whitespace)
         .map_or("", |(_, rest)| rest);
     let body = body.split('<').next().unwrap_or("");
+    let body = condition_bits(body);
     let bytes = body.as_bytes();
 
     let mut out = String::new();
@@ -346,6 +398,8 @@ mod tests {
 
         let mut compared = 0u32;
         let mut folded = 0u32;
+        let mut named_apart = 0u32;
+        let mut disagreeing = 0u32;
         let mut disagreements = Vec::new();
 
         for entry in &decoded {
@@ -364,27 +418,45 @@ mod tests {
             // Rendered where the oracle decoded it, since a branch names a
             // target relative to the instruction rather than an offset.
             let ours = instruction.render(entry.address).to_string();
+
+            // Two readings of the same word that do not name the same
+            // instruction have nothing to say about each other's operands. The
+            // oracle decodes for a target that has instructions this console
+            // does not, and reads several of the console's own vector forms as
+            // those instead, so comparing the numbers would compare a register
+            // of one instruction against a register of a different one.
+            if mnemonic_of(&ours) != mnemonic_of(&entry.text) {
+                named_apart += 1;
+                continue;
+            }
+
             compared += 1;
-            if values(&ours) != values(&entry.text) && disagreements.len() < 10 {
-                disagreements.push(format!(
-                    "{:08x}  ours: {ours:<34} theirs: {}",
-                    entry.word, entry.text
-                ));
+            if values(&ours) != values(&entry.text) {
+                disagreeing += 1;
+                if disagreements.len() < 10 {
+                    disagreements.push(format!(
+                        "{:08x}  ours: {ours:<34} theirs: {}",
+                        entry.word, entry.text
+                    ));
+                }
             }
         }
 
         eprintln!("distinct words        {:>8}", words.len());
         eprintln!("compared              {compared:>8}");
         eprintln!("spelled with a fold   {folded:>8}");
-        eprintln!("disagreeing           {:>8}", disagreements.len());
+        eprintln!("named differently     {named_apart:>8}");
+        eprintln!("disagreeing           {disagreeing:>8}");
         for line in &disagreements {
             eprintln!("  {line}");
         }
+        if disagreeing as usize > disagreements.len() {
+            eprintln!("  and {} more", disagreeing as usize - disagreements.len());
+        }
 
         assert!(
-            disagreements.is_empty(),
-            "operand values differ from the oracle for {} encodings",
-            disagreements.len()
+            disagreeing == 0,
+            "operand values differ from the oracle for {disagreeing} encodings"
         );
     }
 
@@ -420,6 +492,7 @@ mod tests {
 
         let mut compared = 0u32;
         let mut named_apart = 0u32;
+        let mut disagreeing = 0u32;
         let mut disagreements = Vec::new();
 
         for entry in &decoded {
@@ -438,19 +511,25 @@ mod tests {
             }
 
             compared += 1;
-            if operand_text(&ours) != operand_text(&entry.text) && disagreements.len() < 10 {
-                disagreements.push(format!(
-                    "{:08x}  ours: {ours:<34} theirs: {}",
-                    entry.word, entry.text
-                ));
+            if operand_text(&ours) != operand_text(&entry.text) {
+                disagreeing += 1;
+                if disagreements.len() < 10 {
+                    disagreements.push(format!(
+                        "{:08x}  ours: {ours:<34} theirs: {}",
+                        entry.word, entry.text
+                    ));
+                }
             }
         }
 
         eprintln!("named the same        {compared:>8}");
         eprintln!("named differently     {named_apart:>8}");
-        eprintln!("disagreeing           {:>8}", disagreements.len());
+        eprintln!("disagreeing           {disagreeing:>8}");
         for line in &disagreements {
             eprintln!("  {line}");
+        }
+        if disagreeing as usize > disagreements.len() {
+            eprintln!("  and {} more", disagreeing as usize - disagreements.len());
         }
 
         assert!(
@@ -458,9 +537,8 @@ mod tests {
             "too few encodings named alike to say anything"
         );
         assert!(
-            disagreements.is_empty(),
-            "operands are printed in a different order from the oracle for {} encodings",
-            disagreements.len()
+            disagreeing == 0,
+            "operands are printed in a different order from the oracle for {disagreeing} encodings"
         );
     }
 
@@ -486,6 +564,26 @@ mod tests {
         assert_eq!(operand_text("blr"), "");
         // Order is the whole point, so it has to survive all of that.
         assert_ne!(operand_text("ori r3, r4, 5"), operand_text("ori r4, r3, 5"));
+    }
+
+    /// The oracle spells a branch's condition bit and this crate prints the
+    /// number, and they are the same bit of the same field.
+    #[test]
+    fn a_condition_bit_reads_the_same_spelled_either_way() {
+        assert_eq!(
+            operand_text("bc 20, 15, 0x5630"),
+            operand_text("bc      20,4*cr3+so,0x5630")
+        );
+        // The first field is spelled with the condition alone.
+        assert_eq!(
+            operand_text("bca 18, 2, 0x4cd4"),
+            operand_text("bca     18,eq,0x4cd4")
+        );
+        // Which bit it is still has to survive the reduction.
+        assert_ne!(
+            operand_text("bc      20,4*cr3+so,0x5630"),
+            operand_text("bc      20,4*cr3+lt,0x5630")
+        );
     }
 
     #[test]
