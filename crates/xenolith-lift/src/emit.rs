@@ -787,18 +787,39 @@ fn vector_vertex_unpack(instruction: Instruction) -> Option<String> {
     // alpha first, and the lanes come out red, green, blue, alpha, which is the
     // ordering a wrong reading would not have produced.
     if instruction.opcode() == Opcode::Vupkd3d128 {
-        if (instruction.word() >> 16) & 0x1f != 0 {
-            return None;
+        match (instruction.word() >> 16) & 0x1f {
+            0 => {
+                let _ = writeln!(out, "    {{ xenolith_vector t;");
+                for (lane, byte) in [13u32, 14, 15, 12].into_iter().enumerate() {
+                    let _ = writeln!(
+                        out,
+                        "    xenolith_vector_set_u32(&t, {lane}, xenolith_vector_u8(&ctx->v[{b}], {byte}) | 0x3f800000u);"
+                    );
+                }
+                let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+                return Some(out);
+            }
+            // A pair of signed halfwords, out of the same last word a colour
+            // comes from, each added to the bits of three so that the value
+            // arrives as three plus the halfword over four million. What a
+            // title does next is subtract that three and scale, which is the
+            // same shape the colour above uses and is why a vector of threes
+            // sits in both titles' constant pools.
+            4 => {
+                let _ = writeln!(out, "    {{ xenolith_vector t;");
+                for (lane, half) in [6u32, 7].into_iter().enumerate() {
+                    let _ = writeln!(
+                        out,
+                        "    xenolith_vector_set_u32(&t, {lane}, (uint32_t)(0x40400000 + (int32_t)(int16_t)xenolith_vector_u16(&ctx->v[{b}], {half})));"
+                    );
+                }
+                let _ = writeln!(out, "    xenolith_vector_set_u32(&t, 2, 0u);");
+                let _ = writeln!(out, "    xenolith_vector_set_u32(&t, 3, 0x3f800000u);");
+                let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+                return Some(out);
+            }
+            _ => return None,
         }
-        let _ = writeln!(out, "    {{ xenolith_vector t;");
-        for (lane, byte) in [13u32, 14, 15, 12].into_iter().enumerate() {
-            let _ = writeln!(
-                out,
-                "    xenolith_vector_set_u32(&t, {lane}, xenolith_vector_u8(&ctx->v[{b}], {byte}) | 0x3f800000u);"
-            );
-        }
-        let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
-        return Some(out);
     }
 
     None
