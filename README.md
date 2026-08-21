@@ -65,9 +65,10 @@ not reach, and `lift --roots-from` takes that back. The two alternate until a
 round finds nothing new, which for one title is three rounds: two addresses,
 then a hundred and twenty, then none.
 
-At the end of that a title lifts 14,702 functions, runs every static constructor
-it has, and stops inside a function that uses the Direct3D vertex unpack. The
-startup path is finished; what stops it now is the coverage gap named above.
+At the end of that a title lifts around 14,700 functions, runs every static
+constructor it has, and stops inside a function that uses the Direct3D vertex
+unpack. The startup path is finished; what stops it now is the coverage gap
+named above.
 
 Walked past that gap with `XENOLITH_TRACE_UNLIFTED`, a title asks for 23 entry
 points, and only one of them is graphics: the video driver being told where the
@@ -107,9 +108,37 @@ threes in their constant pools, which is what the caller subtracts.
 
 Modelling it took one title from 14,284 functions lifted to 14,548, and the
 functions blocked across both from 208 to 21. Nothing is now unlifted on the
-path either title runs. What stops the run instead is a call through a null
-function pointer, which is a gap in what the runtime has set up rather than a
-gap in the translation.
+path either title runs.
+
+What stopped the run instead was a call through a null function pointer, and
+what that turned out to mean is the worst thing found here so far. No guest
+thread had ever executed an instruction.
+
+A title does not start a thread at the function it wants to run. It names a
+shim and hands the shim the real entry, so every thread in the title begins at
+the same address, and discovery never claims that address because nothing in the
+image branches to it. The runtime looked it up, found nothing, skipped the call
+and let the thread finish. A thread that runs nothing and exits looks exactly
+like a thread that ran and returned, so eight threads started, eight threads
+exited, and the run carried on looking healthy. The silence was the defect.
+
+The symptom surfaced about a thousand functions away, in a subsystem whose
+constructor starts a worker and expects that worker to install a delegate. The
+constructor ran. The worker was created. The delegate was never installed. Every
+step between those facts looked correct.
+
+A thread whose start was never lifted is now reported, on the same footing as an
+indirect branch to an address no function answers to, and through the same path
+so it prints the same line. That is what makes it self correcting: the loop that
+already recovers static constructors takes the shim back on its own, with no new
+mechanism and nothing per title. Guest threads then run, and a title reaches a
+kernel entry point it had never got far enough to ask for, releasing one object
+while waiting on another.
+
+Where it stops now is a title's own heap refusing an eleven megabyte allocation
+during video initialisation, four calls after it asks for a 1280 by 720 display
+mode. That is the next thing to find out, and it is a runtime question rather
+than a translation one.
 
 A built title can also be asked what it needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
