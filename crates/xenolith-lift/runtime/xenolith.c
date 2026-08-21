@@ -793,6 +793,23 @@ static struct {
  */
 #define XENOLITH_RING_WRITE_POINTER 0x7fc80714u
 
+/* Where a title reads whether there is finished work to account for.
+ *
+ * Another of the same block of registers. A title checks the lowest bit of it
+ * before it will retire anything, so leaving it clear means a title is told a
+ * frame finished and declines to do anything about it.
+ */
+#define XENOLITH_GRAPHICS_COMPLETED 0x7fc86544u
+
+/* Which interrupt a title is being told about.
+ *
+ * Both numbers are read out of the title, which compares against each and does
+ * something different for both. One retires the work it had in flight. The
+ * other runs what it left to be run when its commands were reached.
+ */
+#define XENOLITH_INTERRUPT_RETIRE 0u
+#define XENOLITH_INTERRUPT_REACHED 1u
+
 /* Reports the hardware as having consumed whatever the title has written.
  *
  * A title writes commands into the ring buffer and then waits for the hardware
@@ -819,7 +836,7 @@ static struct {
  * claim about timing rather than about anything drawn: the frame it reports is
  * one where nothing was rendered.
  */
-static void raise_the_graphics_interrupt(uint8_t *base) {
+static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source) {
     static _Thread_local xenolith_context state;
     static _Thread_local uint32_t stack;
 
@@ -839,11 +856,14 @@ static void raise_the_graphics_interrupt(uint8_t *base) {
     state.r[1] = stack - 64;
     /* Which interrupt this is, and what the title asked to be handed back.
      *
-     * The one is not a placeholder. The handler compares what it is given
-     * against one and returns without doing anything otherwise, so the number
-     * chosen here decides whether the title retires the work it has in flight
-     * or quietly ignores being told anything at all. */
-    state.r[3] = 1;
+     * The number is not a placeholder and there is more than one of them. The
+     * handler compares what it is given and does something different for each,
+     * returning without doing anything at all for the rest. One of them runs
+     * what a title left to be run when its commands were reached. Another
+     * retires the work it has in flight, and until that happens the count of
+     * outstanding work never falls and a title queues nothing further. Both
+     * have to be raised, and which is which is read out of the title. */
+    state.r[3] = source;
     state.r[4] = graphics.callback_argument;
     body(&state, base);
 }
@@ -861,9 +881,18 @@ static void *drain_the_ring(void *given) {
         xenolith_store32(base, graphics.read_back_at, written);
 
         /* A display finishes a frame sixty times a second. This one finishes
-         * nothing, at the same rate. */
+         * nothing, at the same rate.
+         *
+         * Before saying so, the bit a title checks before it will retire
+         * anything is set. It reads that out of a graphics register, and what
+         * it means is that there is finished work to account for. Everything
+         * written here is finished the moment it is written, so the bit is
+         * always the truth of this runtime even though it is never the truth of
+         * any hardware. */
         if (++ticks % 160 == 0) {
-            raise_the_graphics_interrupt(base);
+            xenolith_store32(base, XENOLITH_GRAPHICS_COMPLETED, 1);
+            raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_RETIRE);
+            raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_REACHED);
         }
 
         struct timespec briefly = {0, 100000};
@@ -1100,6 +1129,27 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
          * does nothing observable with this, and neither does this. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
+    case 177: {
+        /* Taking a lock and raising the interrupt level, which is one call on
+         * the console because the two go together there. The level is not
+         * modelled: nothing here interrupts a thread, so there is no level to
+         * be at. What a title is handed back is the level it should return to,
+         * and it hands that straight back to the release below without reading
+         * it, so nothing is lost by it being nothing. */
+        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
+        if (lock != NULL) {
+            pthread_mutex_lock(lock);
+        }
+        ctx->r[3] = 0;
+        return 1;
+    }
+    case 180: {
+        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
+        if (lock != NULL) {
+            pthread_mutex_unlock(lock);
+        }
+        return 1;
+    }
     case 77: {
         /* Taking a lock the console holds with interrupts already off. There
          * are no interrupts here and the threads are real, so what it protects
