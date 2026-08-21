@@ -156,9 +156,22 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
  * Clear of the image, of the stack, and of the low addresses a null pointer
  * would reach. The whole space is mapped and zeroed before a title runs, so
  * handing out an address is the whole of what allocating one takes here.
+ *
+ * Where it sits is not arbitrary. A title hands the graphics hardware addresses
+ * it has converted itself, by clearing the top three bits, because on the
+ * console those bits choose which view of the same memory an address is and the
+ * hardware wants the memory rather than the view. That conversion loses nothing
+ * only if what it is applied to is already below the boundary. Handing out an
+ * address above it means a title converts it, hands it over, and reads back
+ * from somewhere the runtime never wrote, with no fault and no sign of one.
+ *
+ * So the heap lives where the conversion is the identity. That it is also the
+ * size of the memory the console actually had is worth having: a title that
+ * asks for more than one held will be told no here, as it would have been
+ * there.
  */
-#define XENOLITH_HEAP_BASE 0x30000000u
-#define XENOLITH_HEAP_END 0x6f000000u
+#define XENOLITH_HEAP_BASE 0x00100000u
+#define XENOLITH_HEAP_END 0x1f000000u
 
 /* What the console allocates in. A request is rounded up to this, and the next
  * one starts on it, so no two overlap. */
