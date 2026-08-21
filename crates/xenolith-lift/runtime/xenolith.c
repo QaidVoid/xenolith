@@ -175,6 +175,45 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* What looking something up reports where there is nothing to look in. */
 #define XENOLITH_STATUS_NOT_FOUND 0xC0000225u
 
+/* Guest memory is handed out a grain at a time, so a size becomes a whole
+ * number of grains, and a size of nothing still takes one. */
+static uint32_t whole_grains(uint32_t size) {
+    uint32_t grains = (size + XENOLITH_HEAP_GRAIN - 1) / XENOLITH_HEAP_GRAIN;
+    return grains == 0 ? XENOLITH_HEAP_GRAIN : grains * XENOLITH_HEAP_GRAIN;
+}
+
+/* Where guest memory is handed out from.
+ *
+ * One arena serves both the virtual and the physical allocator. The console
+ * distinguishes the two and this does not: every guest address is mapped and
+ * zeroed before a title starts, and none of it is nearer the graphics hardware
+ * than any other.
+ *
+ * Nothing is ever given back. A title that allocated and freed in a loop would
+ * exhaust this where the console would not, which has not happened and is
+ * written down here rather than discovered later.
+ */
+static uint32_t handed_out = XENOLITH_HEAP_BASE;
+static pthread_mutex_t handing_out = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t take_guest_memory(uint32_t size, uint32_t alignment) {
+    if (alignment < XENOLITH_HEAP_GRAIN) {
+        alignment = XENOLITH_HEAP_GRAIN;
+    }
+
+    uint32_t rounded = whole_grains(size);
+
+    pthread_mutex_lock(&handing_out);
+    uint32_t at = (handed_out + alignment - 1) & ~(alignment - 1);
+    if (at < handed_out || rounded > XENOLITH_HEAP_END - at) {
+        pthread_mutex_unlock(&handing_out);
+        return 0;
+    }
+    handed_out = at + rounded;
+    pthread_mutex_unlock(&handing_out);
+    return at;
+}
+
 /* Reserving and committing guest memory.
  *
  * The documented shape is what is implemented: two pointers into guest memory
@@ -187,36 +226,43 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
  * this runtime does not have would be a pretence.
  */
 static void allocate_virtual_memory(xenolith_context *ctx, uint8_t *base) {
-    static uint32_t next = XENOLITH_HEAP_BASE;
-
     uint32_t address_at = (uint32_t)ctx->r[3];
     uint32_t size_at = (uint32_t)ctx->r[4];
     uint32_t wanted = address_at ? xenolith_load32(base, address_at) : 0;
     uint32_t size = size_at ? xenolith_load32(base, size_at) : 0;
 
-    uint32_t grains = (size + XENOLITH_HEAP_GRAIN - 1) / XENOLITH_HEAP_GRAIN;
-    uint32_t rounded = grains * XENOLITH_HEAP_GRAIN;
-    if (rounded == 0) {
-        rounded = XENOLITH_HEAP_GRAIN;
-    }
-
     uint32_t at = wanted & ~(XENOLITH_HEAP_GRAIN - 1);
     if (at == 0) {
-        if (rounded > XENOLITH_HEAP_END - next) {
+        at = take_guest_memory(size, XENOLITH_HEAP_GRAIN);
+        if (at == 0) {
             ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
             return;
         }
-        at = next;
-        next += rounded;
     }
 
     if (address_at) {
         xenolith_store32(base, address_at, at);
     }
     if (size_at) {
-        xenolith_store32(base, size_at, rounded);
+        xenolith_store32(base, size_at, whole_grains(size));
     }
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
+/* Memory the graphics hardware can reach.
+ *
+ * This cannot share the shape above and that is the whole point of it being
+ * separate: it takes its size by value rather than through a pointer, and it
+ * answers with the address itself rather than a status. Read the other way it
+ * takes a flag word for a pointer, writes the answer over whatever that
+ * addresses, and hands the title nothing, which is what it did.
+ *
+ * The range a title asks the memory to fall between is not honoured. Every
+ * guest address is mapped here and none is nearer the hardware than any other,
+ * so there is no range for this to choose among.
+ */
+static void allocate_physical_memory(xenolith_context *ctx) {
+    ctx->r[3] = take_guest_memory((uint32_t)ctx->r[4], (uint32_t)ctx->r[8]);
 }
 
 /* Says once that an answer rests on an assumption rather than on evidence.
@@ -713,10 +759,7 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         return 1;
     }
     case 186:
-        /* Memory the graphics hardware can reach. Every guest address is
-         * mapped here and none of it is nearer the hardware than any other, so
-         * this is the same allocation as any other. */
-        allocate_virtual_memory(ctx, base);
+        allocate_physical_memory(ctx);
         return 1;
     case 206:
     case 246: {
