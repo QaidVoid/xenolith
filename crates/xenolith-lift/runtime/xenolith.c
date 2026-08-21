@@ -837,8 +837,13 @@ static void raise_the_graphics_interrupt(uint8_t *base) {
         stack = take_thread_stack();
     }
     state.r[1] = stack - 64;
-    /* What the interrupt was, and what the title asked to be handed back. */
-    state.r[3] = 0;
+    /* Which interrupt this is, and what the title asked to be handed back.
+     *
+     * The one is not a placeholder. The handler compares what it is given
+     * against one and returns without doing anything otherwise, so the number
+     * chosen here decides whether the title retires the work it has in flight
+     * or quietly ignores being told anything at all. */
+    state.r[3] = 1;
     state.r[4] = graphics.callback_argument;
     body(&state, base);
 }
@@ -1095,6 +1100,23 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
          * does nothing observable with this, and neither does this. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
+    case 77: {
+        /* Taking a lock the console holds with interrupts already off. There
+         * are no interrupts here and the threads are real, so what it protects
+         * against is another thread, and a lock is what does that. */
+        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
+        if (lock != NULL) {
+            pthread_mutex_lock(lock);
+        }
+        return 1;
+    }
+    case 137: {
+        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
+        if (lock != NULL) {
+            pthread_mutex_unlock(lock);
+        }
+        return 1;
+    }
     case 95:
     case 125:
         /* Holding off the kernel's own interruptions around a stretch of work.
