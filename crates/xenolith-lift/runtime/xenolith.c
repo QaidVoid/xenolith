@@ -6,11 +6,12 @@
  * that every address named has a definition, that none has two, and that
  * nothing was left declared and forgotten.
  *
- * What this is NOT is an environment a game can run in. No thread exists and
- * nothing draws. A handful of kernel entry points are implemented, each one
- * because a title reached it on the way out of its own startup, and each one
- * saying beside it what it is founded on. Everything else reports itself and
- * stops, which is an accurate account of how far this has got.
+ * What this is NOT is an environment a game can run in. Threads are real and a
+ * title's startup runs, but nothing draws: a title's drawing commands are
+ * written into a buffer that nothing reads. The kernel entry points here are
+ * each present because a title reached one on the way through its own startup,
+ * and each says beside it what it is founded on. Everything else reports itself
+ * and stops, which is an accurate account of how far this has got.
  */
 
 /* Asked for before anything is included, because a strict C compiler hides the
@@ -558,6 +559,53 @@ static pthread_mutex_t *section_of(uint32_t at) {
     return NULL;
 }
 
+/* Objects a title names by where they live rather than by a handle.
+ *
+ * The kernel has two ways of naming the same kind of thing. One hands out a
+ * handle and takes it back, and those are the objects above. The other takes
+ * the address of a structure the title keeps inside its own memory, which this
+ * runtime never allocated and has no say in the layout of. So the address is
+ * what identifies it here, the same way a critical section is identified by the
+ * address it lives at.
+ *
+ * What such an object was initialized as is not read out of that structure. Its
+ * layout is a property of the kernel rather than of the title, and reading
+ * fields out of it by guesswork would put invented state behind every wait. One
+ * is made on first mention instead, which is stated where it matters.
+ */
+#define XENOLITH_NAMED_OBJECTS 1024
+
+static struct {
+    uint32_t at;
+    uint32_t handle;
+} named[XENOLITH_NAMED_OBJECTS];
+static pthread_mutex_t named_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct object *object_at(uint32_t at, enum object_kind kind) {
+    if (at == 0) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&named_lock);
+    for (unsigned k = 0; k < XENOLITH_NAMED_OBJECTS; k++) {
+        unsigned slot = (at / 4 + k) % XENOLITH_NAMED_OBJECTS;
+        if (named[slot].at == at) {
+            struct object *found = object_of(named[slot].handle);
+            pthread_mutex_unlock(&named_lock);
+            return found;
+        }
+        if (named[slot].at == 0) {
+            named[slot].at = at;
+            named[slot].handle = take_object(kind);
+            struct object *found = object_of(named[slot].handle);
+            pthread_mutex_unlock(&named_lock);
+            return found;
+        }
+    }
+    pthread_mutex_unlock(&named_lock);
+    return NULL;
+}
+
 /* Creating a thread, which a title does suspended and resumes after it has said
  * how the thread should be scheduled. What it is told about scheduling is not
  * acted on: a host decides that, and saying otherwise would be a pretence.
@@ -704,6 +752,82 @@ static void time_to_fields(xenolith_context *ctx, uint8_t *base) {
  */
 #define XENOLITH_SYSTEM_VERSION 0x200a3200u
 
+/* What a title told the graphics hardware, kept because it is the only record
+ * of it.
+ *
+ * Nothing here draws. A title writes drawing commands into a ring buffer and
+ * reads back how far the hardware has got through them, and there is no
+ * hardware. What is kept is where that buffer is, how big, and where the title
+ * reads the progress from, which is what something consuming those commands
+ * would need and costs nothing to hold.
+ */
+static struct {
+    uint32_t ring_at;
+    uint32_t ring_size;
+    uint32_t read_back_at;
+    uint32_t callback;
+    uint32_t callback_argument;
+} graphics;
+
+/* Where a title reads how far the hardware has got, answered as having got to
+ * the end.
+ *
+ * A title writes commands and then waits until the hardware reports it has
+ * consumed them. Nothing consumes them here, so a truthful answer is that it
+ * has consumed none, and a title told that waits for a hardware that does not
+ * exist. Reporting the buffer as drained is the assumption that keeps a title
+ * running, and it is an assumption rather than a fact.
+ */
+static void report_the_ring_drained(uint8_t *base) {
+    if (graphics.read_back_at != 0) {
+        xenolith_store32(base, graphics.read_back_at, graphics.ring_size);
+    }
+}
+
+/* What the display is, written into the structure a title hands over.
+ *
+ * Two separate things are needed here and only one of them was recoverable.
+ *
+ * The shape was. A title reads the structure straight after asking for it, and
+ * what it reads says where the fields are: two words at the front taken as
+ * whole numbers, and twelve bytes further on a value loaded into a floating
+ * register, added to one half, and truncated. Rounding a float to the nearest
+ * whole number is what a refresh rate gets done to it and not much else, and
+ * the one half is in the title's own constant pool where it can be read off.
+ * So the offsets below are derived from the artefact rather than copied.
+ *
+ * The values were not. What a console was set to show is a property of that
+ * console and its television, and the container never held it. What is written
+ * is a console showing 1280 by 720 at sixty, which is a state a real one can be
+ * in and is the size this title asks for elsewhere, and it is said outright
+ * rather than passed off as recovered.
+ *
+ * Only the fields the title was seen to read are written. The three words
+ * between them are set to nothing, matching the console with nothing turned on
+ * that the settings answer describes. Nothing past that is touched, since where
+ * the structure ends is not derivable from a title that never reads that far.
+ */
+static void report_the_display(uint8_t *base, uint32_t at) {
+    if (at == 0) {
+        return;
+    }
+
+    assumed("a display of 1280 by 720 at sixty",
+            "what a console was set to show is not a property of the title and "
+            "is not in the container");
+
+    uint32_t rate;
+    float sixty = 60.0f;
+    memcpy(&rate, &sixty, sizeof rate);
+
+    xenolith_store32(base, at, 1280);
+    xenolith_store32(base, at + 4, 720);
+    xenolith_store32(base, at + 8, 0);
+    xenolith_store32(base, at + 12, 0);
+    xenolith_store32(base, at + 16, 0);
+    xenolith_store32(base, at + 20, rate);
+}
+
 /* What the runtime answers to, by ordinal within a library.
  *
  * Each entry is here because a title reached it. Nothing is implemented ahead
@@ -722,6 +846,9 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             return 1;
         case 642:
             ctx->r[3] = XENOLITH_SYSTEM_VERSION;
+            return 1;
+        case 977:
+            report_the_display(base, (uint32_t)ctx->r[3]);
             return 1;
         default:
             return 0;
@@ -840,6 +967,124 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
          * graphics hardware, so there is nothing to tell. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
+    case 16: {
+        /* A setting of the console the title is running on, which is not in
+         * the container because it was never a property of the title. The
+         * console it was recorded from is gone and what it was set to went
+         * with it.
+         *
+         * A console always has these, so reporting that the setting is missing
+         * describes something that never happens and sends a title down a path
+         * it has never taken. What is answered instead is a console with
+         * nothing turned on, which is a state a real one can be in, and it is
+         * said outright rather than passed off as recovered. */
+        assumed("a console with no settings turned on",
+                "what one was set to is not a property of the title and is not "
+                "in the container");
+        uint32_t into = (uint32_t)ctx->r[5];
+        uint32_t room = (uint32_t)ctx->r[6];
+        uint32_t needed_at = (uint32_t)ctx->r[7];
+        if (into != 0 && room >= 4) {
+            xenolith_store32(base, into, 0);
+        }
+        if (needed_at != 0) {
+            xenolith_store32(base, needed_at, 4);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 190:
+        /* Where something is to the hardware rather than to the title. There
+         * is one address space here and everything in it is mapped, so a thing
+         * is at the address it is already at. */
+        return 1;
+    case 21:
+        /* Asking to be told when the title is being torn down. Nothing tears
+         * one down here, so there is nothing to tell it. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 479:
+        /* A routine the kernel names so that a title has something to point at
+         * where it wants nothing done. Doing nothing is the whole of it. */
+        return 1;
+    case 3:
+        /* Saying something to a debugger. A retail console with none attached
+         * does nothing observable with this, and neither does this. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 95:
+    case 125:
+        /* Holding off the kernel's own interruptions around a stretch of work.
+         * Nothing here interrupts a thread that way, so there is nothing to
+         * hold off and nothing to let back in. */
+        return 1;
+    case 454:
+        /* Whether the link to the display trained. There is no link, and a
+         * title told it failed goes looking for a fault to report rather than
+         * carrying on, so this reports the state a working console is in. */
+        ctx->r[3] = 1;
+        return 1;
+    case 617:
+    case 618:
+        /* Retraining the memory the graphics hardware draws into. There is
+         * none, so there is nothing to retrain. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 143: {
+        struct object *found = object_at((uint32_t)ctx->r[3], OBJECT_EVENT);
+        if (found != NULL) {
+            signal_object(found, 0);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 176: {
+        /* Waiting on an object named by where it lives. */
+        struct object *found = object_at((uint32_t)ctx->r[3], OBJECT_EVENT);
+        ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(found);
+        return 1;
+    }
+    case 450:
+        /* Starting the command processor, of which there is none. */
+        return 1;
+    case 451:
+        graphics.ring_at = (uint32_t)ctx->r[3];
+        graphics.ring_size = 1u << ((uint32_t)ctx->r[4] & 0x1f);
+        return 1;
+    case 438:
+        graphics.read_back_at = (uint32_t)ctx->r[3];
+        report_the_ring_drained(base);
+        return 1;
+    case 469:
+        graphics.callback = (uint32_t)ctx->r[3];
+        graphics.callback_argument = (uint32_t)ctx->r[4];
+        return 1;
+    case 433:
+        /* Telling whoever registered an interest that the hardware reached a
+         * point. Nothing reaches one, so there is nothing to pass on. */
+        return 1;
+    case 457:
+        /* What the display is doing beyond its size, which is a property of a
+         * console and its television rather than of the title. Nothing is
+         * claimed. */
+        ctx->r[3] = 0;
+        return 1;
+    case 458:
+        report_the_display(base, (uint32_t)ctx->r[3]);
+        return 1;
+    case 441: {
+        /* What the display's gamma is set to, which nothing here reads back
+         * and nothing here applies. */
+        uint32_t which = (uint32_t)ctx->r[3];
+        uint32_t value = (uint32_t)ctx->r[4];
+        if (which != 0) {
+            xenolith_store32(base, which, 0);
+        }
+        if (value != 0) {
+            xenolith_store32(base, value, 0);
+        }
+        return 1;
+    }
     case 320:
         time_to_fields(ctx, base);
         return 1;
