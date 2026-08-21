@@ -868,6 +868,80 @@ static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source) {
     body(&state, base);
 }
 
+/* The one packet whose effect a title can see.
+ *
+ * Everything else in the buffer sets hardware state or draws, and there is no
+ * hardware here for either. This one carries an address and a value, and the
+ * value appearing at the address is how a title learns the work it queued was
+ * reached. Nothing it queues afterwards happens until that shows up.
+ */
+#define XENOLITH_PACKET_WRITE 0x3fu
+
+/* How far through the ring buffer this has read, in words. */
+static uint32_t consumed;
+
+/* Reads the packets a title wrote and does the one thing it can see.
+ *
+ * What a header means is read out of what a title actually wrote rather than
+ * taken from a description of the hardware. The top two bits say which of four
+ * kinds a packet is and the next fourteen say how many words follow, which is
+ * checkable against the buffer: the lengths those two fields give land exactly
+ * on the next header, four packets running, with nothing left over.
+ *
+ * The packets whose effect is not visible from outside the hardware are read
+ * for their length and otherwise passed over. That is not the same as executing
+ * them, and a frame reported finished here still had nothing drawn in it.
+ */
+static void consume_the_ring(uint8_t *base, uint32_t written) {
+    if (graphics.ring_at == 0) {
+        return;
+    }
+
+    /* Going backwards is the buffer having wrapped, and everything from where
+     * this had got to up to the end was read before it did.
+     *
+     * Wrapping is worked out this way rather than from the buffer's length,
+     * because the length is given as a power of two whose unit is not
+     * recoverable from what a title passes. Reading it wrongly would put the
+     * walk half way through a packet, which is worse than not knowing it. This
+     * needs only the pointer, which is unambiguous. */
+    if (written < consumed) {
+        consumed = 0;
+    }
+
+    while (consumed < written) {
+        uint32_t header = xenolith_load32(base, graphics.ring_at + consumed * 4);
+        uint32_t follows;
+
+        switch (header >> 30) {
+        case 2:
+            /* A filler word, carrying nothing. */
+            follows = 0;
+            break;
+        case 1:
+            follows = 2;
+            break;
+        default:
+            follows = ((header >> 16) & 0x3fff) + 1;
+            break;
+        }
+
+        if (consumed + 1 + follows > written) {
+            /* The rest of this packet has not been written yet. */
+            break;
+        }
+
+        if ((header >> 30) == 3 && ((header >> 8) & 0xff) == XENOLITH_PACKET_WRITE
+            && follows >= 2) {
+            uint32_t where = xenolith_load32(base, graphics.ring_at + (consumed + 1) * 4);
+            uint32_t value = xenolith_load32(base, graphics.ring_at + (consumed + 2) * 4);
+            xenolith_store32(base, where, value);
+        }
+
+        consumed += 1 + follows;
+    }
+}
+
 static void *drain_the_ring(void *given) {
     uint8_t *base = given;
     unsigned ticks = 0;
@@ -878,7 +952,8 @@ static void *drain_the_ring(void *given) {
 
     while (graphics.read_back_at != 0) {
         uint32_t written = xenolith_load32(base, XENOLITH_RING_WRITE_POINTER);
-        xenolith_store32(base, graphics.read_back_at, written);
+        consume_the_ring(base, written);
+        xenolith_store32(base, graphics.read_back_at, consumed);
 
         /* A display finishes a frame sixty times a second. This one finishes
          * nothing, at the same rate.
