@@ -53,7 +53,51 @@ an operand into it, and two disassemblers naming the same instruction should
 name its operands in the same order. It reaches slightly more than the sorted
 one, since it needs no list of extended spellings to exclude.
 
-Both run over both titles: 942,332 instructions, no disagreements.
+**Then it found 394 more, and the reason it had not is worth stating.** Both
+comparisons collected the first ten disagreements and stopped collecting, and
+then reported how many they had collected. Ten was the answer whether there were
+ten or four hundred, and it read as a small known remainder rather than as a
+count that had been cut off. Counting all of them and showing the first ten says
+the same thing without the arithmetic being wrong. One title's ordering
+comparison went from ten to 432 the moment it was allowed to finish counting.
+
+What that had been hiding was four rendering bugs, all of the same kind as the
+ones above: a field printed as something it is not.
+
+The traps opened with a register that is not one. `twi` and `tdi` begin with a
+mask of which comparisons should trap, and printing it as `r11` names a register
+never read and loses which comparisons were asked for, which is the whole of
+what a trap says. That was 391 of the 394.
+
+Of the 432, forty were not a bug at all. A conditional branch selects one bit of
+one condition register field, this project prints the number the field holds,
+and objdump spells the same number as `4*cr3+so`. Both name the same bit, so the
+comparison reduces one spelling to the other rather than calling it a
+disagreement.
+
+The condition register logical operations read two bits and write a third, and
+they share a form with the branches, which have room for two operands. Printing
+the form's shape rather than the instruction's dropped the third outright, so
+the text said which bit was written and only half of what it was written from.
+
+Writing the floating status and control register names a mask of fields, a value
+out of the floating bank, and a bit either side of the mask. All four were
+printed as general purpose registers, which is four wrong answers in one
+instruction.
+
+And an extended mnemonic replaced the name without carrying the record bit with
+it, so a move that sets a condition field read as one that does not. The
+mnemonic oracle could not have caught that one: it normalizes the record suffix
+away before comparing, deliberately, so it is blind to the bit by construction.
+This was found by reading emitted code and disbelieving it, which is the same
+way `srawi` was found.
+
+Both now run over both titles with no disagreements, comparing around thirteen
+thousand distinct encodings each way per title. The console's own vector forms
+are excluded from the value comparison rather than counted against it, because
+objdump decodes for a target that has instructions this console does not and
+reads several of them as those instead. Two readings that do not name the same
+instruction have nothing to say about each other's operands.
 
 **The emitted corpus found nine model bugs, and later two more.** It compares
 which registers each instruction reads and writes, over 2.14 million of them for
