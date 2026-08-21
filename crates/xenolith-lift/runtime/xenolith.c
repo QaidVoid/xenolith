@@ -65,44 +65,6 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
     return (uint8_t *)base;
 }
 
-/* A trap leaves the function it was in, and there is nowhere for it to go. */
-void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
-    (void)ctx;
-    (void)base;
-    fprintf(stderr, "xenolith: trapped at %#010x\n", address);
-    exit(2);
-}
-
-/* A function the translation could not express.
- *
- * Reaching one means the title wanted code that is not there, which is a gap in
- * the translation rather than anything the title did wrong. Setting
- * XENOLITH_TRACE_UNLIFTED reports each and returns as though it had done
- * nothing, which walks a title past a gap to see what it asks for on the other
- * side.
- *
- * Returning from a function that should have done something is a lie, the same
- * as answering an import with nothing. What comes after describes the answer
- * given rather than the title.
- */
-void xenolith_unlifted(xenolith_context *ctx, uint8_t *base, uint32_t address) {
-    static int tracing = -1;
-
-    (void)ctx;
-    (void)base;
-    if (tracing < 0) {
-        tracing = getenv("XENOLITH_TRACE_UNLIFTED") != NULL;
-    }
-    if (tracing) {
-        printf("unlifted %#010x\n", address);
-        fflush(stdout);
-        return;
-    }
-    fprintf(stderr, "xenolith: %#010x was never lifted, so there is nothing to call\n",
-            address);
-    exit(2);
-}
-
 /* Whether this run is collecting the addresses it wanted rather than calling
  * them.
  *
@@ -137,6 +99,49 @@ static void wanted_but_not_lifted(uint32_t address, uint32_t from, const char *w
     fprintf(stderr, "xenolith: %s %#010x from %#010x, which is not a lifted function\n",
             what, address, from);
     exit(2);
+}
+
+/* A trap leaves the function it was in, and there is nowhere for it to go. */
+void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+    (void)ctx;
+    (void)base;
+    fprintf(stderr, "xenolith: trapped at %#010x\n", address);
+    exit(2);
+}
+
+/* A function the translation could not express.
+ *
+ * Reaching one means the title wanted code that is not there, which is a gap in
+ * the translation rather than anything the title did wrong. Setting
+ * XENOLITH_TRACE_UNLIFTED reports each and returns as though it had done
+ * nothing, which walks a title past a gap to see what it asks for on the other
+ * side.
+ *
+ * Returning from a function that should have done something is a lie, the same
+ * as answering an import with nothing. What comes after describes the answer
+ * given rather than the title.
+ */
+void xenolith_unlifted(xenolith_context *ctx, uint8_t *base, uint32_t address) {
+    static int tracing = -1;
+
+    (void)ctx;
+    (void)base;
+    if (tracing < 0) {
+        tracing = getenv("XENOLITH_TRACE_UNLIFTED") != NULL;
+    }
+    if (tracing) {
+        printf("unlifted %#010x\n", address);
+        fflush(stdout);
+        return;
+    }
+
+    /* Reaching one of these means either that the translation refused the
+     * function or that nothing ever discovered it, and from here the two look
+     * the same. The second is worth feeding back, since a round of discovery
+     * given the address will find it, and the first costs nothing to feed back
+     * because it was already found. So it is reported the same way an
+     * unreachable branch target is, and the same list takes both. */
+    wanted_but_not_lifted(address, 0, "was never lifted, so nothing to call at");
 }
 
 /* An address unknown when the code was emitted, resolved against the functions
@@ -781,6 +786,8 @@ static struct {
     uint32_t read_back_at;
     uint32_t callback;
     uint32_t callback_argument;
+    /* How many times a title has asked for what it drew to be shown. */
+    unsigned long frames;
 } graphics;
 
 /* Where a title says how far it has written into the ring buffer.
@@ -792,6 +799,19 @@ static struct {
  * can be read back out of it.
  */
 #define XENOLITH_RING_WRITE_POINTER 0x7fc80714u
+
+/* How far back the block a title asks for progress in begins.
+ *
+ * A title names where the read pointer should be written and, beside it, how
+ * big a block that sits in. The size arrives as a power of two and comes out at
+ * sixty four bytes, and the address named is sixty bytes into it, so the block
+ * starts sixty bytes earlier. The word at the front of it is a count of how far
+ * the hardware has worked through what it was given: a title sets it behind
+ * where it wants to get to and waits for it to catch up.
+ *
+ * Both numbers are read out of what a title passes rather than assumed.
+ */
+#define XENOLITH_PROGRESS_BEHIND 60u
 
 /* Where a title reads whether there is finished work to account for.
  *
@@ -955,6 +975,14 @@ static void *drain_the_ring(void *given) {
         consume_the_ring(base, written);
         xenolith_store32(base, graphics.read_back_at, consumed);
 
+        /* And how far it has worked through what it was given, which is all of
+         * it. A title sets this behind where it wants to get to and waits, so
+         * leaving it still is the same as saying the hardware stopped. */
+        if (graphics.read_back_at > XENOLITH_PROGRESS_BEHIND) {
+            uint32_t head = graphics.read_back_at - XENOLITH_PROGRESS_BEHIND;
+            xenolith_store32(base, head, xenolith_load32(base, head) + 1);
+        }
+
         /* A display finishes a frame sixty times a second. This one finishes
          * nothing, at the same rate.
          *
@@ -1106,6 +1134,22 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
+    case 243: {
+        /* Letting a semaphore go, which lets a thread waiting on it run. What
+         * the count was beforehand is written back where a title asked for it,
+         * and is the count this runtime keeps rather than one it invented. */
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        uint32_t before_at = (uint32_t)ctx->r[5];
+        if (found != NULL) {
+            if (before_at != 0) {
+                xenolith_store32(base, before_at, (uint32_t)found->count);
+            }
+            found->count += (long)(int32_t)ctx->r[4];
+            signal_object(found, 1);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
     case 245:
         resume_thread(ctx);
         return 1;
@@ -1128,9 +1172,14 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(found);
         return 1;
     }
+    case 207:
     case 261:
-        /* Dropping a reference. Nothing here counts them, since a title that
-         * has stopped using an object stops mentioning it. */
+        /* Letting go of a handle, and dropping a reference. Nothing here counts
+         * references or takes a handle back. A thread of this runtime's own may
+         * still be inside an object a title has finished with, and reclaiming
+         * the slot would hand it to something else while that is true. What it
+         * costs is that handles are only ever handed out, which has not run out
+         * and is written down rather than found later. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 272: {
@@ -1141,6 +1190,69 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             xenolith_store32(base, out, (uint32_t)ctx->r[3]);
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 198: {
+        /* How much memory there is and how much is left.
+         *
+         * The title hands over a structure with its own length at the front and
+         * reads three fields out of it, two of which it shifts up by twelve, so
+         * those two are counts of pages. What they are counts of is answered
+         * from this runtime's own arena, which is the only memory there is
+         * here, so the numbers are true of it whatever the console would have
+         * reported. Which of the two is the whole and which the remainder is
+         * not recoverable from what the title does with them, and both are
+         * quantities of the same arena either way. */
+        uint32_t into = (uint32_t)ctx->r[3];
+        if (into != 0) {
+            uint32_t page = 0x1000u;
+            uint32_t whole = (XENOLITH_HEAP_END - XENOLITH_HEAP_BASE) / page;
+            pthread_mutex_lock(&handing_out);
+            uint32_t left = (XENOLITH_HEAP_END - handed_out) / page;
+            pthread_mutex_unlock(&handing_out);
+
+            for (uint32_t at = 4; at < 104; at += 4) {
+                xenolith_store32(base, into + at, 0);
+            }
+            xenolith_store32(base, into + 4, whole);
+            xenolith_store32(base, into + 12, left);
+            xenolith_store32(base, into + 20, left);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 294: {
+        /* Filling memory with a whole word at a time. The length is in bytes
+         * and the console rounds it down to a whole number of words, since a
+         * word is what it writes. */
+        uint32_t at = (uint32_t)ctx->r[3];
+        uint32_t bytes = (uint32_t)ctx->r[4];
+        uint32_t value = (uint32_t)ctx->r[5];
+        for (uint32_t done = 0; done + 4 <= bytes; done += 4) {
+            xenolith_store32(base, at + done, value);
+        }
+        ctx->r[3] = at;
+        return 1;
+    }
+    case 300: {
+        /* Describing a run of characters by where it starts and how long it is.
+         * The shape is documented and exact: how many characters, how many
+         * there is room for counting the ending nothing, and where they are. */
+        uint32_t into = (uint32_t)ctx->r[3];
+        uint32_t text = (uint32_t)ctx->r[4];
+        if (into == 0) {
+            return 1;
+        }
+
+        uint16_t length = 0;
+        if (text != 0) {
+            while (length < 0xfffeu && xenolith_load8(base, text + length) != 0) {
+                length++;
+            }
+        }
+        xenolith_store16(base, into, length);
+        xenolith_store16(base, into + 2, text == 0 ? 0 : (uint16_t)(length + 1));
+        xenolith_store32(base, into + 4, text);
         return 1;
     }
     case 303:
@@ -1185,6 +1297,18 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
+    case 189:
+        /* Giving memory back. Nothing here takes it back, which is written
+         * down where the memory is handed out. Reporting a failure would be a
+         * different lie and a louder one. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 199:
+        /* Changing what a page allows. Every guest page is readable and
+         * writable from the moment the space is mapped, and this runtime has no
+         * way to make one less than that which a title would benefit from. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
     case 190:
         /* Where something is to the hardware rather than to the title. There
          * is one address space here and everything in it is mapped, so a thing
@@ -1274,6 +1398,70 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(found);
         return 1;
     }
+    case 445: {
+        /* Where the system's own command buffer is, and what names it.
+         *
+         * A title asks for one and is handed a place to write and something to
+         * call it by. The place is memory from this runtime, since there is no
+         * hardware to have reserved any. What names it is read straight back
+         * out and passed along without being looked at, so what it is matters
+         * less than that it is the same each time. */
+        static uint32_t buffer;
+        if (buffer == 0) {
+            buffer = take_guest_memory(XENOLITH_HEAP_GRAIN, XENOLITH_HEAP_GRAIN);
+        }
+        uint32_t where = (uint32_t)ctx->r[3];
+        uint32_t names = (uint32_t)ctx->r[4];
+        if (where != 0) {
+            xenolith_store32(base, where, buffer);
+        }
+        if (names != 0) {
+            xenolith_store32(base, names, buffer);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 603:
+        /* Showing what was drawn.
+         *
+         * Nothing was drawn and there is no display to show it on, so what
+         * this does is count that a title asked. A title reaching this has
+         * finished a frame's worth of work, which is worth knowing even when
+         * the frame is empty. */
+        graphics.frames++;
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 442: {
+        /* What the display is currently doing, in a structure whose shape is
+         * not in the container. Only the part a title was seen to read is
+         * written: one byte, five in, which it compares against one. Nothing
+         * is claimed about the rest, and nothing past the word holding that
+         * byte is touched. */
+        uint32_t into = (uint32_t)ctx->r[3];
+        if (into != 0) {
+            xenolith_store32(base, into, 0);
+            xenolith_store32(base, into + 4, 0);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 467:
+        /* Telling the display what to be. There is no display, and what a
+         * title is told one is remains what the query above reports. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 453:
+        /* Filling a buffer with the commands that scale a picture up to the
+         * display. Nothing here scales anything and nothing reads what would
+         * be written, so no commands are put there. What is reported is how
+         * many words were written, which is none. */
+        ctx->r[3] = 0;
+        return 1;
+    case 455:
+        /* Keeping the last picture on screen across a change. There is no
+         * screen and nothing was on it, so there is nothing to keep. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
     case 450:
         /* Starting the command processor, of which there is none. */
         return 1;
