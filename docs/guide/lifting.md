@@ -94,13 +94,14 @@ the emitter is.
 ## Reading the report
 
 ```
-functions               27447
-  lifted                27297  (99.453 percent)
+functions               32738
+  lifted                32727  (99.966 percent)
     import thunks         156
-  not lifted              150
-declarations            27570
-units                      91
-  largest             6015615 bytes
+  not lifted               11
+helper entries             50
+declarations            32868
+units                     106
+  largest             4809077 bytes
 ```
 
 **functions** is what discovery found. **lifted** is how many were emitted.
@@ -121,11 +122,8 @@ xenolith lift default.xex --out ./lifted --blockers
 
 ```
 instructions blocking the most functions
-  vadduwm               8
-  vpermwi128            7
-  vupkhsh               7
-  vsubshs               6
-  vupkd3d128            6
+  vpkd3d128             6
+  vupkd3d128            5
 ```
 
 This is the instruction that stopped the most functions, not the instruction
@@ -138,10 +136,13 @@ mnemonic that stopped it, which is where to look once you want to know why.
 ## What it cannot do yet
 
 The runtime that ships with it maps guest memory, loads the image, resolves an
-indirect branch against the table, and reports anything it cannot do. What it
-does not do is everything the console provided: no import is serviced, no thread
-exists, nothing draws.
+indirect branch against the table, services the kernel entry points a title's
+startup reaches, and reports anything it cannot do. Guest threads are real host
+threads with their own register state and stack.
 
-So the program links and runs and stops at the first call into the operating
-system. Implementing those calls is the work that turns this into something that
-plays a game, and it has not been started.
+Both titles run their whole startup, every static constructor, and every kernel
+entry point they ask for. What they do not do is draw. Nothing here talks to
+graphics hardware, and the one video driver call either title makes is answered
+with the address the console keeps its graphics registers at and nothing more.
+That is the work that would turn this into something that plays a game, and it
+has not been started.

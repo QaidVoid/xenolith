@@ -25,15 +25,15 @@ Measured against two retail titles:
 
 | | title A | title B |
 |---|---|---|
-| functions discovered | 27,447 | 11,903 |
-| executable words claimed | 95.3% | 86.9% |
-| functions lifted to C | 27,431 (99.9%) | 11,726 (98.5%) |
-| of those, import thunks | 156 | 187 |
+| functions discovered | 32,738 | 14,558 |
+| executable words claimed | 97.7% | 92.8% |
+| functions lifted to C | 32,727 (99.97%) | 14,548 (99.93%) |
+| of those, import thunks | 156 | 188 |
 | emitted C compiles | yes, all of it | yes, all of it |
 
-What is left is 193 functions, every one stopped by the Direct3D vertex pack or
-unpack, whose type field selects a format this project has no independent
-reading of.
+What is left is 21 functions across both titles, every one stopped by a Direct3D
+vertex pack or unpack format neither title's used forms cover. The two unpack
+formats the titles do reach are modelled; the rest have no reading here.
 
 ## The point of it
 

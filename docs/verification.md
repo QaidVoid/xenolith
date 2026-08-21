@@ -435,8 +435,8 @@ wanted and not an account of a title running.
 
 The list is worth having because nothing else says it. A container records 492
 imports for one title, being everything its linker knew about. Its startup
-reaches nine. Past the vertex unpack that stops it, it reaches 23, and only one
-of those is graphics. The rest are threads, events, object references and
+reaches nine. Walked past the vertex unpack that used to stop it, it reaches 23,
+and only one of those is graphics. The rest are threads, events, object references and
 physical memory. Guessing at that ordering from the outside would have put the
 graphics hardware first, and it is last.
 

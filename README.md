@@ -18,18 +18,18 @@ Measured against two retail titles:
 
 | | title A | title B |
 |---|---|---|
-| functions discovered | 32,653 | 14,475 |
-| executable words claimed | 97.7% | 93.0% |
-| functions lifted to C | 32,636 (99.9%) | 14,284 (98.7%) |
-| of those, import thunks | 156 | 187 |
+| functions discovered | 32,738 | 14,558 |
+| executable words claimed | 97.7% | 92.8% |
+| functions lifted to C | 32,727 (99.97%) | 14,548 (99.93%) |
+| of those, import thunks | 156 | 188 |
 | emitted C compiles | yes, all of it | yes, all of it |
-| helper entries emitted beside them | 50 | 55 |
-| runs to its first import | yes | yes |
+| helper entries emitted beside them | 50 | 60 |
+| runs its whole startup | yes | yes |
 
 The scalar and vector instruction sets are modelled as far as these two titles
-exercise them, including the console's own vector forms. What is left is 208
-functions, every one of them stopped by the Direct3D vertex pack or unpack,
-whose type field selects a format this project has no independent reading of.
+exercise them, including the console's own vector forms. What is left is 21
+functions across both titles, every one of them stopped by a Direct3D vertex
+pack or unpack whose type field selects a format this project has no reading of.
 
 It links, and running it from a title's recorded entry point gets as far as the
 first call into the operating system, on both titles. Getting there needed the
@@ -65,7 +65,7 @@ not reach, and `lift --roots-from` takes that back. The two alternate until a
 round finds nothing new, which for one title is three rounds: two addresses,
 then a hundred and twenty, then none.
 
-At the end of that a title lifts 14,474 functions, runs every static constructor
+At the end of that a title lifts 14,702 functions, runs every static constructor
 it has, and stops inside a function that uses the Direct3D vertex unpack. The
 startup path is finished; what stops it now is the coverage gap named above.
 
@@ -93,8 +93,25 @@ the hardware. And the system version is read out of the title: the code asking
 for it holds `0x200a3200` and goes elsewhere when given less, so what it will
 accept is stated in the artefact rather than assumed.
 
-Every entry point the title reaches is now answered. What stops it, in both
-places it stops, is the Direct3D vertex unpack. It can also be asked what a title needs:
+Every entry point the title reaches is now answered, and the vertex unpack that
+stopped it in both places is modelled for the form the titles actually use. That
+form is 244 of the 281 unpack sites across the two of them: a pair of signed
+halfwords, each added into the mantissa of three so the result arrives as three
+plus the halfword over four million, which the caller then subtracts and scales.
+The type field's meaning was read from XenonRecomp rather than derived here, so
+it was checked before it was trusted: that project stores a vector in the
+opposite byte order, and the translation between the two was pinned against the
+one unpack form this project had already proven on its own, the colour form,
+where it reproduces the lane mapping exactly. Both titles carry a vector of
+threes in their constant pools, which is what the caller subtracts.
+
+Modelling it took one title from 14,284 functions lifted to 14,548, and the
+functions blocked across both from 208 to 21. Nothing is now unlifted on the
+path either title runs. What stops the run instead is a call through a null
+function pointer, which is a gap in what the runtime has set up rather than a
+gap in the translation.
+
+A built title can also be asked what it needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
 its arguments are in, and carries on as though it had returned nothing. Both
 titles ask for the same nine kernel entry points in the same order before they
@@ -304,11 +321,11 @@ Stated plainly, because a coverage figure implies more than it means:
   and that address is above the host's own limit. Such a function faults there
   and its run is skipped, so about three quarters of a sample is lost. What does
   run is compared exactly.
-- **Between 0.1 and 1.5 percent of functions do not lift**, all of them
-  blocked by the Direct3D vertex pack and unpack. Their encoding is readable
-  and their type field is not: learning what each format means would mean
-  copying it from another implementation, and an unpack built from a guessed
-  format produces plausible floats rather than an obvious mistake.
+- **Under a tenth of a percent of functions do not lift**, all of them blocked
+  by a Direct3D vertex pack or unpack format that neither title's used forms
+  cover. The two unpack formats these titles do reach are modelled; the rest
+  have no reading here, and one built from a guessed format would produce
+  plausible floats rather than an obvious mistake, so they stay refused.
 - **The console's vector extension is modelled without an execution oracle.**
   No assembler accepts it and no emulator implements it, so those instructions
   are checked against the emitted corpus and by reading and nothing else. The
@@ -325,7 +342,7 @@ Stated plainly, because a coverage figure implies more than it means:
 
 ## What is borrowed
 
-One thing here could not be recovered from the artefact and is not original.
+Two things here could not be recovered from the artefact and are not original.
 
 An Xbox 360 title imports from the kernel by ordinal and never by name. The
 names are nowhere in the container: searching a decoded image for any of them
@@ -340,6 +357,17 @@ system call number. No code of theirs is used, and nothing here says what any of
 those entry points do. Their licence is reproduced in full at the head of that
 file, which is where it has to be, and it forbids using their name to endorse
 this, so nothing here should be read as their endorsement of it.
+
+The second is the meaning of the Direct3D vertex unpack's type field. The field
+is plainly there in the encoding and what each of its values selects is not, and
+no amount of reading the image recovers it, because the image only ever uses the
+formats rather than describing them. The two values these titles use were read
+from the XenonRecomp project. That is a reading of an encoding rather than code
+taken across, and because it was not derived here it was checked before it was
+relied on: their vector storage is the guest's byte order reversed, and the
+translation between their lanes and ours was pinned against the one unpack form
+this project had already worked out independently, where the two agree in every
+lane. The formats neither title uses are still refused.
 
 Everything else in this repository is recovered from the container, checked
 against the oracles above, or reported as unrecovered.
@@ -359,4 +387,5 @@ terms or conditions.
 
 The instruction table is written from published architecture documentation and
 the public record for the console's extension. It derives from no existing
-decoder. The kernel export catalogue is the one exception and is credited above.
+decoder. The kernel export catalogue and the vertex unpack's type field are the
+two exceptions and are credited above.
