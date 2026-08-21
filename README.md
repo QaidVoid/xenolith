@@ -135,10 +135,24 @@ mechanism and nothing per title. Guest threads then run, and a title reaches a
 kernel entry point it had never got far enough to ask for, releasing one object
 while waiting on another.
 
-Where it stops now is a title's own heap refusing an eleven megabyte allocation
-during video initialisation, four calls after it asks for a 1280 by 720 display
-mode. That is the next thing to find out, and it is a runtime question rather
-than a translation one.
+What stopped it after that was a title's own heap refusing an eleven megabyte
+allocation during video initialisation, four calls after it asks for a 1280 by
+720 display mode, and the cause was in the runtime rather than the title. The
+console has two allocators and this runtime had been answering both with one.
+They do not have the same shape: the virtual one takes an address and a size
+through pointers and returns a status, and the physical one takes its size by
+value and returns the address itself. Read the second as though it were the
+first, a flag word is taken for a pointer, the answer is written over whatever
+that addresses, and the title is handed nothing. Every physical allocation a
+title made had failed, silently, and it was asking for the memory it was going
+to draw into.
+
+With each read the way it is documented, a title gets its eleven megabytes and
+goes on into the graphics driver. That is where it stops now, on the call that
+starts the engines, and the entry points beyond it are the ring buffer, the
+display mode, the interrupt callback and the rest of the same family. Nothing
+here talks to graphics hardware yet, so that is the next body of work rather
+than the next bug.
 
 A built title can also be asked what it needs:
 `XENOLITH_TRACE_IMPORTS=1` reports each import a run reaches, with the registers
