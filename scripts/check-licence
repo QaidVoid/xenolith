@@ -1,0 +1,58 @@
+#!/bin/sh
+# Fails when the licence in NOTICE and the copy in exports.rs disagree.
+#
+# The catalogue is transcribed from another project under a licence that has to
+# travel with it. Two copies exist because one is the documentation and the
+# other is the source file a reader of the crate actually opens, so a check is
+# what keeps them from drifting apart.
+#
+# Both copies are delimited by the same two lines, the Xenia copyright line and
+# the last line of the disclaimer. A change to either anchor in either file is
+# reported rather than silently narrowing what is compared.
+set -eu
+
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+notice=NOTICE
+header=crates/xenolith-xex/src/exports.rs
+first='Copyright (c) 2015, Ben Vanik\.'
+last='SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE\.'
+
+from_notice=$(mktemp)
+from_header=$(mktemp)
+trap 'rm -f "$from_notice" "$from_header"' EXIT INT TERM
+
+for file in "$notice" "$header"; do
+    if [ ! -f "$file" ]; then
+        printf 'check-licence: %s is missing\n' "$file" >&2
+        exit 1
+    fi
+done
+
+if ! grep -q "$first" "$notice" || ! grep -q "$last" "$notice"; then
+    printf 'check-licence: %s holds no licence text\n' "$notice" >&2
+    exit 1
+fi
+
+if ! grep -q "$first" "$header" || ! grep -q "$last" "$header"; then
+    printf 'check-licence: %s holds no licence text\n' "$header" >&2
+    exit 1
+fi
+
+sed -n "/^$first\$/,/^$last\$/p" "$notice" >"$from_notice"
+sed -n "s|^//! \{0,1\}||; /^$first\$/,/^$last\$/p" "$header" >"$from_header"
+
+status=0
+diff -u "$from_notice" "$from_header" || status=$?
+case $status in
+    0) ;;
+    1)
+        printf 'check-licence: the licence in %s and %s differ\n' "$notice" "$header" >&2
+        exit 1
+        ;;
+    *)
+        printf 'check-licence: cannot compare the two copies\n' >&2
+        exit 1
+        ;;
+esac

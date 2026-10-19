@@ -497,4 +497,5 @@ terms or conditions.
 The instruction table is written from published architecture documentation and
 the public record for the console's extension. It derives from no existing
 decoder. The kernel export catalogue and the vertex unpack's type field are the
-two exceptions and are credited above.
+two exceptions; the Xenia licence and the XenonRecomp attribution are in
+[NOTICE](NOTICE).

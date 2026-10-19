@@ -1,0 +1,92 @@
+xenolith
+========
+
+This product includes material from other projects. The notices below are
+carried because the licences require them, and the attributions that follow
+them are courtesy.
+
+Xenia
+-----
+
+The export catalogue in `crates/xenolith-xex/src/exports.rs` is transcribed
+from the export tables of the Xenia project: the name behind each ordinal a
+title imports by. No executable code is taken from that project. The table
+itself is transcribed, which is why its licence travels here.
+
+The licence below is the one Xenia ships, reproduced without change. It is a
+BSD-3-Clause licence whose third condition and disclaimer name the project and
+its copyright holder rather than using the generic wording. That is how the
+material was licensed, so that is the text that travels with it.
+
+Copyright (c) 2015, Ben Vanik.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the project nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL BEN VANIK BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+XenonRecomp
+-----------
+
+The meaning of the Direct3D vertex unpack type field, in
+`crates/xenolith-lift/src/emit.rs`, was read from the XenonRecomp project
+rather than derived here. It is a reading of an encoding rather than code taken
+across, so no copy of that project is included. The attribution and its licence
+are recorded because the reading is theirs.
+
+MIT License
+
+Copyright (c) 2025 hedge-dev and contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Rust dependencies
+-----------------
+
+The tool is built from crates published to crates.io. Each carries its own
+licence in its published manifest. Where a crate ships an Apache-2.0 notice,
+section 4 of that licence requires the notice to travel with a binary built
+from it. Those notices are in the crates themselves, and a binary distributor
+should collect them from the dependency tree rather than from this file. No
+automated licence check runs over the dependency graph.
+
+Documentation site
+------------------
+
+The pages under `docs/` are built with VitePress and Vue. Those packages and
+their dependencies carry their own licences in `docs/bun.lock`, and a built
+site should carry the notices those licences require.
