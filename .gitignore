@@ -1,1 +1,7 @@
 /target
+corpus/
+tmpwork/
+*.key
+*.xex
+*.iso
+*.bin

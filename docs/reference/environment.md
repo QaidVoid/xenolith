@@ -2,6 +2,13 @@
 
 ## Key material
 
+A key and game data are never tracked in this repository. `.gitignore` excludes
+`corpus/`, `tmpwork/`, and files ending in `.key`, `.xex`, `.iso` or `.bin`, and
+`scripts/check-secrets` fails the gate when one of them is tracked anyway, or
+when a tracked file assigns a value to the key variable, grouped with
+underscores or spaces or not. It reports the path and the line, and never the
+value.
+
 | variable | what it names |
 |---|---|
 | `XENOLITH_TRACE_UNLIFTED` | set to report every function a built title called that was never translated, and carry on past it |

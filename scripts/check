@@ -21,3 +21,4 @@ run test cargo test --release --workspace
 run rustdoc env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet
 run text scripts/check-text
 run licence scripts/check-licence
+run secrets scripts/check-secrets
