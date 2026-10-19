@@ -737,16 +737,25 @@ impl fmt::Display for Rendered {
 /// Returns the letters a variant bit adds to a mnemonic.
 ///
 /// The record bit marks an instruction that also updates a condition register
-/// field. The link bit marks a branch that records where to come back to, which
-/// is the difference between a call and a jump, so leaving it off makes a call
-/// read as something it is not.
+/// field. The overflow bit marks an arithmetic instruction that also sets the
+/// summary overflow bit in the fixed point exception register, and a program
+/// that traps on overflow reads that bit, so dropping the letter turns a
+/// checked addition into an unchecked one. The link bit marks a branch that
+/// records where to come back to, which is the difference between a call and a
+/// jump, so leaving it off makes a call read as something it is not.
 fn suffixes(instruction: Instruction) -> &'static str {
     let Some(form) = instruction.form() else {
         return "";
     };
 
     if form.has_record_bit() {
-        return if instruction.record_bit() { "." } else { "" };
+        let overflow = form.has_overflow_bit() && instruction.overflow_enable();
+        return match (overflow, instruction.record_bit()) {
+            (true, true) => "o.",
+            (true, false) => "o",
+            (false, true) => ".",
+            (false, false) => "",
+        };
     }
 
     match (
@@ -847,6 +856,22 @@ mod tests {
     #[test]
     fn renders_the_record_bit_as_a_suffix() {
         assert_eq!(render(0x7c62_1a15, 0), "add. r3, r2, r3");
+    }
+
+    /// The overflow bit changes what the instruction does, so a rendering that
+    /// drops it describes an unchecked addition where the encoding has a
+    /// checked one. Both letters appear, and in this order.
+    #[test]
+    fn renders_the_overflow_bit_as_a_suffix() {
+        assert_eq!(render(0x7c62_1e14, 0), "addo r3, r2, r3");
+        assert_eq!(render(0x7c62_1e15, 0), "addo. r3, r2, r3");
+        assert_eq!(render(0x7c62_1d14, 0), "addeo r3, r2, r3");
+        assert_eq!(render(0x7c62_1914, 0), "adde r3, r2, r3");
+        assert_eq!(render(0x7c62_1c14, 0), "addco r3, r2, r3");
+        // Bit 10 is an operand in the forms that have no overflow bit, so a
+        // rotate with it set must not gain the letter.
+        assert_eq!(render(0x5400_043e, 0), "rlwinm r0, r0, 0, 16, 31");
+        assert_eq!(render(0x5400_043f, 0), "rlwinm. r0, r0, 0, 16, 31");
     }
 
     #[test]

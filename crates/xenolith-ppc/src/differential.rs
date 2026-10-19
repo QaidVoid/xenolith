@@ -21,7 +21,7 @@
 use std::process::Command;
 
 use crate::instruction::Instruction;
-use crate::table::{Entry, Opcode, TABLE};
+use crate::table::{Entry, Opcode, TABLE, is_declared};
 
 /// Target `llvm-mc` is asked to decode for.
 const TRIPLE: &str = "--triple=powerpc64-unknown-linux-gnu";
@@ -180,11 +180,6 @@ fn rejected_lines(stderr: &str) -> Vec<usize> {
 /// Returns the mnemonic of a disassembled line.
 fn mnemonic_of(line: &str) -> &str {
     line.split_whitespace().next().unwrap_or("")
-}
-
-/// Returns whether our table declares a mnemonic.
-fn is_declared(mnemonic: &str) -> bool {
-    TABLE.iter().any(|entry| entry.mnemonic == mnemonic)
 }
 
 /// Brings a mnemonic the oracle printed into the spelling our table uses.

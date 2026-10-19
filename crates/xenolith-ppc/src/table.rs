@@ -649,6 +649,16 @@ instructions! {
     }
 }
 
+/// Returns whether the table declares a mnemonic.
+///
+/// A declared name ends in the letters a variant bit would add often enough
+/// that stripping those letters blindly is wrong: `vslo` and `addic.` are names,
+/// not names with a marker on the end.
+#[cfg(test)]
+pub(crate) fn is_declared(mnemonic: &str) -> bool {
+    TABLE.iter().any(|entry| entry.mnemonic == mnemonic)
+}
+
 impl Opcode {
     /// Returns the table entry for this opcode, if it has one.
     ///

@@ -32,6 +32,8 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::process::Command;
 
+use crate::table::is_declared;
+
 /// Environment variable naming the cross binutils prefix.
 ///
 /// Given rather than searched for, because the tools are installed under a name
@@ -306,6 +308,40 @@ pub(crate) fn mnemonic_of(text: &str) -> &str {
     text.split_whitespace().next().unwrap_or("")
 }
 
+/// Returns whether two mnemonics differ only in the letters a variant bit adds.
+///
+/// The record and overflow bits are not operands, so the oracle spells them into
+/// the name. A name that matches once those letters are removed is the same
+/// instruction with a variant bit this crate failed to print, which is a
+/// rendering defect rather than two disassemblers choosing different words.
+///
+/// A name the table declares is never stripped, because `vslo` and `addic.` end
+/// in those letters as part of the name rather than as a marker.
+fn varies_only_in_suffix(ours: &str, theirs: &str) -> bool {
+    let (ours, theirs) = (
+        without_variant_letters(ours),
+        without_variant_letters(theirs),
+    );
+    ours == theirs && !ours.is_empty()
+}
+
+/// Removes the record and overflow letters from a mnemonic, where they are
+/// letters and not part of a name the table declares.
+fn without_variant_letters(mnemonic: &str) -> String {
+    let mut name = mnemonic.to_owned();
+
+    for letter in ['.', 'o', '.'] {
+        if is_declared(&name) {
+            break;
+        }
+        if let Some(shorter) = name.strip_suffix(letter) {
+            name = shorter.to_owned();
+        }
+    }
+
+    name
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,7 +501,9 @@ mod tests {
     /// Restricted to encodings the oracle named the same way this crate did.
     /// A different name means one of the two folded an operand into it, and
     /// then the operand lists legitimately differ in count and in order. The
-    /// same name leaves nothing to explain a difference.
+    /// same name leaves nothing to explain a difference. A name that differs
+    /// only in the letters a variant bit adds is the exception: that is this
+    /// crate failing to print the bit, and it is compared.
     #[test]
     fn operand_order_agrees_with_the_oracle() {
         let objdump = require_oracle!();
@@ -492,6 +530,7 @@ mod tests {
 
         let mut compared = 0u32;
         let mut named_apart = 0u32;
+        let mut unprinted_variant = 0u32;
         let mut disagreeing = 0u32;
         let mut disagreements = Vec::new();
 
@@ -506,6 +545,16 @@ mod tests {
 
             let ours = instruction.render(entry.address).to_string();
             if mnemonic_of(&ours) != mnemonic_of(&entry.text) {
+                if varies_only_in_suffix(mnemonic_of(&ours), mnemonic_of(&entry.text)) {
+                    unprinted_variant += 1;
+                    if disagreements.len() < 10 {
+                        disagreements.push(format!(
+                            "{:08x}  ours: {ours:<34} theirs: {}",
+                            entry.word, entry.text
+                        ));
+                    }
+                    continue;
+                }
                 named_apart += 1;
                 continue;
             }
@@ -524,6 +573,7 @@ mod tests {
 
         eprintln!("named the same        {compared:>8}");
         eprintln!("named differently     {named_apart:>8}");
+        eprintln!("variant letter missing{unprinted_variant:>8}");
         eprintln!("disagreeing           {disagreeing:>8}");
         for line in &disagreements {
             eprintln!("  {line}");
@@ -537,9 +587,36 @@ mod tests {
             "too few encodings named alike to say anything"
         );
         assert!(
+            unprinted_variant == 0,
+            "a variant bit went unprinted for {unprinted_variant} encodings"
+        );
+        assert!(
             disagreeing == 0,
             "operands are printed in a different order from the oracle for {disagreeing} encodings"
         );
+    }
+
+    /// A name that differs only in the letters a variant bit adds is a
+    /// rendering defect, and has to reach the comparison rather than being
+    /// skipped as two disassemblers choosing different words.
+    #[test]
+    fn a_variant_suffix_is_a_difference_worth_comparing() {
+        assert!(varies_only_in_suffix("add", "addo"));
+        assert!(varies_only_in_suffix("add", "add."));
+        assert!(varies_only_in_suffix("add", "addo."));
+        assert!(varies_only_in_suffix("mullw", "mullwo"));
+        // A folded operand is a different name, and the operand lists
+        // legitimately differ there.
+        assert!(!varies_only_in_suffix("addi", "li"));
+        assert!(!varies_only_in_suffix("or", "mr"));
+        assert!(!varies_only_in_suffix("add", "addc"));
+        // Both of these are declared names, so neither is the other with a
+        // marker on the end.
+        assert!(!varies_only_in_suffix("addic", "addic."));
+        assert!(!varies_only_in_suffix("vsl", "vslo"));
+        assert!(!varies_only_in_suffix("vsr", "vsro"));
+        // An empty name is not a match against another empty name.
+        assert!(!varies_only_in_suffix("", ""));
     }
 
     #[test]
