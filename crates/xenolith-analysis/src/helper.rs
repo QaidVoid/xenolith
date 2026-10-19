@@ -39,7 +39,7 @@ const MIN_STEPS: usize = 4;
 ///
 /// This is what separates the two. Without it a four instruction epilogue
 /// restoring the last few registers before returning looks exactly like a short
-/// helper, and one was found in real code during development.
+/// helper.
 const fn first_covered_register(kind: HelperKind) -> u8 {
     match kind {
         HelperKind::GeneralPurpose | HelperKind::FloatingPoint | HelperKind::Vector => 14,
@@ -485,8 +485,7 @@ mod tests {
 
     /// A function restoring the registers it used and returning has the same
     /// shape as a helper. What it does not have is the whole callee saved range,
-    /// because it only ever needed part of it. Real code contains these, and one
-    /// was reported as a helper before this rule existed.
+    /// because it only ever needed part of it.
     #[test]
     fn a_function_epilogue_is_not_a_helper() {
         let mut code = run(encode::ld, 1, 28, 4, 8);

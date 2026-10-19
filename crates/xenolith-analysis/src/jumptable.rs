@@ -211,7 +211,8 @@ fn step(registers: &mut Registers, lineage: &mut Lineage, instruction: Instructi
     let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
 
     match instruction.opcode() {
-        // Building a constant, either half at a time or in one go.
+        // The add immediate shifted form builds the high half of a constant,
+        // because its displacement is shifted left by sixteen.
         Opcode::Addis if ra == 0 => {
             let high = 0u32.wrapping_add_signed(instruction.displacement()) << 16;
             registers.set(rt, Value::Const(high));
@@ -234,7 +235,6 @@ fn step(registers: &mut Registers, lineage: &mut Lineage, instruction: Instructi
             lineage.derive(rt, ra, 1);
         }
 
-        // Loading an entry out of a table whose address is already known.
         opcode if indexed_load(opcode).is_some() => {
             let Some((width, signed)) = indexed_load(opcode) else {
                 return;
@@ -280,7 +280,6 @@ fn step(registers: &mut Registers, lineage: &mut Lineage, instruction: Instructi
             registers.set(ra, registers.get(rt));
             lineage.derive(ra, rt, 1);
         }
-        // A register moved onto itself is how a copy is written.
         Opcode::Or if rt == rb => {
             registers.set(ra, registers.get(rt));
             lineage.derive(ra, rt, 1);
@@ -290,7 +289,8 @@ fn step(registers: &mut Registers, lineage: &mut Lineage, instruction: Instructi
             lineage.clear(ra);
         }
 
-        // Adding an entry to a base, which is how an offset becomes an address.
+        // A constant added to an entry load turns the offset it carries into
+        // an address.
         Opcode::Add => {
             let value = match (registers.get(ra), registers.get(rb)) {
                 (Value::Const(base), Value::Entry(load))

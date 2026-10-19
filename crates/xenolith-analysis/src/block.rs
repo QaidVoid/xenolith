@@ -443,7 +443,7 @@ mod tests {
     }
 
     /// A call target can land on something that is not code, and walking from
-    /// there decodes nothing. Real code does this and no synthetic test had.
+    /// there decodes nothing.
     #[test]
     fn walking_from_a_word_that_does_not_decode_produces_no_block() {
         let image = ImageBuilder::new(0x8200_0000)

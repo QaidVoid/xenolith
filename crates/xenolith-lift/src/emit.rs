@@ -485,8 +485,6 @@ fn vector_arrangement(instruction: Instruction) -> Option<String> {
     };
 
     match instruction.opcode() {
-        // A five bit signed immediate reaches every lane, sign extended to
-        // whatever width the lane is.
         Opcode::Vspltisb | Opcode::Vspltish | Opcode::Vspltisw | Opcode::Vspltisw128 => {
             let width = match instruction.opcode() {
                 Opcode::Vspltisb => 1,
@@ -498,7 +496,8 @@ fn vector_arrangement(instruction: Instruction) -> Option<String> {
             let body = format!("(uint{}_t)(int{}_t)({value})", width * 8, width * 8);
             vector_lanes(&mut out, d, count, name, &body);
         }
-        // One lane of a source reaches every lane.
+        // The immediate names the lane, and only its low bits are read, so a
+        // value past the lane count wraps to the start.
         Opcode::Vspltb | Opcode::Vsplth | Opcode::Vspltw | Opcode::Vspltw128 => {
             let width = match instruction.opcode() {
                 Opcode::Vspltb => 1,
@@ -511,8 +510,6 @@ fn vector_arrangement(instruction: Instruction) -> Option<String> {
             vector_lanes(&mut out, d, count, name, &body);
         }
 
-        // A merge interleaves one half of each source, which is entirely about
-        // which lane goes where.
         Opcode::Vmrghb
         | Opcode::Vmrghh
         | Opcode::Vmrghw
@@ -588,7 +585,6 @@ fn vector_convert(instruction: Instruction) -> Option<String> {
             );
             vector_lanes(&mut out, d, 4, "u32", &body);
         }
-        // The roundings, each named for the direction it takes.
         Opcode::Vrfin
         | Opcode::Vrfin128
         | Opcode::Vrfiz
@@ -628,7 +624,6 @@ fn vector_convert(instruction: Instruction) -> Option<String> {
             };
             vector_lanes(&mut out, d, 4, "f32", &body);
         }
-        // A dot product the console added, whose result reaches every lane.
         Opcode::Vmsum3fp128 | Opcode::Vmsum4fp128 => {
             let count = if instruction.opcode() == Opcode::Vmsum3fp128 {
                 3
@@ -773,19 +768,16 @@ fn vector_vertex_unpack(instruction: Instruction) -> Option<String> {
     let (d, _, b, _) = vector_operands(instruction);
     let mut out = String::new();
 
-    // Unpacking a packed vertex format. The type field selects which, and only
-    // one of them is settled well enough to write down.
+    // Unpacking a packed vertex format. The type field selects which.
     //
     // Type zero takes the last word as four bytes and puts each into the low
     // mantissa bits of one, giving a float between one and one plus a part in
-    // eight million. The game's own constant table proves it: what it multiplies
-    // the result by is 32896.5039, and two to the twenty third over two hundred
-    // and fifty five is 32896.502, the same number to the precision a float
-    // holds. Nothing else about that instruction would produce that constant.
+    // eight million. A title scales the result by 32896.5039, which is two to
+    // the twenty third over two hundred and fifty five to the precision a
+    // float holds, so the reading is the one a title's own constants assume.
     //
-    // The byte order falls out of the same reading. A colour is stored with
-    // alpha first, and the lanes come out red, green, blue, alpha, which is the
-    // ordering a wrong reading would not have produced.
+    // A colour is stored with alpha first, and the lanes come out red, green,
+    // blue, alpha.
     if instruction.opcode() == Opcode::Vupkd3d128 {
         match (instruction.word() >> 16) & 0x1f {
             0 => {
@@ -801,10 +793,9 @@ fn vector_vertex_unpack(instruction: Instruction) -> Option<String> {
             }
             // A pair of signed halfwords, out of the same last word a colour
             // comes from, each added to the bits of three so that the value
-            // arrives as three plus the halfword over four million. What a
-            // title does next is subtract that three and scale, which is the
-            // same shape the colour above uses and is why a vector of threes
-            // sits in both titles' constant pools.
+            // arrives as three plus the halfword over four million. A title
+            // subtracts that three and scales, the same shape the colour above
+            // uses.
             4 => {
                 let _ = writeln!(out, "    {{ xenolith_vector t;");
                 for (lane, half) in [6u32, 7].into_iter().enumerate() {
@@ -827,19 +818,15 @@ fn vector_vertex_unpack(instruction: Instruction) -> Option<String> {
 
 /// Returns the C for a console form that rearranges words by an immediate.
 ///
-/// Where those immediates sit was derived rather than read. Each form's mask
-/// leaves exactly one arrangement of the free bits that fits the fields the
-/// instruction needs, and the values so assembled match what an independently
-/// produced corpus reports for every occurrence in a whole title.
+/// Each form's mask leaves exactly one arrangement of the free bits that fits
+/// the fields the instruction needs, which is what makes the encoding
+/// readable without a hardware description.
 fn vector_console_arrangement(instruction: Instruction) -> Option<String> {
     let (d, _, b, _) = vector_operands(instruction);
     let mut out = String::new();
 
     // Four words chosen by two bits each, out of an immediate the form splits
-    // across the word. Which end holds which half is settled by the mask
-    // leaving exactly one other place for it, and by the immediates so
-    // assembled matching what an independent corpus reports for all hundred
-    // occurrences in one title.
+    // across the word. The mask leaves exactly one other place for each half.
     if instruction.opcode() == Opcode::Vpermwi128 {
         let immediate =
             (((instruction.word() >> 6) & 7) << 5) | ((instruction.word() >> 16) & 0x1f);
@@ -902,9 +889,6 @@ fn vector_pack(instruction: Instruction) -> Option<String> {
                 format!("(int64_t){read}")
             }
         };
-        // The first half of the result comes from the first operand and the
-        // second from the second, which is what packing two vectors into one
-        // means.
         let value = format!(
             "(lane < {half} ? {} : {})",
             read(a, "lane"),
@@ -972,7 +956,6 @@ fn vector_pack(instruction: Instruction) -> Option<String> {
         return Some(out);
     }
 
-    // Sliding a window across the two operands laid end to end.
     if matches!(instruction.opcode(), Opcode::Vsldoi | Opcode::Vsldoi128) {
         let shift = (instruction.word() >> 6) & 0xf;
         let body = format!(
@@ -1347,7 +1330,7 @@ fn vector_float(instruction: Instruction) -> Option<String> {
             );
             // The multiply and the add round once between them rather than
             // twice, so writing them as two operations gives an answer one
-            // place out for some inputs. Hardware said so, four runs in.
+            // place out for some inputs.
             let body = if matches!(instruction.opcode(), Opcode::Vmaddfp | Opcode::Vmaddfp128) {
                 format!("__builtin_fmaf({left}, {right}, {addend})")
             } else {
@@ -1390,15 +1373,12 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
     //
     // Three immediate forms carry no record bit and record anyway, the record
     // being part of what the opcode is rather than a field inside it. Left to
-    // the bit, they would quietly never set the field, which is how this was
-    // found: a countdown loop tested the field its own subtraction was supposed
-    // to have written and never saw it change.
+    // the bit, they would never set the field.
     //
     // A conditional store carries a set low bit as part of its spelling rather
     // than as a record bit, and it writes the condition field itself from
     // whether the store happened. Letting the comparison run as well would
-    // overwrite that with a test of the value stored, which is how this was
-    // found: the retry after one never stopped retrying.
+    // overwrite that with a test of the value stored.
     let records = (instruction
         .form()
         .is_some_and(xenolith_ppc::Form::has_record_bit)
@@ -1435,7 +1415,6 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
     };
 
     match instruction.opcode() {
-        // Nothing at all, however it is spelled.
         Opcode::Ori if rt == 0 && ra == 0 && immediate == 0 => {}
         Opcode::Sync | Opcode::Isync | Opcode::Eieio => {}
 
@@ -1936,10 +1915,8 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             //
             // The clearing and inserting forms bound only the beginning, and
             // the end is not the last bit but wherever the shift left off. Both
-            // took the mask to run to the end, which for an insert overwrote
-            // everything the shift had moved past instead of leaving it. Found
-            // by running a conversion out of a real title, whose result was
-            // right in the bits the mask covered and wrong after them.
+            // taking the mask to run to the end would make an insert overwrite
+            // everything the shift had moved past instead of leaving it.
             let mask = match instruction.opcode() {
                 Opcode::Rldicr => long_mask(0, bound),
                 Opcode::Rldicl => long_mask(bound, 63),
@@ -1967,10 +1944,10 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         // A trap that fires leaves the function, which emitted code cannot
         // express, so where it goes is the environment's to decide.
         //
-        // Whether it fires is a comparison the encoding names, and emitting the
-        // call without it made every trap unconditional. Compilers put one of
-        // these after a division to catch a zero divisor, so the emitted code
-        // stopped on the check rather than on the fault it was checking for.
+        // Whether it fires is a comparison the encoding names. Compilers put
+        // one of these after a division to catch a zero divisor, so emitting
+        // the call unconditionally would stop on the check rather than on the
+        // fault it was checking for.
         Opcode::Tw | Opcode::Twi | Opcode::Td | Opcode::Tdi => {
             let long = matches!(instruction.opcode(), Opcode::Td | Opcode::Tdi);
             let immediate = matches!(instruction.opcode(), Opcode::Twi | Opcode::Tdi);
@@ -2207,8 +2184,7 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             };
             // Fused, so the product and the sum round once between them
             // rather than twice. Writing it as a multiply followed by an add is
-            // a place out for some inputs, which is how the vector form of this
-            // was caught and then the scalar form after it.
+            // a place out for some inputs.
             let addend = if operator == "-" {
                 format!("-ctx->f[{rb}].f64")
             } else {

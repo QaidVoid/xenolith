@@ -210,8 +210,7 @@ static uint32_t whole_grains(uint32_t size) {
  * than any other.
  *
  * Nothing is ever given back. A title that allocated and freed in a loop would
- * exhaust this where the console would not, which has not happened and is
- * written down here rather than discovered later.
+ * exhaust this where the console would not.
  */
 static uint32_t handed_out = XENOLITH_HEAP_BASE;
 static pthread_mutex_t handing_out = PTHREAD_MUTEX_INITIALIZER;
@@ -274,8 +273,8 @@ static void allocate_virtual_memory(xenolith_context *ctx, uint8_t *base) {
  * This cannot share the shape above and that is the whole point of it being
  * separate: it takes its size by value rather than through a pointer, and it
  * answers with the address itself rather than a status. Read the other way it
- * takes a flag word for a pointer, writes the answer over whatever that
- * addresses, and hands the title nothing, which is what it did.
+ * takes a flag word for a pointer and writes the answer over whatever that
+ * addresses.
  *
  * The range a title asks the memory to fall between is not honoured. Every
  * guest address is mapped here and none is nearer the hardware than any other,

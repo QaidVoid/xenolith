@@ -334,8 +334,6 @@ fn integer_shape(opcode: Opcode) -> Option<Shape> {
 /// Returns how a floating point operation's fields map onto what it touches.
 fn floating_shape(opcode: Opcode) -> Option<Shape> {
     Some(match opcode {
-        // Floating point arithmetic reads and writes the floating bank, and
-        // is otherwise shaped like the integer arithmetic it mirrors.
         Opcode::Fadd
         | Opcode::Fadds
         | Opcode::Fsub
@@ -626,8 +624,6 @@ fn other_shape(opcode: Opcode) -> Option<Shape> {
         Opcode::Cmp | Opcode::Cmpl => Shape::CompareBoth,
         Opcode::Cmpi | Opcode::Cmpli => Shape::CompareImmediate,
 
-        // These name what they touch in a way no shape describes, so each is
-        // handled where the shapes are applied rather than being given one.
         Opcode::Mtspr
         | Opcode::Mfspr
         | Opcode::Mftb
@@ -697,14 +693,12 @@ fn named_effect(instruction: Instruction, effect: &mut Effect) {
             }
             effect.write(Location::General(rt));
         }
-        // Reading the condition register reads every field of it.
         Opcode::Mfcr => {
             for field in 0..8 {
                 effect.read(Location::Condition(field));
             }
             effect.write(Location::General(rt));
         }
-        // Writing it writes the fields the mask selects.
         Opcode::Mtcrf => {
             effect.read(Location::General(rt));
             for field in 0..8 {
@@ -855,8 +849,6 @@ fn vector_access_effect(instruction: Instruction, effect: &mut Effect) {
             address_effect(instruction, effect);
             effect.read(Location::Vector(vector_operands(instruction).0));
         }
-        // A single element load leaves the rest of the register alone, so it
-        // reads what it is about to write into.
         Opcode::Vperm => vector_effect(Shape::VectorFromThree, instruction, effect),
         // These carry an immediate where a first source would sit, so the bits
         // an operand shape would read as a register are not one.
@@ -1304,8 +1296,7 @@ mod tests {
     }
 
     /// A compare copies the summary overflow bit into the field it writes, so
-    /// the exception register is a source. Leaving it out was found by checking
-    /// the model against an independently produced corpus.
+    /// the exception register is a source.
     #[test]
     fn a_compare_writes_the_field_it_names_and_reads_the_exception_register() {
         // cmplwi cr6, r11, 0

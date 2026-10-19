@@ -348,7 +348,6 @@ fn edges_of(
                 edges.push(Edge::FallThrough(next));
             }
         }
-        // Neither reaches anything further.
         Terminator::Undecodable { .. } | Terminator::SectionEnd => {}
     }
 
@@ -1433,7 +1432,7 @@ mod tests {
 
     /// An entry point that is not four byte aligned cannot be an instruction.
     /// Walking from it decodes a stream shifted out of step with the real one,
-    /// and claims addresses no instruction sits at, which was found by fuzzing.
+    /// and claims addresses no instruction sits at.
     #[test]
     fn an_unaligned_entry_point_seeds_nothing() {
         let words = [encode::addi(3, 4, 1), encode::blr()];

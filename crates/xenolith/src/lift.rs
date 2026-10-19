@@ -503,8 +503,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 /// A call into a register save helper lands partway through one, and discovery
 /// does not claim those: a call to a helper is a call to the helper rather than
 /// to a function beginning wherever the caller entered it. Left without a body
-/// they became traps, and since better than a third of a title's functions save
-/// registers this way, the program stopped on the first thing it did.
+/// they become traps, and since better than a third of a title's functions save
+/// registers this way, the program stops on the first thing it does.
 ///
 /// These are counted apart from the discovered functions, because they are
 /// entries into one rather than functions the analysis found.

@@ -397,11 +397,12 @@ fn extended(f: &mut fmt::Formatter<'_>, instruction: Instruction) -> Option<fmt:
     let (rt, ra, rb) = (instruction.rt(), instruction.ra(), instruction.rb());
 
     match instruction.opcode() {
-        // An or of a register with itself moves it.
+        // An or of a register with itself is how a move is encoded.
         Opcode::Or if rt == rb => Some(write!(f, "mr{} r{ra}, r{rt}", suffixes(instruction))),
-        // Adding zero to register zero, discarding the result, does nothing.
+        // An or of two zero registers is how a no operation is encoded.
         Opcode::Ori if rt == 0 && ra == 0 && instruction.immediate() == 0 => Some(write!(f, "nop")),
-        // Adding an immediate to nothing loads it.
+        // A displacement added to register zero is the constant itself, which
+        // is how a load immediate is written.
         Opcode::Addi if ra == 0 => Some(write!(f, "li r{rt}, {}", instruction.displacement())),
         Opcode::Addis if ra == 0 => Some(write!(f, "lis r{rt}, {}", instruction.displacement())),
         _ => None,
@@ -460,7 +461,6 @@ fn general_operands(
         // was meant.
         Form::X if mnemonic == "mfspr" => write!(f, " r{rt}, {}", instruction.spr()),
         Form::X if mnemonic == "mtspr" => write!(f, " {}, r{rt}", instruction.spr()),
-        // Ordering takes nothing at all.
         Form::X if matches!(mnemonic, "eieio" | "sync" | "isync") => Ok(()),
         // Moving a whole vector to or from memory addresses it through two
         // general purpose registers, so only the operand moved is a vector.
