@@ -461,7 +461,7 @@ fn general_operands(
         // was meant.
         Form::X if mnemonic == "mfspr" => write!(f, " r{rt}, {}", instruction.spr()),
         Form::X if mnemonic == "mtspr" => write!(f, " {}, r{rt}", instruction.spr()),
-        Form::X if matches!(mnemonic, "eieio" | "sync" | "isync") => Ok(()),
+        Form::X if matches!(mnemonic, "eieio" | "sync") => Ok(()),
         // Moving a whole vector to or from memory addresses it through two
         // general purpose registers, so only the operand moved is a vector.
         Form::X if is_vector_access(mnemonic) => {
@@ -538,6 +538,66 @@ fn floating_operands(
     }
 }
 
+/// Writes the operands of an instruction that names a condition register
+/// field rather than a general purpose register.
+///
+/// The condition register is eight four bit fields, and these instructions
+/// spend the fields the general purpose forms use for registers on which field
+/// they read and which they write. Printing those numbers as registers names
+/// registers the instruction never touches.
+fn condition_operands(
+    f: &mut fmt::Formatter<'_>,
+    mnemonic: &str,
+    instruction: Instruction,
+) -> Option<fmt::Result> {
+    let (rt, ra) = (instruction.rt(), instruction.ra());
+
+    Some(match mnemonic {
+        // A move between two fields, or from a status field into a condition
+        // field, names both of them the same way.
+        "mcrf" | "mcrfs" => write!(f, " cr{}, cr{}", rt >> 2, ra >> 2),
+        "mtcrf" => write!(f, " {}, r{}", instruction.condition_mask(), rt),
+        "mcrxr" => write!(f, " cr{}", rt >> 2),
+        _ => return None,
+    })
+}
+
+/// Writes the operands of an instruction that names a floating point status
+/// field.
+///
+/// These are the instructions whose register field is not a register: a bit
+/// number, a field number, or a field number and an immediate together.
+fn status_operands(
+    f: &mut fmt::Formatter<'_>,
+    mnemonic: &str,
+    instruction: Instruction,
+) -> Option<fmt::Result> {
+    let rt = instruction.rt();
+
+    Some(match mnemonic {
+        // A single bit move names the bit, which is the whole field.
+        "mtfsb0" | "mtfsb1" => write!(f, " {rt}"),
+        // A field move names the field in the top three bits of the register
+        // field, and carries its immediate below them rather than in the
+        // field the other forms use for a third register.
+        "mtfsfi" => write!(f, " {}, {}", rt >> 2, (instruction.word() >> 12) & 0xf),
+        "mffs" => write!(f, " f{rt}"),
+        _ => return None,
+    })
+}
+
+/// Writes the operands of a store or load of a string of bytes.
+///
+/// These take a byte count where the rest of the form takes a register, so
+/// printing that field as a register names one nothing reads. The base follows
+/// the same rule as every other memory access, where register zero means the
+/// literal zero.
+fn string_operands(f: &mut fmt::Formatter<'_>, instruction: Instruction) -> fmt::Result {
+    let (rt, ra) = (instruction.rt(), instruction.ra());
+
+    write!(f, " r{rt}, {}, {}", base(ra), instruction.rb())
+}
+
 impl fmt::Display for Rendered {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let instruction = self.instruction;
@@ -573,6 +633,17 @@ impl fmt::Display for Rendered {
                 branch_operands(f, instruction, self.address)
             }
             Form::SC => Ok(()),
+            // The status register instructions name a bit, a field, or a
+            // field and an immediate, and none of those is a general purpose
+            // register.
+            Form::X if status_operands(f, mnemonic, instruction).is_some() => Ok(()),
+            // A move between condition register fields names fields rather
+            // than registers.
+            Form::X | Form::XL if condition_operands(f, mnemonic, instruction).is_some() => Ok(()),
+            // The two returns and the instruction synchronisation take no
+            // operand, so printing the fields would name registers that are
+            // not read.
+            Form::XL if matches!(mnemonic, "rfid" | "hrfid" | "isync") => Ok(()),
             Form::XL if combines_condition_bits(mnemonic) => {
                 write!(f, " {rt}, {ra}, {rb}")
             }
@@ -593,6 +664,9 @@ impl fmt::Display for Rendered {
                     base(ra)
                 )
             }
+            // A string move takes a byte count in the field the rest of the
+            // form uses for a register.
+            Form::X if matches!(mnemonic, "lswi" | "stswi") => string_operands(f, instruction),
             // A compare spends the field the others use for a target register
             // on the condition field it writes and the width it compares at.
             // Printing it as a register names something that is not one.
@@ -717,6 +791,57 @@ mod tests {
     #[test]
     fn renders_a_three_register_instruction_in_encoding_order() {
         assert_eq!(render(0x7c62_1a14, 0), "add r3, r2, r3");
+    }
+
+    /// These spend the register fields on a condition register field, a mask,
+    /// or nothing at all. Printing the fields as registers named registers the
+    /// instruction never touched. Every expectation here was checked against
+    /// GNU objdump for the same encoding.
+    #[test]
+    fn renders_condition_register_fields_rather_than_registers() {
+        assert_eq!(render(0x4e00_0000, 0), "mcrf cr4, cr0");
+        assert_eq!(render(0x7d60_f120, 0), "mtcrf 15, r11");
+        assert_eq!(render(0x7d6f_f120, 0), "mtcrf 255, r11");
+        assert_eq!(render(0x7d60_0120, 0), "mtcrf 0, r11");
+        assert_eq!(render(0x7c00_0400, 0), "mcrxr cr0");
+        assert_eq!(render(0xfc00_0080, 0), "mcrfs cr0, cr0");
+        assert_eq!(render(0xfd0c_0080, 0), "mcrfs cr2, cr3");
+    }
+
+    /// The status register instructions name a bit, a field, or a field and an
+    /// immediate, and the immediate sits below the field rather than in a
+    /// register field. Each expectation was checked against GNU objdump.
+    #[test]
+    fn renders_floating_status_fields_rather_than_registers() {
+        assert_eq!(render(0xfc00_048e, 0), "mffs f0");
+        assert_eq!(render(0xfd00_048e, 0), "mffs f8");
+        assert_eq!(render(0xfc00_008c, 0), "mtfsb0 0");
+        assert_eq!(render(0xfc60_008c, 0), "mtfsb0 3");
+        assert_eq!(render(0xfc00_004c, 0), "mtfsb1 0");
+        assert_eq!(render(0xfc60_004c, 0), "mtfsb1 3");
+        assert_eq!(render(0xfc00_010c, 0), "mtfsfi 0, 0");
+        assert_eq!(render(0xfe00_010c, 0), "mtfsfi 4, 0");
+        assert_eq!(render(0xfc00_f10c, 0), "mtfsfi 0, 15");
+        assert_eq!(render(0xff00_f10c, 0), "mtfsfi 6, 15");
+        assert_eq!(render(0xfc00_010d, 0), "mtfsfi. 0, 0");
+    }
+
+    /// These take no operand at all, so the fields they leave empty are not
+    /// registers.
+    #[test]
+    fn renders_the_instructions_that_take_no_operand() {
+        assert_eq!(render(0x4c00_0024, 0), "rfid");
+        assert_eq!(render(0x4c00_0224, 0), "hrfid");
+        assert_eq!(render(0x4c00_012c, 0), "isync");
+    }
+
+    /// The byte count is the register field itself, which is why it is not a
+    /// register.
+    #[test]
+    fn renders_a_string_move_byte_count_rather_than_a_register() {
+        assert_eq!(render(0x7c01_24aa, 0), "lswi r0, r1, 4");
+        assert_eq!(render(0x7c01_25aa, 0), "stswi r0, r1, 4");
+        assert_eq!(render(0x7c02_24aa, 0), "lswi r0, r2, 4");
     }
 
     #[test]

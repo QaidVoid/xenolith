@@ -54,6 +54,15 @@ This is a decoder for a recompiler rather than a disassembler for a reader. The
 question it has to answer is what the fields hold, and folding fields into an
 extended mnemonic destroys exactly that.
 
+What it does not do is print a field as a register when the instruction spends
+that field on something else. A condition register move names two fields, a
+mask, or nothing at all; a status register move names a bit, a field, or a
+field and an immediate. Each of those has an arm of its own rather than falling
+through to the catch-all for its form, which would print either three registers
+or two branch numbers. The accessors those arms read are `condition_mask`,
+`branch_condition`, `branch_condition_bit` and `spr`, each of which documents
+the field it extracts and why the position is worth an accessor.
+
 ## How this is checked
 
 Two independent oracles, each catching what the other cannot.
@@ -70,6 +79,10 @@ distinct encoding in both titles.
 That comparison found eight rendering bugs. It has a documented blind spot: a
 field printed as the wrong kind of thing, where the number happens to coincide,
 is invisible to it. `srawi r4, r3, r4`, which printed a shift amount as a
-register, was found by reading rather than by the comparison.
+register, was found by reading rather than by the comparison. The condition
+register moves were a different case: `mcrf` printed `16, 0` where the encoding
+holds field numbers `4, 0`, which the value comparison would have caught, but
+that encoding is not in the sample it reads. Those were found by reading the
+form dispatch and were then checked against `objdump` one encoding at a time.
 
 Fuzz targets cover the decoder, so no word can panic it.
