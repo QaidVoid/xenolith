@@ -860,7 +860,7 @@ mod tests {
         for _ in 0..50_000 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let text = render(state, state.rotate_left(11));
-            assert!(!text.is_empty());
+            assert_ne!(text, "");
         }
     }
 
@@ -869,7 +869,7 @@ mod tests {
         for word in 0..2048u32 {
             let scaled = word.wrapping_mul(0x0010_0001);
             let text = render(scaled, 0x8200_0000);
-            assert!(!text.is_empty());
+            assert_ne!(text, "");
         }
     }
 }

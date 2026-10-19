@@ -38,7 +38,7 @@ fn parses_a_real_container() {
     let container = Container::parse(&bytes).expect("real container should parse");
 
     assert_eq!(container.format(), Format::Xex2);
-    assert!(!container.optional_headers().is_empty());
+    assert_ne!(container.optional_headers(), []);
 
     let image_offset = usize::try_from(container.image_offset()).unwrap();
     let security_info_offset = usize::try_from(container.security_info_offset()).unwrap();

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Runs every gate the project requires before a change is committed.
+set -eu
+
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+run() {
+    name=$1
+    shift
+    printf 'check: %s\n' "$name"
+    if ! "$@"; then
+        printf 'check: %s failed\n' "$name" >&2
+        exit 1
+    fi
+}
+
+run format cargo fmt --all --check
+run clippy cargo clippy --workspace --all-targets -- -D warnings
+run test cargo test --release --workspace
+run rustdoc env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet
+run text scripts/check-text

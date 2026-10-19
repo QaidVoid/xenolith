@@ -437,7 +437,7 @@ mod tests {
 
         assert_eq!(info.encryption(), EncryptionType::None);
         assert_eq!(info.compression(), CompressionType::None);
-        assert!(info.basic_blocks().is_empty());
+        assert_eq!(info.basic_blocks(), []);
         assert_eq!(info.normal(), None);
     }
 
@@ -485,7 +485,7 @@ mod tests {
                 first_block_digest: [7u8; 20],
             })
         );
-        assert!(info.basic_blocks().is_empty());
+        assert_eq!(info.basic_blocks(), []);
     }
 
     #[test]
@@ -576,7 +576,7 @@ mod tests {
         let libraries = parse_import_libraries(&payload).unwrap();
 
         assert_eq!(libraries.len(), 1);
-        assert!(libraries[0].imports.is_empty());
+        assert_eq!(libraries[0].imports, []);
     }
 
     #[test]

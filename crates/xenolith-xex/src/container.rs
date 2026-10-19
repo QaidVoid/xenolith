@@ -783,7 +783,7 @@ mod tests {
             container.security_info_offset(),
             u32::try_from(HEADER_SIZE).unwrap()
         );
-        assert!(container.optional_headers().is_empty());
+        assert_eq!(container.optional_headers(), []);
 
         let security = container.security_info();
         assert_eq!(security.load_address(), 0x8200_0000);

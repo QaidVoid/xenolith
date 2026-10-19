@@ -471,7 +471,7 @@ mod tests {
         code.extend_from_slice(&[encode::addi(3, 4, 1); 8]);
         let image = ImageBuilder::new(0x8200_0000).code(&code).build();
 
-        assert!(detect(&image).all().is_empty());
+        assert_eq!(detect(&image).all(), []);
     }
 
     #[test]
@@ -480,7 +480,7 @@ mod tests {
         code.push(encode::blr());
         let image = ImageBuilder::new(0x8200_0000).code(&code).build();
 
-        assert!(detect(&image).all().is_empty());
+        assert_eq!(detect(&image).all(), []);
     }
 
     /// A function restoring the registers it used and returning has the same
@@ -493,8 +493,9 @@ mod tests {
         code.push(encode::blr());
         let image = ImageBuilder::new(0x8200_0000).code(&code).build();
 
-        assert!(
-            detect(&image).all().is_empty(),
+        assert_eq!(
+            detect(&image).all(),
+            [],
             "a partial run is an epilogue, not a shared helper"
         );
     }
@@ -521,7 +522,7 @@ mod tests {
         ];
         let image = ImageBuilder::new(0x8200_0000).code(&code).build();
 
-        assert!(detect(&image).all().is_empty());
+        assert_eq!(detect(&image).all(), []);
     }
 
     #[test]
@@ -535,7 +536,7 @@ mod tests {
         ];
         let image = ImageBuilder::new(0x8200_0000).code(&code).build();
 
-        assert!(detect(&image).all().is_empty());
+        assert_eq!(detect(&image).all(), []);
     }
 
     /// A caller needing fewer registers jumps into the middle of the run, so the

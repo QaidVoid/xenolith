@@ -1091,7 +1091,7 @@ mod tests {
 
         let function = program.function_at(0x8200_0000).unwrap();
 
-        assert!(function.edges()[&0x8200_0000].is_empty());
+        assert_eq!(function.edges()[&0x8200_0000], []);
     }
 
     /// A call leaves for another function and comes back, so its only edge
@@ -1334,7 +1334,7 @@ mod tests {
                 "{target:#010x} is behind the second table and was not claimed"
             );
         }
-        assert!(function.unreachable_blocks().is_empty());
+        assert_eq!(function.unreachable_blocks(), Vec::<&Block>::new());
     }
 
     #[test]

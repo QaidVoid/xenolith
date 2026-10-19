@@ -450,7 +450,7 @@ mod tests {
             .code(&[0x17ff_ffff, encode::blr()])
             .build();
 
-        assert!(blocks_from(&image, 0x8200_0000).is_empty());
+        assert_eq!(blocks_from(&image, 0x8200_0000), []);
     }
 
     /// The same, reached the way it actually arises: by branching to it.
@@ -472,7 +472,7 @@ mod tests {
             .code(&[encode::blr()])
             .build();
 
-        assert!(blocks_from(&image, 0x9000_0000).is_empty());
+        assert_eq!(blocks_from(&image, 0x9000_0000), []);
     }
 
     #[test]

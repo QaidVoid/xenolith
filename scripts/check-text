@@ -1,0 +1,61 @@
+#!/bin/sh
+# Fails when a tracked file holds a forbidden dash or one of the marker words.
+#
+# The marker words are spelled with character classes so that this file does
+# not match its own scan.
+set -eu
+
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+em=$(printf '\342\200\224')
+en=$(printf '\342\200\223')
+markers='T[O]DO|F[I]XME|X[X]X|H[A]CK'
+
+tmp=${TMPDIR:-/tmp}
+list="$tmp/xenolith-check-text.$$.list"
+hits="$tmp/xenolith-check-text.$$.hits"
+trap 'rm -f "$list" "$hits"' EXIT INT TERM
+
+if ! jj file list >"$list"; then
+    printf 'check-text: cannot list the tracked files\n' >&2
+    exit 1
+fi
+
+failed=0
+
+# Leaves the matching lines in $hits. Returns 1 when nothing matched, and
+# aborts when the file cannot be read, so a failed read is never mistaken for
+# a clean file.
+matches() {
+    status=0
+    grep -n -E -e "$2" "$1" >"$hits" 2>/dev/null || status=$?
+    case $status in
+        0) return 0 ;;
+        1) return 1 ;;
+    esac
+    printf 'check-text: cannot read %s\n' "$1" >&2
+    exit 1
+}
+
+report() {
+    while IFS= read -r line; do
+        printf '%s:%s\n' "$1" "$line"
+    done <"$hits"
+    printf 'check-text: %s %s\n' "$1" "$2" >&2
+    failed=1
+}
+
+while IFS= read -r path; do
+    [ -f "$path" ] || continue
+
+    if matches "$path" "$em|$en"; then
+        report "$path" "holds a forbidden dash"
+    fi
+
+    if matches "$path" "$markers"; then
+        report "$path" "holds a marker word"
+    fi
+done <"$list"
+
+exit "$failed"
