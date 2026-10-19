@@ -42,7 +42,7 @@ const { site, theme } = useData()
     <nav class="header__nav">
       <a href="/guide/">Guide</a>
       <a href="/internals/container">Internals</a>
-      <a href="/verification">Verification</a>
+      <a href="/verification/">Verification</a>
       <a href="/reference/cli">Reference</a>
     </nav>
 

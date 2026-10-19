@@ -64,7 +64,7 @@ same instruction the emitted C does.
 
 That last one found six real mistakes on its first run, including one where
 recording a result compared the low half of a register rather than the whole of
-it. [How it is checked](/verification) goes through each oracle and what only it
+it. [How it is checked](/verification/) goes through each oracle and what only it
 can see.
 
 ## Where to go next

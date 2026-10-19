@@ -29,7 +29,7 @@ const sections = [
   {
     label: 'How it is checked',
     address: '0x20',
-    items: [{ text: 'Differential testing', link: '/verification' }],
+    items: [{ text: 'Differential testing', link: '/verification/' }],
   },
   {
     label: 'Reference',
@@ -49,6 +49,12 @@ export default defineConfig({
   cleanUrls: true,
   appearance: true,
   lastUpdated: false,
+
+  /**
+   * The README describes the site to whoever maintains it, so it is not a page
+   * a reader reaches and has no place in the sidebar.
+   */
+  srcExclude: ['README.md'],
 
   head: [
     ['meta', { name: 'color-scheme', content: 'dark light' }],

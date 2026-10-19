@@ -148,7 +148,7 @@ found nine model bugs.
 **Against hardware.** The same encoding is executed on emulated PowerPC with
 seeded registers and scratch memory, and run through the C emitted for it, and
 the architectural state afterwards is compared. That found seven more, described
-on [the verification page](/verification), the last of them by not finishing.
+on [the verification page](/verification/), the last of them by not finishing.
 
 **That it compiles.** Every function of both titles is emitted and compiled with
 `-Wall -Wextra`, with no warnings. Compiling only a sample used to be enough

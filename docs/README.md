@@ -19,7 +19,7 @@ bun run preview  # serve what was rendered
 | `.vitepress/theme/` | the layout, its components, and the stylesheet |
 | `guide/` | using the tool |
 | `internals/` | how each stage works |
-| `verification.md` | what each stage is checked against |
+| `verification/` | what each stage is checked against |
 | `reference/` | commands and environment variables |
 
 ## Writing here

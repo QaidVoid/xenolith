@@ -62,4 +62,4 @@ Four crates, each usable on its own:
 
 The `xenolith` binary exposes them as four subcommands. Each stage is checked
 against something produced independently before the next one is built on it,
-which is the subject of [How it is checked](/verification).
+which is the subject of [How it is checked](/verification/).
