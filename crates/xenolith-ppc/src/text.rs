@@ -232,13 +232,33 @@ fn base(ra: u8) -> String {
 
 /// Returns whether a mnemonic addresses a cache line rather than a register.
 ///
-/// These name a place in memory with the two fields that form an address and
-/// leave the third unused, so printing it names a register nothing reads.
+/// These name a place in memory with the two fields that form an address. The
+/// two touches are the exception: their third field is a cache hint on the
+/// console, and the architecture spells it as part of the mnemonic when it
+/// names a defined one.
 fn addresses_a_cache_line(mnemonic: &str) -> bool {
     matches!(
         mnemonic,
-        "dcbf" | "dcbst" | "dcbt" | "dcbtst" | "dcbz" | "icbi" | "dcbi"
+        "dcbf" | "dcbst" | "dcbt" | "dcbtst" | "dcbz" | "icbi"
     )
+}
+
+/// Returns the cache hint a cache touch names, if it names one.
+///
+/// Only the two touches carry one. A hint of zero is the one the two-operand
+/// mnemonic already states, so it is not printed and the rendering names the
+/// same instruction.
+fn cache_hint(mnemonic: &str, hint: u8) -> Option<u8> {
+    match hint {
+        0 => None,
+        hint if names_a_cache_hint(mnemonic) => Some(hint),
+        _ => None,
+    }
+}
+
+/// Returns whether a cache operation names a hint in its third field.
+fn names_a_cache_hint(mnemonic: &str) -> bool {
+    matches!(mnemonic, "dcbt" | "dcbtst")
 }
 
 /// Writes the operands of a rotate.
@@ -479,7 +499,10 @@ fn general_operands(
                 write!(f, " r{rt}, r{ra}")
             }
         }
-        Form::X if addresses_a_cache_line(mnemonic) => write!(f, " {}, r{rb}", base(ra)),
+        Form::X if addresses_a_cache_line(mnemonic) => match cache_hint(mnemonic, rt) {
+            Some(hint) => write!(f, " {}, r{rb}, {hint}", base(ra)),
+            None => write!(f, " {}, r{rb}", base(ra)),
+        },
         Form::X if writes_the_second_field(mnemonic) => {
             write!(f, " r{ra}, r{rt}, r{rb}")
         }
@@ -858,6 +881,19 @@ mod tests {
         assert_eq!(render(0xfc00_0018, 0), "frsp f0, f0");
         assert_eq!(render(0xfc00_001c, 0), "fctiw f0, f0");
         assert_eq!(render(0xfc00_001e, 0), "fctiwz f0, f0");
+    }
+
+    /// The two cache touches name a hint in the field the other operations of
+    /// the form leave unused, and a hint of zero is the one the mnemonic states.
+    #[test]
+    fn renders_the_cache_hint_of_a_data_cache_touch() {
+        assert_eq!(render(0x7e41_822c, 0), "dcbt r1, r16, 18");
+        assert_eq!(render(0x7e21_822c, 0), "dcbt r1, r16, 17");
+        assert_eq!(render(0x7c01_822c, 0), "dcbt r1, r16");
+        assert_eq!(render(0x7e41_81ec, 0), "dcbtst r1, r16, 18");
+        assert_eq!(render(0x7c01_81ec, 0), "dcbtst r1, r16");
+        assert_eq!(render(0x7c01_80ac, 0), "dcbf r1, r16");
+        assert_eq!(render(0x7c01_806c, 0), "dcbst r1, r16");
     }
 
     /// The system call names a level, and the ordinary one names nothing.
