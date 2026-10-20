@@ -823,14 +823,25 @@ static uint32_t take_processor_block(uint8_t *base) {
 }
 
 /* Where each thread's stack is taken from, below the one the first thread was
- * given so that none of them meet. */
+ * given so that none of them meet.
+ *
+ * They come down towards the heap, and the heap is where they must stop. Left
+ * to count down past it a stack is handed out over memory a title has been
+ * given, and two threads write over each other's stack and each other's data.
+ * A thread that cannot be given one is refused instead, which a title reports
+ * rather than the runtime corrupting itself. */
 #define XENOLITH_THREAD_STACK 0x00100000u
 
 static uint32_t thread_stack_next = XENOLITH_STACK_TOP - XENOLITH_THREAD_STACK;
 static pthread_mutex_t thread_stack_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* The top of a thread's stack, or nought where there is no room for one. */
 static uint32_t take_thread_stack(void) {
     pthread_mutex_lock(&thread_stack_lock);
+    if (thread_stack_next < XENOLITH_HEAP_BASE + XENOLITH_THREAD_STACK) {
+        pthread_mutex_unlock(&thread_stack_lock);
+        return 0;
+    }
     thread_stack_next -= XENOLITH_THREAD_STACK;
     uint32_t top = thread_stack_next;
     pthread_mutex_unlock(&thread_stack_lock);
@@ -847,7 +858,16 @@ static void *run_guest_thread(void *given) {
     struct object *self = given;
     static _Thread_local xenolith_context state;
 
-    state.r[1] = take_thread_stack() - 64;
+    /* A thread that cannot be given a stack never runs, and says so rather than
+     * running on memory that belongs to something else. */
+    uint32_t stack = take_thread_stack();
+    if (stack == 0) {
+        fprintf(stderr, "xenolith: no room for another thread's stack\n");
+        self->manual = 1;
+        signal_object(self, 1);
+        return NULL;
+    }
+    state.r[1] = stack - 64;
     state.r[13] = take_processor_block(self->base);
     if (self->startup != 0) {
         state.r[3] = self->entry;
@@ -946,9 +966,22 @@ static struct object *object_at(uint32_t at, enum object_kind kind) {
             return found;
         }
         if (named[slot].at == 0) {
+            /* The address is only written down once an object has been made for
+             * it. Written first, a slot whose object could not be made stays
+             * claimed, and every later wait on that address finds a slot that
+             * names nothing and returns nothing for ever. */
+            uint32_t handle = take_object(kind);
+            struct object *found = object_of(handle);
+            if (found == NULL) {
+                pthread_mutex_unlock(&named_lock);
+                fprintf(stderr,
+                        "xenolith: no room left for an object at %#x, and none left "
+                        "to make one with\n",
+                        (unsigned)at);
+                return NULL;
+            }
             named[slot].at = at;
-            named[slot].handle = take_object(kind);
-            struct object *found = object_of(named[slot].handle);
+            named[slot].handle = handle;
             pthread_mutex_unlock(&named_lock);
             return found;
         }
@@ -1703,19 +1736,32 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
          * modelled: nothing here interrupts a thread, so there is no level to
          * be at. What a title is handed back is the level it should return to,
          * and it hands that straight back to the release below without reading
-         * it, so nothing is lost by it being nothing. */
+         * it, so nothing is lost by it being nothing.
+         *
+         * A table with no room left says so rather than carrying on. Carrying on
+         * is what lets two threads into the same critical section: each is told
+         * it holds a lock that was never taken, and what the section was
+         * protecting is now written by both at once. */
         pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock != NULL) {
-            pthread_mutex_lock(lock);
+        if (lock == NULL) {
+            fprintf(stderr, "xenolith: no room left to name critical section %#x\n",
+                    (unsigned)ctx->r[3]);
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return 1;
         }
+        pthread_mutex_lock(lock);
         ctx->r[3] = 0;
         return 1;
     }
     case 180: {
         pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock != NULL) {
-            pthread_mutex_unlock(lock);
+        if (lock == NULL) {
+            fprintf(stderr, "xenolith: no room left to name critical section %#x\n",
+                    (unsigned)ctx->r[3]);
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return 1;
         }
+        pthread_mutex_unlock(lock);
         return 1;
     }
     case 77: {
@@ -1723,16 +1769,24 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
          * are no interrupts here and the threads are real, so what it protects
          * against is another thread, and a lock is what does that. */
         pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock != NULL) {
-            pthread_mutex_lock(lock);
+        if (lock == NULL) {
+            fprintf(stderr, "xenolith: no room left to name critical section %#x\n",
+                    (unsigned)ctx->r[3]);
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return 1;
         }
+        pthread_mutex_lock(lock);
         return 1;
     }
     case 137: {
         pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock != NULL) {
-            pthread_mutex_unlock(lock);
+        if (lock == NULL) {
+            fprintf(stderr, "xenolith: no room left to name critical section %#x\n",
+                    (unsigned)ctx->r[3]);
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return 1;
         }
+        pthread_mutex_unlock(lock);
         return 1;
     }
     case 95:
@@ -1889,16 +1943,25 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         return 1;
     case 293: {
         pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock != NULL) {
-            pthread_mutex_lock(lock);
+        if (lock == NULL) {
+            fprintf(stderr, "xenolith: no room left to name critical section %#x\n",
+                    (unsigned)ctx->r[3]);
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return 1;
         }
+        pthread_mutex_lock(lock);
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
     case 304: {
         pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock != NULL) {
-            pthread_mutex_unlock(lock);
+        if (lock == NULL) {
+            fprintf(stderr, "xenolith: no room left to name critical section %#x\n",
+                    (unsigned)ctx->r[3]);
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return 1;
         }
+        pthread_mutex_unlock(lock);
         return 1;
     }
     case 302:

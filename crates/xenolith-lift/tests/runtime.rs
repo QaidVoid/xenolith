@@ -785,3 +785,75 @@ int main(void) {
         panic!("a pulse did not behave as a pulse:\n{complaint}");
     }
 }
+
+/// A critical section table with no room left reports failure rather than
+/// carrying on.
+///
+/// Carrying on is what lets two threads into the same critical section: each is
+/// told it holds a lock that was never taken, and what the section was
+/// protecting is written by both at once. The table holds a fixed number of
+/// sections, so filling it is a thing a title can do.
+#[test]
+fn a_full_critical_section_table_reports_failure() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Takes the lock at `at`, reporting what came back. */
+static uint32_t take(xenolith_context *ctx, uint8_t *base, uint32_t at) {
+    ctx->r[3] = at;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
+    return (uint32_t)ctx->r[3];
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+
+    /* More sections than the table holds, each a different address, none of
+     * them released. */
+    uint32_t filled = 0;
+    for (uint32_t at = 0x1000; at < 0x1000 + 4u * 2000u; at += 4) {
+        uint32_t status = take(&ctx, base, at);
+        if (status == 0u) {
+            filled++;
+            continue;
+        }
+        /* The first refusal is what this is looking for: no memory left, and
+         * not a lock that was never taken. */
+        if (status != 0xC0000017u) {
+            fprintf(stderr, "a full table reported %#x\n", (unsigned)status);
+            return 3;
+        }
+        printf("filled %u\n", (unsigned)filled);
+        return filled == 0 ? 4 : 0;
+    }
+
+    fprintf(stderr, "the table never filled: %u sections were named\n", (unsigned)filled);
+    return 5;
+}
+"#;
+    if let Err(complaint) = runs("full_sections", program) {
+        panic!("a full critical section table did not report failure:\n{complaint}");
+    }
+}
