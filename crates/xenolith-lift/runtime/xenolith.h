@@ -318,11 +318,11 @@ static inline uint64_t xenolith_clamp_unsigned(int64_t value, uint64_t high) {
 
 /* Zeroing a data cache block.
  *
- * The block size is implementation defined. This console spells two of them
- * with one opcode and a field that selects between them: 32 bytes, and 128 for
- * the long form. The address is aligned down to whichever was asked for.
+ * The block is the console's cache line, which is 128 bytes. This console
+ * spells it two ways, and the decoder folds both into one opcode, so both
+ * clear a line. The address is aligned down to the line.
  *
- * A general purpose emulator does not share either size, so this is the one
+ * A general purpose emulator does not share the line size, so this is the one
  * instruction here with no execution oracle behind it.
  */
 static inline void xenolith_zero_block(uint8_t *base, uint32_t address, uint32_t size) {

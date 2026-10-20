@@ -2405,9 +2405,9 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
     if records {
         let _ = writeln!(
             out,
-            "    ctx->cr[0].lt = (int32_t)(uint32_t)ctx->r[{recorded}] < 0;\n    \
-             ctx->cr[0].gt = (int32_t)(uint32_t)ctx->r[{recorded}] > 0;\n    \
-             ctx->cr[0].eq = (uint32_t)ctx->r[{recorded}] == 0;\n    \
+            "    ctx->cr[0].lt = (int64_t)ctx->r[{recorded}] < 0;\n    \
+             ctx->cr[0].gt = (int64_t)ctx->r[{recorded}] > 0;\n    \
+             ctx->cr[0].eq = ctx->r[{recorded}] == 0;\n    \
              ctx->cr[0].so = (uint8_t)(ctx->xer >> 31) & 1;"
         );
     }

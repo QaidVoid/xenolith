@@ -470,45 +470,48 @@ fn a_reservation_retry_lifts() {
     assert_eq!(compiles("reservation", &emitted), Ok(()));
 }
 
-/// A recorded result is compared at the width the title runs in. Casting to
-/// 64 bits first makes a value whose top half is not a sign extension read as
-/// positive, so the field says a negative result was positive.
+/// A recorded result is compared at the width the register holds. The console
+/// is a 64-bit PowerPC and its dot forms compare the whole register, so casting
+/// down to 32 bits would report a positive result for a negative one.
 #[test]
-fn a_recorded_result_is_compared_at_the_titles_width() {
+fn a_recorded_result_is_compared_at_the_register_width() {
     // add. r3, r4, r5
     let words = [0x7c64_2a15, 0x4e80_0020];
 
     let emitted = lift_entry(&words).expect("a recording add should lift");
 
     assert!(
-        emitted.contains("ctx->cr[0].lt = (int32_t)(uint32_t)ctx->r[3] < 0;"),
-        "the sign was taken from the whole 64 bit register: {emitted}"
+        emitted.contains("ctx->cr[0].lt = (int64_t)ctx->r[3] < 0;"),
+        "the sign was not taken from the whole register: {emitted}"
     );
     assert!(
-        emitted.contains("ctx->cr[0].eq = (uint32_t)ctx->r[3] == 0;"),
-        "the equality compared the whole 64 bit register: {emitted}"
+        emitted.contains("ctx->cr[0].eq = ctx->r[3] == 0;"),
+        "the equality did not compare the whole register: {emitted}"
     );
     assert!(
-        !emitted.contains("(int64_t)ctx->r[3] < 0"),
-        "the comparison was widened again: {emitted}"
+        !emitted.contains("(int32_t)(uint32_t)ctx->r[3] < 0"),
+        "the comparison was narrowed to 32 bits: {emitted}"
     );
     assert_eq!(compiles("record-width", &emitted), Ok(()));
 }
 
-/// A console cache line is 128 bytes, and clearing 32 leaves three quarters of
-/// the block holding what was there before.
+/// A console cache line is 128 bytes, and both spellings of the block clear
+/// must clear a whole one.
 #[test]
 fn a_block_is_cleared_to_the_console_cache_line() {
-    // dcbz r0, r3, which is the short form
-    let words = [0x7c03_07ec, 0x4e80_0020];
+    // dcbz r0, r3 and the long spelling, which sets the field the short form
+    // spends on a register
+    for (word, name) in [(0x7c03_07ec, "dcbz"), (0x7c23_07ec, "dcbzl")] {
+        let words = [word, 0x4e80_0020];
 
-    let emitted = lift_entry(&words).expect("a block clear should lift");
+        let emitted = lift_entry(&words).expect("a block clear should lift");
 
-    assert!(
-        emitted.contains("xenolith_zero_block(base, address, 128);"),
-        "the block was not cleared to 128 bytes: {emitted}"
-    );
-    assert_eq!(compiles("block-clear", &emitted), Ok(()));
+        assert!(
+            emitted.contains("xenolith_zero_block(base, address, 128);"),
+            "the {name} block was not cleared to 128 bytes: {emitted}"
+        );
+        assert_eq!(compiles(name, &emitted), Ok(()));
+    }
 }
 
 /// The ordering instructions say what may not move across them, and a compiler

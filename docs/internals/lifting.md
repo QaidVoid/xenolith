@@ -69,10 +69,9 @@ that says nothing, and a title puts these where one thread hands something to
 another.
 
 An instruction whose record bit is set also writes condition field zero, and
-that comparison is made at 32 bits. The console's general purpose registers are
-64 bits wide but the arithmetic that sets the field is 32 bit arithmetic, so a
-value whose top half is not a sign extension of the bottom would otherwise read
-as positive when the title sees a negative number.
+that comparison is made at the width of the register, which is 64 bits. Narrowing
+it to 32 would report a negative result as positive whenever the top half is not
+a sign extension of the bottom.
 
 These entry points are declared for the environment to provide:
 
