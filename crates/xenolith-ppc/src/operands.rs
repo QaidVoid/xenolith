@@ -96,6 +96,9 @@ pub(crate) fn decode(objdump: &str, words: &[u32]) -> Vec<Decoded> {
     else {
         return Vec::new();
     };
+    // The file has been read by the oracle, so it can go. Leaving it behind
+    // would put one file per run in the temporary directory for ever.
+    let _ = std::fs::remove_file(&file.1);
 
     let text = String::from_utf8_lossy(&output.stdout);
     let mut decoded = Vec::new();
@@ -127,8 +130,19 @@ pub(crate) fn decode(objdump: &str, words: &[u32]) -> Vec<Decoded> {
 }
 
 /// Returns a file to write the words into, and its path.
+/// Returns a file and the path it was made at.
+///
+/// The name carries a counter as well as the process id. Two tests in one
+/// binary run on separate threads of one process, so a name keyed only on the
+/// process would have them writing each other's bytes, and the one that read
+/// second would find the other's words rather than its own.
 fn tempfile() -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
-    let path = std::env::temp_dir().join(format!("xenolith-operands-{}.bin", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "xenolith-operands-{}-{serial}.bin",
+        std::process::id()
+    ));
     let file = std::fs::File::create(&path)?;
     Ok((file, path))
 }
