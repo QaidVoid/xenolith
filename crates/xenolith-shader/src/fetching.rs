@@ -431,8 +431,6 @@ pub(crate) fn go_and_get(
     Ok(())
 }
 
-/// Every number the fetches in a shader work their addresses out of.
-///
 /// Reads a picture at the place a register names.
 ///
 /// Where in the picture to read is a pair of numbers running from nothing to one

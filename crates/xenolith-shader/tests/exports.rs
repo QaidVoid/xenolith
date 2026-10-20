@@ -14,7 +14,9 @@
 
 use std::collections::BTreeMap;
 
-use xenolith_shader::{ALU_WORDS, Alu, CARRIED, Flow, FlowOperation, POSITION, scan};
+use xenolith_shader::{
+    ALU_WORDS, Alu, CARRIED, Flow, FlowOperation, Kind, POSITION, scan, translate,
+};
 
 /// The first of the numbers that name a write straight to memory.
 ///
@@ -130,4 +132,90 @@ fn every_export_a_title_makes_has_somewhere_to_go() {
         "shaders in this image export to {}, which the translator carries nothing to",
         homeless.join(", ")
     );
+}
+
+/// A pixel shader whose middle instruction names one lane of its single lane
+/// half and no lane of its four lane half.
+///
+/// The two write masks are separate fields of the instruction, so naming one
+/// lane of one half and none of the other is ordinary rather than malformed.
+/// What the single lane half worked out still has somewhere to go, and a
+/// translator that stops at the empty four lane mask drops it: the register
+/// keeps whatever it held, and everything reading it afterwards reads that.
+///
+/// The shader is written from the fields the decoder reads rather than copied
+/// from a title, so what it exercises is stated rather than hoped for. The last
+/// instruction exports, which is what makes the module long enough for the
+/// difference to show.
+#[test]
+fn a_write_to_one_lane_alone_is_not_dropped() {
+    let words = one_lane_only();
+    let said = translate(Kind::Pixel, &words).expect("the words are a shader");
+
+    /* Two instructions do something and one exports. Without the single lane
+     * write the middle instruction comes to nothing at all, and the module is
+     * one instruction shorter. */
+    let shorter = translate(Kind::Pixel, &words_without_the_one_lane_write())
+        .expect("the words are a shader");
+    assert!(
+        said.words.len() > shorter.words.len(),
+        "the single lane write is not in the module: {} words against {} without it",
+        said.words.len(),
+        shorter.words.len()
+    );
+}
+
+/// One arithmetic instruction, from the fields the decoder reads.
+fn instruction(
+    vector_destination: u32,
+    scalar_destination: u32,
+    vector_lanes: u32,
+    scalar_lanes: u32,
+    exports: bool,
+) -> [u32; 3] {
+    let first = (vector_destination & 0x3f)
+        | ((scalar_destination & 0x3f) << 8)
+        | (u32::from(exports) << 15)
+        | ((vector_lanes & 0xf) << 16)
+        | ((scalar_lanes & 0xf) << 20);
+    /* Max, reading its first two sources from registers. */
+    let third = (2 << 24) | (1 << 31) | (1 << 30);
+    [first, 0, third]
+}
+
+/// The control flow that runs `count` instructions from the first and then ends.
+///
+/// Two forty eight bit instructions share three words with no gap, the lower
+/// taking the first word and half of the second and the higher taking the rest.
+/// The masks keep each piece inside the thirty two bits it goes into.
+fn flow(count: u64) -> [u32; 3] {
+    let run = (1u64 << 44) | (count << 12);
+    let end = 2u64 << 44;
+    let low = u32::try_from(run & 0xffff_ffff).unwrap_or_default();
+    let middle = u32::try_from(((run >> 32) & 0xffff) | ((end & 0xffff) << 16)).unwrap_or_default();
+    let high = u32::try_from((end >> 16) & 0xffff_ffff).unwrap_or_default();
+    [low, middle, high]
+}
+
+/// The words above, as a run a translator takes.
+fn one_lane_only() -> Vec<u32> {
+    let mut words = flow(3).to_vec();
+    words.extend(instruction(0, 0, 0xf, 0, false));
+    words.extend(instruction(0, 1, 0x0, 0x1, false));
+    words.extend(instruction(0, 0, 0xf, 0, true));
+    words
+}
+
+/// The same words with the middle instruction naming no lane of either half.
+///
+/// Nothing about this instruction reaches a register, so whatever the module
+/// holds for it is what the translator makes of an instruction that writes
+/// nothing. Comparing against it isolates the single lane write from every other
+/// difference the middle instruction could make.
+fn words_without_the_one_lane_write() -> Vec<u32> {
+    let mut words = flow(3).to_vec();
+    words.extend(instruction(0, 0, 0xf, 0, false));
+    words.extend(instruction(0, 1, 0x0, 0x0, false));
+    words.extend(instruction(0, 0, 0xf, 0, true));
+    words
 }

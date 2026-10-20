@@ -95,7 +95,8 @@ fn the_one_a_title_hands_over_while_running_is_said_in_a_host_s_terms() {
 ///
 /// Ignored rather than passed where `spirv-val` is absent, because a test that
 /// reports a pass it did not earn is worse than one that reports it did not run.
-/// `scripts/check-oracles` treats the ignore as a failure.
+/// Nothing in this tree runs it with `--include-ignored`, so on a machine without
+/// the tool it stays ignored and the run says so.
 #[test]
 #[ignore = "needs spirv-val"]
 #[allow(clippy::expect_used)]

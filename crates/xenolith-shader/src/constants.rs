@@ -42,12 +42,20 @@ pub const CARRIED: u32 = 16;
 
 /// How many more than the constants a shader names are handed to it.
 ///
-/// Two: what the hardware would have done to a position after the shader put it
-/// out, as something to multiply by and something to add. On the console that is
-/// a set of registers rather than a constant, and whether it is applied at all
-/// is a register too, so a host cannot be told once and for all. Handing it over
-/// beside the constants is how the same shader serves both a title that leaves
-/// the hardware to do it and one that has already done it itself.
+/// Twelve, which is what the two things kept beside the constants need.
+///
+/// The first two are what the hardware would have done to a position after the
+/// shader put it out, as something to multiply by and something to add. On the
+/// console that is a set of registers rather than a constant, and whether it is
+/// applied at all is a register too, so a host cannot be told once and for all.
+/// Handing it over beside the constants is how the same shader serves both a
+/// title that leaves the hardware to do it and one that has already done it
+/// itself.
+///
+/// The other eight are the truths and the counts a shader asks after when it
+/// jumps, at [`THE_TRUTHS`] and [`THE_COUNTS`]. Twelve is the exact number those
+/// need, not a round one: two for the scale and the offset, two more before the
+/// truths, and eight for the counts.
 pub(crate) const BESIDE_THE_CONSTANTS: u32 = 12;
 
 /// Where among the constants the truths a shader asks after when it jumps are

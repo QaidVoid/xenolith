@@ -1,15 +1,15 @@
-//! Saying in a host's terms what a shader says in the console's.
+//! What came of translating a shader, and why one was not translated.
 //!
-//! A shader is registers of four floats and instructions that read some and
-//! write one. A host takes the same idea, so most of the work is naming things:
-//! the registers become one array a shader keeps to itself, an instruction
-//! becomes a read of two of them and a write of a third, and what the console
-//! calls exporting becomes a store to something the host can see.
+//! The translation itself is in [`crate::dispatch`]. What is here is what a
+//! caller reads: the words of the module, where a title's memory each stream
+//! comes from, which pictures the shader reads, and the list of reasons a shader
+//! can be refused.
 //!
-//! What is not known is not written. An operation this has no reading of stops
-//! the translation and is reported, rather than being turned into something
-//! that looks similar, because a shader that draws the wrong thing is harder to
-//! find than one that was never translated.
+//! The reasons are a closed set rather than a message, so a caller can say what
+//! was not read and a new one cannot be added without every match on it being
+//! looked at. A refusal is a value, not a silent gap: an operation this has no
+//! reading of stops the translation, because a shader that draws the wrong thing
+//! is harder to find than one that was never translated.
 
 use crate::{ScalarOperation, VectorOperation};
 

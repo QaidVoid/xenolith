@@ -9,11 +9,11 @@ repository.workspace = true
 
 [dependencies]
 
-# A static library as well as a Rust one, because the emitted runtime reaches
-# this crate through C. Nothing in the workspace depends on this crate, so a
-# plain build of another package does not produce the archive: it is built when
-# this package is a target, which is what `scripts/check-oracles` and the lift
-# output both rely on.
+# A static library as well as a Rust one, because the C side reaches this crate
+# through the ABI in `running.rs` and a Rust library alone cannot be linked from
+# C. Nothing in the workspace depends on this crate yet, so building another
+# package does not produce the archive: it appears when this package is a build
+# target. `tests/c_abi.rs` fails where this line goes missing.
 [lib]
 crate-type = ["rlib", "staticlib"]
 

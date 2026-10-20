@@ -4,7 +4,7 @@
 //! from a retail title rather than from anything written here, and what a
 //! validator says about the module they become is not something this crate can
 //! say about itself. Both need `spirv-val` on the path, so both are ignored
-//! where it is absent and `scripts/check-oracles` reports that as a failure.
+//! where it is absent and the run reports them as ignored rather than passed.
 
 use xenolith_shader::{Kind, translate};
 

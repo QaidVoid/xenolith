@@ -25,17 +25,49 @@ fn manifest() -> String {
         .unwrap_or_else(|why| panic!("cannot read {}: {why}", path.display()))
 }
 
-#[test]
-fn the_crate_is_built_as_a_static_library() {
+/// The kinds of library the manifest asks for, as the array it was written as.
+///
+/// # Panics
+///
+/// Where the manifest holds no `crate-type` line at all, which is a different
+/// failure from one holding the wrong kinds and is worth naming separately.
+#[allow(clippy::panic)]
+fn crate_types() -> Vec<String> {
     let manifest = manifest();
-    let declares = manifest
+    let line = manifest
         .lines()
         .map(str::trim)
-        .any(|line| line.starts_with("crate-type") && line.contains("staticlib"));
+        .find(|line| line.starts_with("crate-type"))
+        .unwrap_or_else(|| panic!("the manifest declares no crate-type at all"));
+    let Some((_, list)) = line.split_once('=') else {
+        panic!("the crate-type line is not an assignment: {line}");
+    };
+    list.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|one| one.trim().trim_matches('"').to_owned())
+        .filter(|one| !one.is_empty())
+        .collect()
+}
+
+#[test]
+fn the_crate_is_built_as_a_static_library() {
+    let kinds = crate_types();
     assert!(
-        declares,
-        "the manifest declares no staticlib crate type, so the C ABI in \
-         running.rs cannot be linked from the emitted runtime"
+        kinds.iter().any(|one| one == "staticlib"),
+        "the manifest asks for {kinds:?} and not a staticlib, so the C ABI in \
+         running.rs cannot be linked from C"
+    );
+}
+
+#[test]
+fn the_crate_is_still_usable_as_a_rust_library() {
+    let kinds = crate_types();
+    assert!(
+        kinds.iter().any(|one| one == "rlib"),
+        "the manifest asks for {kinds:?} and not an rlib, so the tests and any \
+         Rust caller could not link it"
     );
 }
 
@@ -46,5 +78,5 @@ fn the_function_a_c_caller_reaches_has_a_c_signature() {
     // the C side reads the answer back by hand and shares no header.
     let reachable: unsafe extern "C" fn(u32, *const u32, u32, *mut u32, u32) -> u32 =
         xenolith_shader::running::xenolith_say_a_shader;
-    assert!(reachable as usize != 0, "the function is there");
+    let _ = reachable;
 }

@@ -1,9 +1,14 @@
-//! What a shader says at its edges.
+//! What a shader says at its edges, and the values it needs to say it.
 //!
 //! What it produces, what it carries on to whatever runs after it, how big a
 //! point is, and which vertex this is. A host looks for these by name, so they
 //! are made together and the names are what the rest of the translation is
 //! written against.
+//!
+//! Beside them are the values a comparison produces and the number every
+//! register and constant is reached by. Those are not edges, but they are the
+//! same kind of thing: named before the function begins, because a constant
+//! cannot be written inside the function that uses it.
 
 use crate::Kind;
 use crate::constants::{ALL_THE_CONSTANTS, BESIDE_THE_CONSTANTS, CARRIED};

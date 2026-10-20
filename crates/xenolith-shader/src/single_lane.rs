@@ -582,17 +582,19 @@ pub(crate) fn put_it_where_it_goes(
         return Ok(Some(leaving));
     }
 
-    {
-        /* A lane the four lane half does not name keeps what it held.
-         * Writing the result whole puts a number in every lane, so an
-         * instruction working on two of them quietly overwrote the other
-         * two, and everything reading those afterwards read that instead of
-         * what was there. */
-        let writing = alu.vector_lanes();
-        if writing == 0 {
-            return Ok(None);
-        }
-
+    /* A lane the four lane half does not name keeps what it held.
+     * Writing the result whole puts a number in every lane, so an
+     * instruction working on two of them quietly overwrote the other
+     * two, and everything reading those afterwards read that instead of
+     * what was there.
+     *
+     * An instruction naming no lane at all writes nothing here, and the single
+     * lane half still has its own write to make: the two masks are separate
+     * fields, and a shader that names one lane of the single half and none of
+     * the four is ordinary. Leaving this block rather than returning from the
+     * function is what keeps that write. */
+    let writing = alu.vector_lanes();
+    if writing != 0 {
         let where_to = module.name();
         let Some(index) = named
             .indices

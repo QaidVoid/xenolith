@@ -140,17 +140,6 @@ pub(crate) fn where_a_shader_works(
     );
     module.add(opcodes::VARIABLE, &[to_out.number(), out.number(), 3]);
 
-    /* Which vertex this is.
-     *
-     * A draw names no vertices: it says how many, and the hardware counts them
-     * off and hands each shader its number in the first of its registers. That
-     * number is what a shader works out from where its vertex sits, so without
-     * it every vertex of every draw is the same one and nothing has any size.
-     *
-     * It is the last thing about a vertex shader that comes from outside it,
-     * and it comes from the host's own counting rather than from anything a
-     * title wrote. */
-
     (to_carried, to_size)
 }
 
