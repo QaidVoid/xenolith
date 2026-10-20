@@ -2253,13 +2253,14 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             )
             .ok()?;
         }
-        // The single form rounds its result to single precision before it is
-        // widened, so taking the double square root and widening afterwards
-        // gives a different value in the last place.
+        // The single form takes the root of the double operand and rounds the
+        // result, which is what the console does. Rounding the operand first
+        // would lose the low bits before the root and move the answer further
+        // than the double form does.
         Opcode::Fsqrts => {
             writeln!(
                 out,
-                "    ctx->f[{rt}].f64 = (double)__builtin_sqrtf((float)ctx->f[{rb}].f64);"
+                "    ctx->f[{rt}].f64 = (double)(float)__builtin_sqrt(ctx->f[{rb}].f64);"
             )
             .ok()?;
         }

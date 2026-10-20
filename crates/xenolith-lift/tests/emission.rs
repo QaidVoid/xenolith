@@ -532,20 +532,48 @@ fn the_ordering_instructions_are_fences() {
     }
 }
 
-/// The single precision square root rounds to single before it is widened, so
-/// the double square root and a later cast give a different last place.
+/// The single precision square root takes the root of the double operand and
+/// rounds the result. Rounding the operand first gives a different answer, so
+/// the assertion is on the emitted expression that rounds last.
 #[test]
-fn a_single_square_root_rounds_to_single() {
+fn a_single_square_root_rounds_its_result() {
     // fsqrts f1, f2
     let words = [0xec20_102c, 0x4e80_0020];
 
     let emitted = lift_entry(&words).expect("a single square root should lift");
 
     assert!(
-        emitted.contains("(double)__builtin_sqrtf((float)ctx->f[2].f64)"),
+        emitted.contains("ctx->f[1].f64 = (double)(float)__builtin_sqrt(ctx->f[2].f64);"),
         "the result was not rounded to single precision: {emitted}"
     );
+    assert!(
+        !emitted.contains("__builtin_sqrtf"),
+        "the operand was rounded to single before the root: {emitted}"
+    );
     assert_eq!(compiles("sqrt-single", &emitted), Ok(()));
+}
+
+/// The two ways to round a square root to single disagree on an operand that
+/// single precision cannot hold, so the test above is not checking a spelling
+/// that happens to match. The value is the one the hardware returns.
+#[test]
+// The narrowing is the subject of the test, not an accident in it.
+#[allow(clippy::cast_possible_truncation)]
+fn rounding_the_result_and_rounding_the_operand_differ() {
+    let operand = f64::from_bits(0x3ff0_522e_931f_790e);
+    let hardware = 0x3ff0_28e3_0000_0000_u64;
+
+    let rounded_result = f64::from(operand.sqrt() as f32).to_bits();
+    let rounded_operand = f64::from(operand as f32).to_bits();
+
+    assert_eq!(
+        rounded_result, hardware,
+        "rounding the result did not give what the console gives"
+    );
+    assert_ne!(
+        rounded_operand, hardware,
+        "the operand rounded case agrees with the console, so this test proves nothing"
+    );
 }
 
 /// The double form keeps the double square root.
