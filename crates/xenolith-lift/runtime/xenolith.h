@@ -150,10 +150,14 @@ static inline void xenolith_store64(uint8_t *base, uint32_t address, uint64_t va
  * a C cast leaves it to the host. Both are stated here so that every host gives
  * the console's answer rather than its own.
  *
- * `nearbyint` and not `llrint`, because `llrint` honours the rounding mode and
- * the rounding mode is not modelled: the header says so at the floating point
- * status register. `nearbyint` rounds to nearest with ties to even whatever the
- * mode says, which is the mode this starts in and the one the console rounds in.
+ * The rounding mode is not modelled: the header says so at the floating point
+ * status register. Both `nearbyint` and `llrint` honour the mode, so this holds
+ * only because nothing here changes it and the host starts at round to nearest
+ * with ties to even. A program that called `fesetround` would move these.
+ *
+ * Rounding happens before the range is tested, because a value just inside the
+ * range can round to just outside it: 2147483647.5 is in range and rounds up to
+ * 2147483648, which a cast cannot represent.
  */
 static inline int64_t xenolith_to_a_whole_number(double given) {
     /* The console's answer for a value that is not a number is its most negative
@@ -162,37 +166,39 @@ static inline int64_t xenolith_to_a_whole_number(double given) {
         return INT64_MIN;
     }
     /* And for a value too large to be one, it is the largest. The comparison is
-     * against the power rather than the largest whole number, because a double
-     * cannot hold 2^63 exactly and saying `> (double)INT64_MAX` would let a value
-     * through that rounds up past the end. */
-    if (given >= 9223372036854775808.0) {
+     * against 2^63 rather than the largest whole number, because a double cannot
+     * hold INT64_MAX: `(double)INT64_MAX` is 2^63, so testing `>` against it
+     * would let exactly 2^63 through and the cast would be undefined. */
+    double rounded = nearbyint(given);
+    if (rounded >= 9223372036854775808.0) {
         return INT64_MAX;
     }
-    if (given < -9223372036854775808.0) {
+    if (rounded < -9223372036854775808.0) {
         return INT64_MIN;
     }
-    return (int64_t)nearbyint(given);
+    return (int64_t)rounded;
 }
 
 /* The same for the form that gives a 32-bit whole number.
  *
- * The result is sign extended into the 64-bit register, which is what a cast
- * through a 32-bit type does and what the register holds afterwards on a console
- * that sign extends it. The value out of range is the 32-bit one the console
- * gives, not the 64-bit one: a 32-bit conversion that overflows has nowhere to
- * put a 64-bit answer.
+ * The result is sign extended into the 64-bit register. The instruction does not
+ * define what the upper word holds; sign extension is this implementation's
+ * choice, taken so that the overflow path and the ordinary path agree. The value
+ * out of range is the 32-bit one the console gives, not the 64-bit one: a 32-bit
+ * conversion that overflows has nowhere to put a 64-bit answer.
  */
 static inline int64_t xenolith_to_a_whole_word(double given) {
     if (isnan(given)) {
         return (int64_t)(int32_t)INT32_MIN;
     }
-    if (given >= 2147483648.0) {
+    double rounded = nearbyint(given);
+    if (rounded >= 2147483648.0) {
         return (int64_t)INT32_MAX;
     }
-    if (given < -2147483648.0) {
+    if (rounded < -2147483648.0) {
         return (int64_t)(int32_t)INT32_MIN;
     }
-    return (int64_t)(int32_t)nearbyint(given);
+    return (int64_t)(int32_t)rounded;
 }
 
 /* The form that cuts the fraction off rather than rounding.

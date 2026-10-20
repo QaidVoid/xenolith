@@ -16,6 +16,21 @@ something only it can see.
 | semantics | PowerPC executed under emulation | an instruction computing the wrong value |
 | whole functions | functions out of a shipped title, executed under emulation | control flow this project would never have written |
 
+## What a run with no data says
+
+The last three oracles need something a machine may not have: a title, a cross
+toolchain, an emulator. A check that could not run has established nothing, so
+it is not reported as passed. Each of those tests is marked ignored, and a
+default run counts it as ignored in the summary anyone reads.
+
+Including them without their input fails, and names the variable that would have
+run it. An ignored test is its own guard; there is no second test that checks
+whether the first was skipped.
+
+A host C compiler is different, and is required. Most of this suite checks the
+emitted C by compiling it, and a suite that skipped those would be comparing
+strings. A machine without a compiler fails rather than passing quietly.
+
 ## What each one found
 
 **GNU objdump found eight rendering bugs.** Naming an instruction correctly says

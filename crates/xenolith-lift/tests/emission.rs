@@ -530,7 +530,6 @@ struct Conversion {
     given: &'static str,
     rounded: i64,
     cut: i64,
-    about_the_range: bool,
 }
 
 /// The values the conversion cases are checked against.
@@ -545,55 +544,53 @@ const CONVERSIONS: &[Conversion] = &[
         given: "2.5",
         rounded: 2,
         cut: 2,
-        about_the_range: false,
     },
     Conversion {
         given: "3.5",
         rounded: 4,
         cut: 3,
-        about_the_range: false,
     },
     Conversion {
         given: "-2.5",
         rounded: -2,
         cut: -2,
-        about_the_range: false,
     },
     Conversion {
         given: "-3.5",
         rounded: -4,
         cut: -3,
-        about_the_range: false,
     },
     Conversion {
         given: "2.6",
         rounded: 3,
         cut: 2,
-        about_the_range: false,
     },
     Conversion {
         given: "-1.7",
         rounded: -2,
         cut: -1,
-        about_the_range: false,
+    },
+    // In range before rounding and out of it after, which is the one case that
+    // tells rounding before the range test from rounding after it.
+    Conversion {
+        given: "2147483647.5",
+        rounded: 2_147_483_648,
+        cut: 2_147_483_647,
     },
     Conversion {
         given: "1e300",
         rounded: i64::MAX,
         cut: i64::MAX,
-        about_the_range: true,
     },
     Conversion {
         given: "-1e300",
         rounded: i64::MIN,
         cut: i64::MIN,
-        about_the_range: true,
     },
     Conversion {
         given: "(0.0 / 0.0)",
         rounded: i64::MIN,
         cut: i64::MIN,
-        about_the_range: true,
     },
 ];
 
@@ -660,11 +657,7 @@ fn the_conversions_to_a_whole_number_round_or_cut_as_they_are_told_to() {
         let wanted: Vec<i64> = CONVERSIONS
             .iter()
             .map(|case| {
-                let answer = if case.about_the_range || rounding {
-                    case.rounded
-                } else {
-                    case.cut
-                };
+                let answer = if rounding { case.rounded } else { case.cut };
                 if narrow {
                     answer.clamp(i64::from(i32::MIN), i64::from(i32::MAX))
                 } else {
@@ -699,11 +692,12 @@ fn the_conversions_to_a_whole_number_round_or_cut_as_they_are_told_to() {
 
 /// The halfword store a second title uses.
 ///
-/// The address picks which of the eight halfwords goes out, and the store has
-/// to reach guest memory rather than a register, so the check is that the C
-/// names the halfword store at the right lane.
+/// The address picks which of the eight halfwords goes out, so the store is run
+/// at every halfword boundary of the register and what lands in memory is read
+/// back. A store that always took the first halfword, or one that took a word
+/// instead, would pass a check on the emitted text alone.
 #[test]
-fn a_halfword_store_lifts() {
+fn a_halfword_store_writes_the_halfword_the_address_names() {
     // stvehx v1, r3, r4
     let instruction = Instruction::decode(0x7c23_214e);
     assert_eq!(
@@ -714,18 +708,57 @@ fn a_halfword_store_lifts() {
 
     let code = xenolith_lift::code_for(instruction, 0).expect("the halfword store should lift");
 
-    assert!(
-        code.contains("xenolith_store16(base, ea, xenolith_vector_u16("),
-        "the halfword store was not emitted as a halfword store: {code}"
+    let program = format!(
+        "#include \"xenolith.h\"\n\
+         #include <stdio.h>\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a, uint32_t f) \
+         {{ (void)c; (void)b; (void)a; (void)f; }}\n\
+         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) \
+         {{ (void)c; (void)b; (void)a; }}\n\
+         \n\
+         void body(xenolith_context *ctx, uint8_t *base) {{\n\
+         \x20   uint32_t address;\n\
+         \x20   (void)address;\n\
+         {code}}}\n\
+         int main(void) {{\n\
+         \x20 static uint8_t memory[64];\n\
+         \x20 for (unsigned at = 0; at < 16u; at++) {{\n\
+         \x20   xenolith_context ctx = {{0}};\n\
+         \x20   for (unsigned lane = 0; lane < 8u; lane++) {{\n\
+         \x20     xenolith_vector_set_u16(&ctx.v[1], lane, (uint16_t)(lane + 1u));\n\
+         \x20   }}\n\
+         \x20   for (unsigned byte = 0; byte < 64u; byte++) memory[byte] = 0;\n\
+         \x20   ctx.r[3] = 0u;\n\
+         \x20   ctx.r[4] = at * 2u;\n\
+         \x20   body(&ctx, memory);\n\
+         \x20   unsigned lane = at & 7u;\n\
+         \x20   printf(\"%u %u %u\\n\", at,\n\
+         \x20          (unsigned)((memory[at * 2u] << 8) | memory[at * 2u + 1u]),\n\
+         \x20          lane + 1u);\n\
+         \x20 }}\n\
+         \x20 return 0;\n\
+         }}\n"
     );
-    assert!(
-        code.contains("& ~1u"),
-        "the address was not brought to a halfword boundary: {code}"
-    );
-    let wrapped = format!(
-        "void body(xenolith_context *ctx, uint8_t *base) {{\n    uint32_t address;\n    (void)address;\n{code}}}\n"
-    );
-    assert_eq!(compiles("halfword-store", &wrapped), Ok(()));
+
+    let Some(said) = run_program("halfword-store", &program) else {
+        return;
+    };
+    assert!(!said.trim().is_empty(), "the store wrote nothing");
+
+    for line in said.lines() {
+        let fields: Vec<u32> = line
+            .split_whitespace()
+            .map(|field| field.parse().expect("a number"))
+            .collect();
+        assert_eq!(
+            fields[1],
+            fields[2],
+            "at address {} the store wrote {} rather than the halfword {} the address names",
+            fields[0] * 2,
+            fields[1],
+            fields[2]
+        );
+    }
 }
 
 /// A floating point operation with a record bit writes the floating status

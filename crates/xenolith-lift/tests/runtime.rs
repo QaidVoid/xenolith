@@ -48,6 +48,7 @@ fn compiles(name: &str, program: &str) -> Result<(), String> {
         .arg("-o")
         .arg(directory.join("program"))
         .arg(&source)
+        .arg("-lm")
         .output()
         .map_err(|error| format!("running the compiler: {error}"))?;
 
