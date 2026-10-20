@@ -1,11 +1,15 @@
-//! Checking the packed vertex formats against results the hardware gives.
+//! Checking the packed vertex formats against recorded results.
 //!
 //! The console's own vector extension is not in any instruction set an emulator
 //! here implements, so the harness that runs an instruction on emulated
 //! hardware cannot reach this one. What stands in for it is a set of recorded
-//! starting and finishing registers, which say what the hardware does without
-//! saying how, so the C emitted for the instruction is written from the
-//! description and then checked against them rather than assumed.
+//! starting and finishing registers, so the C emitted for the instruction is
+//! written from the description and then checked against them rather than
+//! assumed.
+//!
+//! The packing cases come from the hardware. The unpacking cases come from the
+//! reference implementation in the corpus instead, which is a weaker oracle, and
+//! each group says which it is where it is defined.
 //!
 //! The formats absent from this file are absent from the model too. Packing
 //! three tens and a two is not here because what its recorded results mean has
@@ -202,6 +206,20 @@ fn halfword_cases() -> Vec<Case> {
             from: [0x403f_8001, 0x403f_fff8, 0x4040_007f, 0x4040_0000],
             into: [u, u, 0x8001_fff8, 0x007f_0000],
         },
+        // Moved forward, which is the only place a two word format and a shift
+        // meet. The second word falls off the front at the last of them.
+        Case {
+            what: "four halfwords moved one word forward",
+            word: packing(4, 2, 1),
+            from: [0x403f_8001, 0x403f_fff8, 0x4040_007f, 0x4040_0000],
+            into: [u, 0x8001_fff8, 0x007f_0000, u],
+        },
+        Case {
+            what: "four halfwords moved three words forward",
+            word: packing(4, 2, 3),
+            from: [0x403f_8001, 0x403f_fff8, 0x4040_007f, 0x4040_0000],
+            into: [0x007f_0000, u, u, u],
+        },
     ]
 }
 
@@ -332,7 +350,12 @@ fn unpack_packed_cases() -> Vec<Case> {
         8,
         &[
             (
-                "three tens and a two of the most negative ten",
+                "three tens and a two of the lowest ten bit field",
+                [0, 0, 0, 0x0000_0200],
+                [0x403f_fe00, 0x4040_0000, 0x4040_0000, 0x3f80_0000],
+            ),
+            (
+                "three tens and a two of all ones, which is a ten of minus one",
                 [0, 0, 0, 0x7fff_ffff],
                 [0x403f_ffff, 0x403f_ffff, 0x403f_ffff, 0x3f80_0001],
             ),
@@ -623,7 +646,7 @@ fn on_the_model(cases: &[Case]) -> Result<Vec<Vec<u32>>, String> {
 
 /// Every recorded case, compared lane by lane against the model.
 #[test]
-fn the_model_packs_what_the_hardware_packs() {
+fn the_model_packs_and_unpacks_what_was_recorded() {
     let cases = cases();
     let got = match on_the_model(&cases) {
         Ok(got) => got,

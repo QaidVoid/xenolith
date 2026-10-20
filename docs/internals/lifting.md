@@ -132,8 +132,9 @@ precision value is converted and rounds.
 
 Five formats are modelled for packing: the colour, a pair of signed halfwords, a
 pair of half precision values, and the two quartets of the same. Unpacking covers
-those and three more: three signed tens and an unsigned two, two half precision
-values, and four of them.
+five: the colour, a pair of signed halfwords, three signed tens and an unsigned
+two, a pair of half precision values, and a quartet of them. The quartet of
+signed halfwords unpacks nowhere, because no title here reaches it.
 
 The console's half precision format has no infinity and no value that is not a
 number. Its largest exponent is simply the largest exponent, and a value too

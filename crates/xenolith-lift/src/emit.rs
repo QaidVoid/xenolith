@@ -820,10 +820,14 @@ fn vector_vertex_unpack(instruction: Instruction) -> Option<String> {
                     out,
                     "    uint32_t packed = xenolith_vector_u32(&ctx->v[{b}], 3);"
                 );
+                // Sign extension is written as a subtraction rather than as a
+                // pair of shifts. Shifting a negative int left is undefined in C,
+                // and the fields that need extending are exactly the negative
+                // ones.
                 for (lane, at) in [0u32, 10, 20].into_iter().enumerate() {
                     let _ = writeln!(
                         out,
-                        "    xenolith_vector_set_u32(&t, {lane}, (uint32_t)(0x40400000 + (((int32_t)(packed >> {at}) & 0x3ff) << 22 >> 22)));"
+                        "    xenolith_vector_set_u32(&t, {lane}, (uint32_t)(0x40400000 + (((int32_t)((packed >> {at}) & 0x3ff) ^ 0x200) - 0x200)));"
                     );
                 }
                 let _ = writeln!(

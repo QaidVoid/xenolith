@@ -366,10 +366,10 @@ static inline uint32_t xenolith_pack_short(uint32_t bits) {
  *
  * This one is a conversion rather than a reading of bits, so it rounds, and it
  * rounds to nearest with ties going to even the way every other narrowing in
- * this instruction set does. A value too large to hold becomes an infinity, one
- * too small becomes a zero of the sign it had, and one that is not a number
- * stays one rather than becoming an infinity, which is why the mantissa keeps a
- * bit set on that path.
+ * this instruction set does. The format has no infinity and no value that is
+ * not a number, so a value too large to hold takes the largest exponent and one
+ * that is not a number keeps a mantissa bit set; neither means what the names
+ * would mean in an ordinary half, and widening either gives a finite float.
  */
 static inline uint32_t xenolith_pack_half(uint32_t bits) {
     uint32_t sign = (bits >> 16) & 0x8000u;
