@@ -11,7 +11,7 @@ the entry point, and every address a call instruction names. Each function
 discovered adds its own call targets, until nothing new appears.
 
 That finds everything reachable from the entry point by a direct call, which is
-most of a program and not all of it. The rest is found four other ways.
+most of a program and not all of it. The rest is found by the passes below.
 
 **Prologue scanning.** A function that is only ever reached indirectly still
 begins the way every other function does, saving the link register and moving
@@ -33,6 +33,20 @@ and calls through it, so the addresses appear in the data and nowhere in the
 code. A run of addresses in a row, each four byte aligned and each landing on
 something that decodes, is not a thing data does by accident. Four in a row is
 enough; one is not.
+
+**What surrounds a hole.** A leaf that keeps its frame in the red zone writes
+no prologue, and one reached only through a pointer is called from nowhere, so
+neither discovery nor the prologue scan sees it. What is left is the gap it
+leaves between two functions that were found. A run in such a gap is claimed
+when it accounts for itself: nothing falls into its start, nothing leaves it
+but a return or a call that does not come back, and no branch inside it points
+past its end. This is the weakest evidence of the passes here, so it runs only
+once nothing else has anything left to add.
+
+**Handovers.** A stub writes the address it was given into the count register
+and branches through it. The pair of words is the shape, with only loads in
+front of them, which is what tells such a stub from a switch that reaches its
+branch the same way.
 
 **Recovered jump table targets.** Covered below.
 

@@ -89,6 +89,10 @@ fn report_discovery(program: &Program, words: u64) {
         "  named by a table {:>10}",
         program.count_from(Origin::Tabled)
     );
+    println!(
+        "  by surroundings  {:>10}",
+        program.count_from(Origin::Surrounded)
+    );
     println!("blocks             {blocks:>10}");
     println!("edges              {edges:>10}");
     println!("tail calls         {tail_calls:>10}");

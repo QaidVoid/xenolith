@@ -76,6 +76,11 @@ pub(crate) mod encode {
         (16 << 26) | (bo << 21) | (bi << 16) | (displacement & 0xfffc)
     }
 
+    /// Loads a word from a displacement off a base register.
+    pub(crate) const fn lwz(rt: u32, ra: u32, displacement: u32) -> u32 {
+        (32 << 26) | (rt << 21) | (ra << 16) | (displacement & 0xffff)
+    }
+
     /// Returns to the caller.
     pub(crate) const fn blr() -> u32 {
         0x4e80_0020

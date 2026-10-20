@@ -33,6 +33,14 @@ pub enum Origin {
     Root,
     /// Something calls it directly.
     Called,
+    /// Nothing reaches it directly and it has no shape of its own, and it was
+    /// found because the run of words it sits in accounts for itself.
+    ///
+    /// Counted apart from the one above for the same reason that one is counted
+    /// apart from a call: the evidence is different. That one recognized what a
+    /// function does at its start. This one recognized a hole that nothing can
+    /// be entered into and nothing leaves.
+    Surrounded,
     /// Nothing reaches it directly, and it was found by recognizing the shape
     /// of a function prologue.
     ///
@@ -65,6 +73,7 @@ impl Origin {
             Self::Scanned => "scanned",
             Self::Recorded => "recorded",
             Self::Tabled => "tabled",
+            Self::Surrounded => "surrounded",
         }
     }
 }
@@ -780,6 +789,317 @@ fn names_code(image: &Image, word: u32) -> bool {
             .is_ok_and(|first| !Instruction::decode(first).is_unknown())
 }
 
+/// The register a branch through one reads its address out of.
+const COUNT_REGISTER: u32 = 9;
+
+/// How far back the setting up in front of a hand over is followed.
+const HANDOVER_WINDOW: u32 = 8;
+
+/// Returns the addresses of stubs that hand over through a pointer.
+///
+/// A stub writes the address it was given into the count register and branches
+/// through it, so the branch is indirect and nothing about its target is known
+/// here. What makes it a function is the pair of words: a move into the count
+/// register followed immediately by a branch through it, with only loads in
+/// front of them.
+///
+/// The loads are what tell one of these from the other thing that ends the same
+/// way. A switch reaches its branch through the same two words, but it works
+/// the address out with arithmetic on an index, which decodes as an indexed
+/// load rather than one of these. Allowing anything else here would put a
+/// function in the middle of every switch in the image.
+fn scan_for_handovers(
+    image: &Image,
+    helpers: &Helpers,
+    walked: &BTreeMap<u32, Vec<Block>>,
+) -> Vec<u32> {
+    let claimed = claimed_instructions(walked);
+    let mut found = Vec::new();
+
+    for section in image.executable_sections() {
+        let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+        let mut at = section.start;
+
+        while at < end {
+            let Some(next) = at.checked_add(INSTRUCTION_SIZE) else {
+                break;
+            };
+
+            let hands_over = image.u32(at).is_ok_and(|word| {
+                let one = Instruction::decode(word);
+                one.opcode() == Opcode::Mtspr && one.spr() == COUNT_REGISTER
+            }) && image.u32(next).is_ok_and(|word| {
+                let one = Instruction::decode(word);
+                !one.is_unknown() && one.flow(next).kind == FlowKind::Indirect
+            });
+
+            if !hands_over {
+                at = next;
+                continue;
+            }
+
+            let mut begin = at;
+            for _ in 0..HANDOVER_WINDOW {
+                let Some(before) = begin.checked_sub(INSTRUCTION_SIZE) else {
+                    break;
+                };
+                if before < section.start {
+                    break;
+                }
+                let Ok(word) = image.u32(before) else {
+                    break;
+                };
+                let one = Instruction::decode(word);
+                if !matches!(one.opcode(), Opcode::Lwz | Opcode::Ld) {
+                    break;
+                }
+                begin = before;
+            }
+
+            if begin < at
+                && !claimed.contains(&begin)
+                && helpers.containing(begin).is_none()
+                && nothing_falls_into(image, begin)
+            {
+                found.push(begin);
+            }
+
+            at = next;
+        }
+    }
+
+    found
+}
+
+/// The most instructions a function found by its surroundings may be.
+///
+/// What makes one of these safe to claim is not its length but that it accounts
+/// for itself: nothing falls into its start, nothing leaves it but a return or a
+/// call that does not come back, and no branch inside it points past its end.
+/// The bound is here so that a run which never satisfies that stops being
+/// followed rather than running to the end of the section, and it is set well
+/// past the length of anything a compiler emits without a prologue.
+const LEAF_LIMIT: u32 = 256;
+
+/// Returns whether the word before an address ends whatever came before it.
+///
+/// A function found by its surroundings has to be shown not to be the tail of
+/// the one in front of it. Nothing falls into it where what precedes it is
+/// padding, a return, or a branch that does not come back.
+fn nothing_falls_into(image: &Image, address: u32) -> bool {
+    let Some(before) = address.checked_sub(INSTRUCTION_SIZE) else {
+        return false;
+    };
+    let Ok(word) = image.u32(before) else {
+        return false;
+    };
+    if word == 0 {
+        return true;
+    }
+
+    let instruction = Instruction::decode(word);
+    if instruction.is_unknown() {
+        return false;
+    }
+
+    let flow = instruction.flow(before);
+    // A conditional transfer falls through, so the word after it is reached and
+    // nothing begins there. A branch through a register does not come back, and
+    // one function beginning at the word after another one's is how a run of
+    // these stubs is laid out, with nothing between them to say where one ends.
+    !flow.falls_through
+        && matches!(
+            flow.kind,
+            FlowKind::Return | FlowKind::Branch | FlowKind::Indirect
+        )
+}
+
+/// Returns how far a function starting here runs, or nothing where the words do
+/// not read as one whole function.
+///
+/// The test is that the run accounts for itself. Every word decodes, nothing
+/// calls out or branches away, and the last thing it does is return with no
+/// branch still pointing past it. A run satisfying all of that is a function
+/// whichever way it is read: there is no way into the middle of it from
+/// outside, and no way out of it but the return at the end.
+///
+/// The run grows to cover what its own branches point at, which is what a walk
+/// over blocks does. Stopping at the first return instead would cut a function
+/// in half wherever a comparison branches forward over one arm.
+///
+/// This is what finds the ones no shape gives away. A leaf that keeps its frame
+/// in the red zone writes no prologue, and one reached only through a pointer is
+/// called from nowhere, so neither discovery nor the prologue scan sees it. What
+/// is left is the hole it leaves between two functions that were found.
+fn reads_as_a_leaf(
+    image: &Image,
+    begin: u32,
+    known: &BTreeSet<u32>,
+    any: &BTreeSet<u32>,
+) -> Option<u32> {
+    if !nothing_falls_into(image, begin) {
+        return None;
+    }
+
+    let mut at = begin;
+    let mut furthest = begin;
+    let mut does_something = false;
+
+    for _ in 0..LEAF_LIMIT {
+        // A function known to be one, rather than believed to be, is where this
+        // run stops being a candidate: walking through it would swallow it.
+        if at != begin && known.contains(&at) {
+            return None;
+        }
+
+        let word = image.u32(at).ok()?;
+        let instruction = Instruction::decode(word);
+        if instruction.is_unknown() {
+            return None;
+        }
+
+        let flow = instruction.flow(at);
+        let after = at.checked_add(INSTRUCTION_SIZE)?;
+
+        match flow.kind {
+            // Nothing may leave. A call and a branch through a register are
+            // both reasons to say no: either would make this the middle of
+            // something rather than the whole of it.
+            FlowKind::Call | FlowKind::Indirect => return None,
+            FlowKind::Branch => {
+                does_something = true;
+                let target = flow.target?;
+
+                // A branch to a function known to be one is a call that does
+                // not come back, which is a way for a function to end as much
+                // as a return is. Anything else has to stay inside.
+                //
+                // Whether this is an ending is asked of every function start
+                // found so far, not only the certain ones: where a branch goes
+                // is the question, and a start believed to be one is still
+                // somewhere a branch can hand over to. Stopping the walk is the
+                // other question, and that one is only asked of the certain
+                // ones, because walking through a believed start is how the
+                // function under it gets found.
+                if any.contains(&target) && (target < begin || target >= after) {
+                    // Only an unconditional transfer ends the run here. One
+                    // that falls through leaves the word after it reachable,
+                    // so the tail belongs to this function rather than to a
+                    // function of its own.
+                    if !flow.falls_through && after > furthest {
+                        return Some(after);
+                    }
+                } else {
+                    if target < begin {
+                        return None;
+                    }
+                    // An unconditional branch leaves the words after it
+                    // unreachable, so a run that continues past one is not a
+                    // run at all.
+                    if !flow.falls_through {
+                        return (after > furthest).then_some(after);
+                    }
+                    furthest = furthest.max(target);
+                }
+            }
+            FlowKind::Continue => {
+                if let Some(target) = flow.target {
+                    if target < begin {
+                        return None;
+                    }
+                    furthest = furthest.max(target);
+                }
+                does_something = true;
+            }
+            FlowKind::Return => {
+                // A return with nothing still pointing past it is the end. A
+                // conditional return falls through, so the word after it is
+                // still reachable.
+                if !flow.falls_through && after > furthest {
+                    return does_something.then_some(after);
+                }
+            }
+        }
+
+        at = after;
+        furthest = furthest.max(at);
+    }
+
+    None
+}
+
+/// Returns the addresses of functions that only the gaps around them give away.
+///
+/// Runs of words nothing claimed sit between the functions that were found.
+/// Most are padding or data. One that reads as a whole function, entered
+/// nowhere but at its start and left nowhere but at its return, is one.
+fn scan_for_leaves(
+    image: &Image,
+    helpers: &Helpers,
+    walked: &BTreeMap<u32, Vec<Block>>,
+    known: &BTreeSet<u32>,
+    any: &BTreeSet<u32>,
+) -> Vec<u32> {
+    let claimed = claimed_instructions(walked);
+    let mut found = Vec::new();
+
+    for section in image.executable_sections() {
+        let mut address = section.start;
+
+        while u64::from(address) < section.end() {
+            let next = address.saturating_add(INSTRUCTION_SIZE);
+            if next <= address {
+                break;
+            }
+
+            // One branch with padding on both sides of it.
+            //
+            // A compiler puts these where a call has to reach further than a
+            // call can, and lays them out one to a slot with the slack between
+            // them left empty. Nothing about the branch says which function it
+            // belongs to, so a walk that ran past a return can pick it up and
+            // claim it, and that claim is the reason it would otherwise be
+            // missed. Padding on both sides is what says the claim is wrong:
+            // nothing reaches this from the word in front of it.
+            let alone = image.u32(address.wrapping_sub(INSTRUCTION_SIZE)).ok() == Some(0)
+                && image.u32(next).ok() == Some(0)
+                && image.u32(address).is_ok_and(|word| {
+                    let one = Instruction::decode(word);
+                    one.opcode() == Opcode::B
+                        && !one.link_bit()
+                        && one
+                            .flow(address)
+                            .target
+                            .is_some_and(|to| is_executable(image, to))
+                });
+
+            if alone && !walked.contains_key(&address) {
+                found.push(address);
+                address = next;
+                continue;
+            }
+
+            if claimed.contains(&address)
+                || helpers.containing(address).is_some()
+                || image.u32(address).ok() == Some(0)
+            {
+                address = next;
+                continue;
+            }
+
+            if let Some(end) = reads_as_a_leaf(image, address, known, any) {
+                found.push(address);
+                address = end.max(next);
+                continue;
+            }
+
+            address = next;
+        }
+    }
+
+    found
+}
+
 /// Returns whether an address is in an executable section.
 fn is_executable(image: &Image, address: u32) -> bool {
     image
@@ -851,9 +1171,9 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
             }
         }
 
-        for address in scan_for_trampolines(image, &walked) {
+        for address in scan_for_handovers(image, &helpers, &walked) {
             if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
-                slot.insert(Origin::Scanned);
+                slot.insert(Origin::Surrounded);
                 added = true;
             }
         }
@@ -868,6 +1188,13 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         for address in scan_for_tables(image, &walked) {
             if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
                 slot.insert(Origin::Tabled);
+                added = true;
+            }
+        }
+
+        for address in scan_for_trampolines(image, &walked) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+                slot.insert(Origin::Scanned);
                 added = true;
             }
         }
@@ -887,6 +1214,35 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
                 let known = entries.entry(function.start).or_default();
                 for target in targets {
                     added |= known.insert(target);
+                }
+            }
+        }
+
+        // What a hole in the code gives away is looked for only once nothing
+        // else has anything left to add.
+        //
+        // It is the weakest evidence here: a call proves a function, a prologue
+        // shows one, and this only says that a run of words could not be
+        // anything else. Running it first would let it claim addresses that
+        // discovery was about to reach and prove.
+        if !added {
+            let known: BTreeSet<u32> = origins
+                .iter()
+                .filter(|(_, origin)| {
+                    matches!(
+                        origin,
+                        Origin::Called | Origin::Root | Origin::EntryPoint | Origin::Recorded
+                    )
+                })
+                .map(|(address, _)| *address)
+                .collect();
+
+            let any: BTreeSet<u32> = origins.keys().copied().collect();
+
+            for address in scan_for_leaves(image, &helpers, &walked, &known, &any) {
+                if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+                    slot.insert(Origin::Surrounded);
+                    added = true;
                 }
             }
         }
@@ -1772,6 +2128,87 @@ mod tests {
             program.function_at(0x8200_0004).unwrap().origin,
             Origin::Scanned
         );
+    }
+
+    /// A leaf with nothing of its own to recognize it by is found by the hole
+    /// it sits in.
+    ///
+    /// This is the shape a real title's comparison functions have: no prologue
+    /// because they never touch the stack, and no caller because they are
+    /// handed to something as a pointer. Nothing about the words themselves
+    /// says function. What says it is that the run is entered nowhere and left
+    /// nowhere but its return.
+    #[test]
+    fn a_leaf_nothing_calls_is_found_by_what_surrounds_it() {
+        let words = vec![
+            encode::blr(),
+            0,
+            encode::addi(3, 4, 1),
+            encode::addi(3, 3, 1),
+            encode::blr(),
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Surrounded), 1);
+        assert_eq!(
+            program.function_at(0x8200_0008).map(|one| one.origin),
+            Some(Origin::Surrounded)
+        );
+    }
+
+    /// A stub that writes the count register and branches through it hands over
+    /// to an address nothing here knows, so the pair of words is what says it is
+    /// a function.
+    #[test]
+    fn a_handover_through_the_count_register_is_a_function() {
+        let words = vec![
+            encode::blr(),
+            0,
+            encode::lwz(3, 4, 8),
+            encode::mtctr(3),
+            encode::bctr(),
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0008).map(|one| one.origin),
+            Some(Origin::Surrounded)
+        );
+    }
+
+    /// A run that something falls into is the tail of what came before it
+    /// rather than a function, and claiming it would cut a function in two.
+    #[test]
+    fn a_run_something_falls_into_is_not_a_function_of_its_own() {
+        // A function that ends, then a run of words the word before it falls
+        // through into. The run is the tail of something rather than a start.
+        let words = vec![
+            encode::addi(3, 4, 1),
+            encode::addi(3, 3, 1),
+            encode::addi(3, 2, 1),
+            encode::addi(3, 1, 1),
+            encode::blr(),
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Surrounded), 0);
+    }
+
+    /// Nothing but a return is slack a compiler left, and a function is put at
+    /// each of them by a rule that does not ask for one thing to be done.
+    #[test]
+    fn a_stray_return_is_not_a_function() {
+        // Nothing but a return, in a gap that nothing falls into. It accounts
+        // for itself but does nothing, and a function is put here only by a
+        // rule that does not ask for one thing to be done.
+        let words = vec![encode::blr(), 0, encode::blr(), 0, encode::blr()];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Surrounded), 0);
     }
 
     #[test]
