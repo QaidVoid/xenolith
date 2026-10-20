@@ -198,8 +198,8 @@ fn is_indexed_access(mnemonic: &str) -> bool {
             | "stswx"
             | "lwarx"
             | "ldarx"
-            | "stwcx."
-            | "stdcx."
+            | "stwcx"
+            | "stdcx"
             | "lhbrx"
             | "lwbrx"
             | "ldbrx"
@@ -881,6 +881,18 @@ mod tests {
         assert_eq!(render(0xfc00_0018, 0), "frsp f0, f0");
         assert_eq!(render(0xfc00_001c, 0), "fctiw f0, f0");
         assert_eq!(render(0xfc00_001e, 0), "fctiwz f0, f0");
+    }
+
+    /// The two reservation stores carry a record bit, and the dot it adds is
+    /// the one in their names, so the name must not already end in it.
+    #[test]
+    fn renders_the_reservation_stores_with_one_dot() {
+        assert_eq!(render(0x7d60_512d, 0), "stwcx. r11, 0, r10");
+        assert_eq!(render(0x7d40_41ad, 0), "stdcx. r10, 0, r8");
+        // The immediate forms spend the dot on a different opcode instead, so
+        // it is part of the name rather than something a bit adds.
+        assert_eq!(render(0x7000_0001, 0), "andi. r0, r0, 1");
+        assert_eq!(render(0x7000_0000, 0), "andi. r0, r0, 0");
     }
 
     /// The vector comparison spends its record bit where its extended opcode

@@ -455,14 +455,14 @@ instructions! {
             144 => Mtcrf = "mtcrf";
             146 => Mtmsr = "mtmsr";
             149 => Stdx = "stdx";
-            150 => Stwcx = "stwcx.";
+            150 => Stwcx = "stwcx";
             151 => Stwx = "stwx";
             167 => Stvehx = "stvehx";
             178 => Mtmsrd = "mtmsrd";
             199 => Stvewx = "stvewx";
             181 => Stdux = "stdux";
             183 => Stwux = "stwux";
-            214 => Stdcx = "stdcx.";
+            214 => Stdcx = "stdcx";
             215 => Stbx = "stbx";
             231 => Stvx = "stvx";
             246 => Dcbtst = "dcbtst";
