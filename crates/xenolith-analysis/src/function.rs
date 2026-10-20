@@ -647,8 +647,15 @@ const TABLE_RUN: usize = 4;
 /// makes them safe to claim is not what they look like but that something wrote
 /// down where they are: a run of addresses in a row, all landing on code, is not
 /// a thing data does by accident.
+///
+/// Nothing distinguishes a table from the code around it by the page it sits
+/// on: this console's images mark the whole executable range read only rather
+/// than as code, so a table and the instructions it names share a section. What
+/// separates them is that the run has to name addresses, and an instruction
+/// names one only when its immediate happens to be one.
 fn scan_for_tables(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32> {
     let starts: BTreeSet<u32> = walked.keys().copied().collect();
+    let claimed = claimed_instructions(walked);
     let mut found = Vec::new();
 
     for section in image.sections() {
@@ -662,7 +669,7 @@ fn scan_for_tables(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32
             match target {
                 Some(target) => run.push(target),
                 None => {
-                    claim_run(&mut found, &mut run, &starts, TABLE_RUN);
+                    claim_run(&mut found, &mut run, &starts, &claimed, TABLE_RUN);
                 }
             }
 
@@ -672,16 +679,41 @@ fn scan_for_tables(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32
             at = next;
         }
 
-        claim_run(&mut found, &mut run, &starts, TABLE_RUN);
+        claim_run(&mut found, &mut run, &starts, &claimed, TABLE_RUN);
     }
 
     found
 }
 
+/// Returns every instruction address inside a block that was already walked.
+fn claimed_instructions(walked: &BTreeMap<u32, Vec<Block>>) -> BTreeSet<u32> {
+    let mut claimed = BTreeSet::new();
+    for blocks in walked.values() {
+        for block in blocks {
+            let mut address = block.start;
+            while address < block.end {
+                claimed.insert(address);
+                address = address.saturating_add(INSTRUCTION_SIZE);
+            }
+        }
+    }
+    claimed
+}
+
 /// Moves a finished run into the found list when it is long enough.
-fn claim_run(found: &mut Vec<u32>, run: &mut Vec<u32>, starts: &BTreeSet<u32>, least: usize) {
+fn claim_run(
+    found: &mut Vec<u32>,
+    run: &mut Vec<u32>,
+    starts: &BTreeSet<u32>,
+    claimed: &BTreeSet<u32>,
+    least: usize,
+) {
     if run.len() >= least {
-        found.extend(run.iter().copied().filter(|one| !starts.contains(one)));
+        found.extend(
+            run.iter()
+                .copied()
+                .filter(|one| !starts.contains(one) && !claimed.contains(one)),
+        );
     }
     run.clear();
 }
@@ -727,13 +759,13 @@ fn scan_for_recorded(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u
                 run.push(begin);
                 at = at.saturating_add(INSTRUCTION_SIZE * 2);
             } else {
-                claim_run(&mut found, &mut run, &starts, RECORD_RUN);
+                claim_run(&mut found, &mut run, &starts, &BTreeSet::new(), RECORD_RUN);
                 last = 0;
                 at = at.saturating_add(INSTRUCTION_SIZE);
             }
         }
 
-        claim_run(&mut found, &mut run, &starts, RECORD_RUN);
+        claim_run(&mut found, &mut run, &starts, &BTreeSet::new(), RECORD_RUN);
     }
 
     found
@@ -1083,6 +1115,21 @@ mod tests {
             program.function_at(0x8200_0008).map(|one| one.origin),
             Some(Origin::Tabled)
         );
+    }
+
+    /// A run of addresses that lands inside a function already walked names
+    /// places inside it, not functions of their own.
+    #[test]
+    fn a_table_pointing_into_a_function_claims_nothing_new() {
+        // Eight instructions, so the entry point covers 0x82000000 to 0x8200001c,
+        // then a run of addresses pointing into that body.
+        let mut words = vec![encode::addi(3, 4, 1); 8];
+        words.extend([0x8200_0004, 0x8200_0008, 0x8200_000c, 0x8200_0010]);
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Tabled), 0);
+        assert_eq!(program.function_count(), 1);
     }
 
     /// One address that happens to fall inside the code is not a table, and
