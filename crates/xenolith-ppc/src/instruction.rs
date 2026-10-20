@@ -231,6 +231,25 @@ impl Instruction {
         sign_extend_16(field)
     }
 
+    /// Returns the system call level.
+    ///
+    /// The only field of [`Form::SC`] besides the opcode. Level zero is the
+    /// ordinary system call and level one asks the hypervisor for a service.
+    /// The remaining levels are reserved, but the field is still an operand:
+    /// printing the call without it describes a different request.
+    ///
+    /// ```
+    /// use xenolith_ppc::Instruction;
+    ///
+    /// // sc 16
+    /// assert_eq!(Instruction::decode(0x4400_0202).level(), 16);
+    /// assert_eq!(Instruction::decode(0x4400_0002).level(), 0);
+    /// ```
+    #[must_use]
+    pub const fn level(self) -> u32 {
+        (self.word >> 5) & 0x7f
+    }
+
     /// Returns whether the record bit is set.
     ///
     /// A set record bit means the instruction updates a condition register

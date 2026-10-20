@@ -632,7 +632,10 @@ impl fmt::Display for Rendered {
                 )?;
                 branch_operands(f, instruction, self.address)
             }
-            Form::SC => Ok(()),
+            Form::SC => match instruction.level() {
+                0 => Ok(()),
+                level => write!(f, " {level}"),
+            },
             // The status register instructions name a bit, a field, or a
             // field and an immediate, and none of those is a general purpose
             // register.
@@ -833,6 +836,17 @@ mod tests {
         assert_eq!(render(0xfc00_f10c, 0), "mtfsfi 0, 15");
         assert_eq!(render(0xff00_f10c, 0), "mtfsfi 6, 15");
         assert_eq!(render(0xfc00_010d, 0), "mtfsfi. 0, 0");
+    }
+
+    /// The system call names a level, and the ordinary one names nothing.
+    #[test]
+    fn renders_the_system_call_level() {
+        assert_eq!(render(0x4400_0002, 0), "sc");
+        assert_eq!(render(0x4400_0202, 0), "sc 16");
+        assert_eq!(render(0x4400_0402, 0), "sc 32");
+        assert_eq!(render(0x4400_0102, 0), "sc 8");
+        // The top bit of the field is an operand too, so the width is pinned.
+        assert_eq!(render(0x4400_0f02, 0), "sc 120");
     }
 
     /// These take no operand at all, so the fields they leave empty are not

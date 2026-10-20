@@ -59,9 +59,10 @@ that field on something else. A condition register move names two fields, a
 mask, or nothing at all; a status register move names a bit, a field, or a
 field and an immediate. Each of those has an arm of its own rather than falling
 through to the catch-all for its form, which would print either three registers
-or two branch numbers. The accessors those arms read are `condition_mask`,
-`branch_condition`, `branch_condition_bit` and `spr`, each of which documents
-the field it extracts and why the position is worth an accessor.
+or two branch numbers. A system call names a level the same way. The accessors
+those arms read are `condition_mask`, `branch_condition`, `branch_condition_bit`,
+`spr` and `level`, each of which documents the field it extracts and why the
+position is worth an accessor.
 
 ## How this is checked
 
