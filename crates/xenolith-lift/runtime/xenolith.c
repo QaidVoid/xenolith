@@ -20,6 +20,7 @@
 
 #include "xenolith.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -206,6 +207,17 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 
 /* What looking something up reports where there is nothing to look in. */
 #define XENOLITH_STATUS_NOT_FOUND 0xC0000225u
+
+/* What a wait reports when the length of time it was given ran out. */
+#define XENOLITH_STATUS_TIMEOUT 0x00000102u
+
+/* How many turns a waiter that gave up can be remembered for.
+ *
+ * A waiter takes a number on the way in and goes when its number comes up. One
+ * that gives up before then is not there to take it, so the numbers it leaves
+ * behind have to be written down or the queue waits for ever on one nobody will
+ * claim. */
+#define XENOLITH_TURNS_LEFT 16
 
 /* Guest memory is handed out a grain at a time, so a size becomes a whole
  * number of grains, and a size of nothing still takes one.
@@ -462,6 +474,31 @@ struct object {
     int manual;
     long count;
     long limit;
+    /* How many are waiting, and how many of them a set has already let through.
+     * Keeping the second apart from the signalled state is what makes two sets
+     * release two waiters rather than one. */
+    long blocked;
+    long releases;
+    /* Which of them a set lets through.
+     *
+     * The kernel takes the one that has waited longest, and where two threads
+     * wait on one object for different things, taking another leaves the one
+     * that could have carried on asleep and the one that cannot holding the
+     * answer. So a waiter takes a number on the way in and goes when its number
+     * comes up. */
+    unsigned long long taking;
+    unsigned long long serving;
+    unsigned long long gone[XENOLITH_TURNS_LEFT];
+    uint8_t gone_taken[XENOLITH_TURNS_LEFT];
+    /* Who holds this and how many times over.
+     *
+     * One of these is not a mark that anyone may take: it belongs to whoever
+     * took it, and that thread may take it again without waiting, as many times
+     * as it likes, and lets it go once for each. A thread asking for one it
+     * already holds and being made to wait is a thread waiting for itself, and
+     * everything else waiting for it waits for ever. */
+    pthread_t holder;
+    long held;
     pthread_t thread;
     int running;
     int suspended;
@@ -502,24 +539,194 @@ static struct object *object_of(uint32_t handle) {
     return found->kind == OBJECT_NONE ? NULL : found;
 }
 
-/* Waits until an object is signalled, taking it if taking is what waiting on
- * that kind means. */
-static uint32_t wait_on(struct object *waited) {
-    pthread_mutex_lock(&waited->lock);
-    while (!waited->signalled) {
-        pthread_cond_wait(&waited->changed, &waited->lock);
+/* Puts a turn back that its waiter will not be taking.
+ *
+ * A waiter that gives up before its turn comes round is not there to take it,
+ * and the turn after it is never reached while the queue is still waiting for
+ * one nobody will claim. Where the turn given up is the one being served it is
+ * simply passed over; where it is further along it is written down, and passed
+ * over when the queue reaches it.
+ *
+ * Where there is nowhere left to write one down the queue is moved on instead.
+ * That lets somebody through out of turn, which is worse than the order a
+ * console keeps and far better than a queue that stops. */
+static void give_up_the_turn(struct object *left, unsigned long long turn) {
+    if (left->serving == turn) {
+        left->serving++;
+        return;
     }
-    if (!waited->manual) {
-        waited->signalled = 0;
+    for (unsigned at = 0; at < XENOLITH_TURNS_LEFT; at++) {
+        if (!left->gone_taken[at]) {
+            left->gone_taken[at] = 1;
+            left->gone[at] = turn;
+            return;
+        }
     }
-    pthread_mutex_unlock(&waited->lock);
-    return XENOLITH_STATUS_SUCCESS;
+    left->serving++;
 }
 
-/* Sets an object signalled and wakes whoever was waiting. */
+/* Moves the queue past any turns whose waiters have gone. */
+static void step_over_the_ones_that_left(struct object *waited) {
+    for (;;) {
+        unsigned found = XENOLITH_TURNS_LEFT;
+        for (unsigned at = 0; at < XENOLITH_TURNS_LEFT; at++) {
+            if (waited->gone_taken[at] && waited->gone[at] == waited->serving) {
+                found = at;
+                break;
+            }
+        }
+        if (found == XENOLITH_TURNS_LEFT) {
+            return;
+        }
+        waited->gone_taken[found] = 0;
+        waited->serving++;
+    }
+}
+
+/* Waits until an object is signalled, taking it if taking is what waiting on
+ * that kind means.
+ *
+ * `until` is the point on the host's clock to give up at, or nothing to wait for
+ * as long as it takes. A wait that gives up looks once more before it does: a
+ * set that lands at the moment a waiter gives up counted that waiter when it
+ * decided to let one more through, and walking away leaves it spent on nobody
+ * and waiting for whoever asks next.
+ */
+static uint32_t wait_until(struct object *waited, const struct timespec *until) {
+    uint32_t status = XENOLITH_STATUS_SUCCESS;
+
+    pthread_mutex_lock(&waited->lock);
+
+    /* One a thread already holds is taken again on the spot, without joining the
+     * queue: it never waited, so there is no turn of its own to take and none of
+     * anybody else's to move past. */
+    if (waited->kind == OBJECT_MUTANT && waited->held > 0 &&
+        pthread_equal(waited->holder, pthread_self())) {
+        waited->held++;
+        pthread_mutex_unlock(&waited->lock);
+        return XENOLITH_STATUS_SUCCESS;
+    }
+
+    waited->blocked++;
+    unsigned long long mine = waited->taking++;
+    for (;;) {
+        step_over_the_ones_that_left(waited);
+        /* A semaphore is got through by spending one of its count, however many
+         * were let go and whenever. A mark of having been let go is one bit, so
+         * two let go with nobody waiting would admit one, and the thread after
+         * that would wait for ever on a count of one. */
+        if (waited->kind == OBJECT_SEMAPHORE) {
+            if (waited->count > 0 && waited->serving == mine) {
+                waited->count--;
+                waited->serving++;
+                break;
+            }
+        } else if (waited->releases > 0 && waited->serving == mine) {
+            waited->releases--;
+            waited->serving++;
+            break;
+        } else if (waited->releases == 0 && waited->signalled && waited->serving == mine) {
+            if (!waited->manual) {
+                waited->signalled = 0;
+            }
+            waited->serving++;
+            break;
+        }
+        if (until == NULL) {
+            pthread_cond_wait(&waited->changed, &waited->lock);
+        } else if (pthread_cond_timedwait(&waited->changed, &waited->lock, until) ==
+                   ETIMEDOUT) {
+            int nothing = waited->kind == OBJECT_SEMAPHORE
+                              ? waited->count == 0
+                              : waited->releases == 0 && !waited->signalled;
+            if (nothing) {
+                status = XENOLITH_STATUS_TIMEOUT;
+                give_up_the_turn(waited, mine);
+                break;
+            }
+        }
+    }
+    waited->blocked--;
+    /* And getting through one of the other sort is taking it, which is what says
+     * who may let it go and who may take it again without waiting. */
+    if (status == XENOLITH_STATUS_SUCCESS && waited->kind == OBJECT_MUTANT) {
+        waited->holder = pthread_self();
+        waited->held = 1;
+    }
+    pthread_mutex_unlock(&waited->lock);
+    return status;
+}
+
+/* Waits for as long as it takes. */
+static uint32_t wait_on(struct object *waited) {
+    return wait_until(waited, NULL);
+}
+
+/* How many seconds the console's clock counts from before a host's does. The
+ * first of January 1601 to the first of January 1970, which is a definition. */
+#define XENOLITH_TO_THE_CONSOLE_EPOCH 11644473600LL
+
+/* How long a title asked to wait for, as the moment to give up at.
+ *
+ * A count is in hundreds of nanoseconds, negative for a stretch from now.
+ * Nothing is asking to wait for as long as it takes, and so is a count on the
+ * clock a console kept, which is a moment this runtime has no reading of.
+ */
+static int give_up_at(uint8_t *base, uint32_t asked_at, struct timespec *until) {
+    if (asked_at == 0) {
+        return 0;
+    }
+
+    int64_t asked = (int64_t)xenolith_load64(base, asked_at);
+
+    clock_gettime(CLOCK_REALTIME, until);
+
+    int64_t hundreds;
+    if (asked < 0) {
+        /* A stretch from now. */
+        hundreds = -asked;
+    } else {
+        /* A moment on the console's clock, which counts hundreds of nanoseconds
+         * from the start of 1601 where a host's counts seconds from 1970. How
+         * far apart those two are is a definition rather than a property of any
+         * hardware, so how far off the moment is can be worked out. */
+        int64_t since = ((int64_t)until->tv_sec + XENOLITH_TO_THE_CONSOLE_EPOCH) * 10000000
+                        + (int64_t)until->tv_nsec / 100;
+        hundreds = asked > since ? asked - since : 0;
+    }
+
+    until->tv_sec += (time_t)(hundreds / 10000000);
+    until->tv_nsec += (long)((hundreds % 10000000) * 100);
+    if (until->tv_nsec >= 1000000000L) {
+        until->tv_sec += 1;
+        until->tv_nsec -= 1000000000L;
+    }
+    return 1;
+}
+
+/* Sets an object signalled and wakes whoever was waiting.
+ *
+ * One set lets one waiter through, so what is counted is how many of them a set
+ * has let through and not yet spent. Keeping that apart from the signalled state
+ * is what makes two sets release two waiters rather than one: a state is a bit,
+ * and the second set would land on a bit that is already set.
+ *
+ * `manual` is the sort that stays set until it is cleared, which lets every
+ * waiter through and none of them spend it.
+ */
 static void signal_object(struct object *woken, int state) {
     pthread_mutex_lock(&woken->lock);
-    woken->signalled = state;
+    if (woken->kind == OBJECT_SEMAPHORE) {
+        /* Its count is what admits, and was raised by whoever let it go. */
+    } else if (state && !woken->manual) {
+        /* One set lets one waiter through, whether or not one is waiting yet.
+         * Counted rather than remembered as a bit, because a bit is one and
+         * two sets would be one set: the second lands on a mark that is already
+         * there and the thread after it waits for ever. */
+        woken->releases++;
+    } else {
+        woken->signalled = state;
+    }
     pthread_cond_broadcast(&woken->changed);
     pthread_mutex_unlock(&woken->lock);
 }
@@ -1242,6 +1449,31 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
+    case 226: {
+        /* Letting everyone waiting on an object through at once and leaving it
+         * unsignalled behind them. Anyone who arrives afterwards waits, which
+         * is what tells this apart from simply signalling it. */
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        uint32_t before_at = (uint32_t)ctx->r[4];
+        if (found != NULL) {
+            if (before_at != 0) {
+                pthread_mutex_lock(&found->lock);
+                xenolith_store32(base, before_at, found->signalled ? 1u : 0u);
+                pthread_mutex_unlock(&found->lock);
+            }
+            /* Everyone waiting now, rather than one of them. Setting it and
+             * clearing it again lets a single waiter through, because a set
+             * that finds threads waiting releases one, and the clear takes the
+             * mark back before anybody else looks. */
+            pthread_mutex_lock(&found->lock);
+            found->releases = found->blocked;
+            found->signalled = 0;
+            pthread_cond_broadcast(&found->changed);
+            pthread_mutex_unlock(&found->lock);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
     case 209:
         create_waitable(ctx, base, OBJECT_EVENT);
         return 1;
@@ -1289,12 +1521,24 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         if (released != NULL) {
             signal_object(released, 1);
         }
-        ctx->r[3] = waited == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(waited);
+        if (waited == NULL) {
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        struct timespec until;
+        int limited = give_up_at(base, (uint32_t)ctx->r[5], &until);
+        ctx->r[3] = wait_until(waited, limited ? &until : NULL);
         return 1;
     }
     case 253: {
         struct object *found = object_of((uint32_t)ctx->r[3]);
-        ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(found);
+        if (found == NULL) {
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        struct timespec until;
+        int limited = give_up_at(base, (uint32_t)ctx->r[5], &until);
+        ctx->r[3] = wait_until(found, limited ? &until : NULL);
         return 1;
     }
     case 207:

@@ -536,3 +536,252 @@ int main(void) {
         panic!("an unroundable size was answered rather than refused:\n{complaint}");
     }
 }
+
+/// A wait given a length of time comes back when that length has passed.
+///
+/// A title hands over a count of hundreds of nanoseconds, negative for a stretch
+/// from now. A wait that ignores it waits for ever, and the thread that would
+/// have carried on never does, which looks like a title that has stopped rather
+/// than one waiting for something that never comes.
+#[test]
+fn a_wait_with_a_timeout_returns_at_the_timeout() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    /* An event nothing will ever set, and a wait of ten milliseconds. The kind
+     * is nought for the sort that stays set until it is cleared and anything
+     * else for the sort that lets a single waiter through, so this is the
+     * second sort: one set is spent by one wait. */
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;      /* where the handle is written */
+    ctx.r[4] = 0;          /* the handle's own process */
+    ctx.r[5] = 1;          /* not the sort that stays set */
+    ctx.r[6] = 0;          /* signalled to begin with */
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    uint32_t handle = xenolith_load32(base, 0x200);
+    if (handle == 0) {
+        return 3;
+    }
+
+    /* Ten milliseconds, counted in hundreds of nanoseconds, from now. */
+    int64_t stretch = -100000;
+    xenolith_store64(base, 0x300, (uint64_t)stretch);
+    ctx.r[3] = handle;
+    ctx.r[5] = 0x300;
+
+    struct timespec began, ended;
+    clock_gettime(CLOCK_MONOTONIC, &began);
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    clock_gettime(CLOCK_MONOTONIC, &ended);
+
+    if (ctx.r[3] != 0x00000102u) {
+        fprintf(stderr, "the wait came back with %#llx rather than a timeout\n",
+                (unsigned long long)ctx.r[3]);
+        return 4;
+    }
+    long long took = (long long)(ended.tv_sec - began.tv_sec) * 1000000000ll
+                     + (long long)(ended.tv_nsec - began.tv_nsec);
+    /* Ten milliseconds, with room either way for a host that was busy. */
+    if (took < 5000000ll || took > 2000000000ll) {
+        fprintf(stderr, "the wait took %lld nanoseconds\n", took);
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("timeout", program) {
+        panic!("a wait with a timeout did not come back at the timeout:\n{complaint}");
+    }
+}
+
+/// Two sets release two waiters rather than one.
+///
+/// A set is a bit, and a second set landing on a bit that is already set would
+/// let nobody else through. So the sets are counted rather than remembered, and
+/// a thread that waits after both has nothing to spend.
+#[test]
+fn two_sets_release_two_waiters() {
+    let program = r#"
+/* Asked for anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Waits on a handle for `hundreds` hundreds of nanoseconds and reports what
+ * came back. */
+static uint32_t wait_for(xenolith_context *ctx, uint8_t *base, uint32_t handle,
+                         int64_t hundreds) {
+    xenolith_store64(base, 0x300, (uint64_t)hundreds);
+    ctx->r[3] = handle;
+    ctx->r[5] = 0x300;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    return (uint32_t)ctx->r[3];
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;          /* not the sort that stays set */
+    ctx.r[6] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    uint32_t handle = xenolith_load32(base, 0x200);
+    if (handle == 0) {
+        return 3;
+    }
+
+    /* Two sets with nobody waiting. */
+    for (int at = 0; at < 2; at++) {
+        ctx.r[3] = handle;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 246, "NtSetEvent");
+    }
+
+    /* Both of them are spent by a wait that comes back at once. */
+    if (wait_for(&ctx, base, handle, -100000) != 0u) {
+        fprintf(stderr, "the first wait after two sets did not come back\n");
+        return 4;
+    }
+    if (wait_for(&ctx, base, handle, -100000) != 0u) {
+        fprintf(stderr, "the second wait after two sets did not come back\n");
+        return 5;
+    }
+    /* And a third has nothing left to spend. */
+    if (wait_for(&ctx, base, handle, -100000) != 0x00000102u) {
+        fprintf(stderr, "a third wait was let through by two sets\n");
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("two_sets", program) {
+        panic!("two sets did not release two waiters:\n{complaint}");
+    }
+}
+
+/// A pulse releases every waiter it names, and leaves nothing behind.
+///
+/// A title pulses to let go of everything waiting now without setting the
+/// object: anyone arriving afterwards waits, which is what tells a pulse apart
+/// from a set. Signalling and then clearing lets a single waiter through,
+/// because a set that finds threads waiting releases one and the clear takes
+/// the mark back before anybody else looks.
+#[test]
+fn a_pulse_releases_every_waiter_and_leaves_nothing_behind() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static uint32_t wait_for(xenolith_context *ctx, uint8_t *base, uint32_t handle,
+                         int64_t hundreds) {
+    xenolith_store64(base, 0x300, (uint64_t)hundreds);
+    ctx->r[3] = handle;
+    ctx->r[5] = 0x300;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    return (uint32_t)ctx->r[3];
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;          /* not the sort that stays set */
+    ctx.r[6] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    uint32_t handle = xenolith_load32(base, 0x200);
+    if (handle == 0) {
+        return 3;
+    }
+
+    /* A pulse with nobody waiting leaves the object as it was, and what it was
+     * is unsignalled, so a wait after it still times out. */
+    ctx.r[3] = handle;
+    ctx.r[4] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 226, "NtPulseEvent");
+    if (wait_for(&ctx, base, handle, -100000) != 0x00000102u) {
+        fprintf(stderr, "a pulse left something behind for a later waiter\n");
+        return 4;
+    }
+
+    /* A set with nobody waiting is spent by one wait and no more. */
+    ctx.r[3] = handle;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 246, "NtSetEvent");
+    if (wait_for(&ctx, base, handle, -100000) != 0u) {
+        fprintf(stderr, "a set was not spent by a wait\n");
+        return 5;
+    }
+    if (wait_for(&ctx, base, handle, -100000) != 0x00000102u) {
+        fprintf(stderr, "a set was spent by two waits\n");
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("pulse", program) {
+        panic!("a pulse did not behave as a pulse:\n{complaint}");
+    }
+}
