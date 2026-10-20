@@ -1419,6 +1419,11 @@ static void report_the_display(uint8_t *base, uint32_t at) {
  * of a title asking for it, so this list is a record of what was needed rather
  * than a guess at what might be.
  */
+static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
+static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
+static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
+static int serviced_by_the_kernel(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
+
 static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
                     uint32_t ordinal) {
     if (strcmp(library, "xam.xex") == 0) {
@@ -1443,6 +1448,29 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
     if (strcmp(library, "xboxkrnl.exe") != 0) {
         return 0;
     }
+    return serviced_by_the_kernel(ctx, base, ordinal);
+}
+
+/* What a title asks of the kernel itself.
+ *
+ * Kept apart from the rest because it is most of what the runtime answers, and
+ * one function holding every library's answers is a function nobody can read to
+ * find one of them.
+ */
+static int serviced_by_the_kernel(xenolith_context *ctx, uint8_t *base, uint32_t ordinal) {
+    if (serviced_about_what_it_holds(ctx, base, ordinal)) {
+        return 1;
+    }
+    if (serviced_about_memory_and_time(ctx, base, ordinal)) {
+        return 1;
+    }
+    return serviced_about_what_it_sees(ctx, base, ordinal);
+}
+
+/* What a title asks of the kernel about the things it holds.
+ *
+ * Threads, objects, waits and the counters they read. */
+static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, uint32_t ordinal) {
     switch (ordinal) {
     case 102:
         current_process_type(ctx);
@@ -1594,6 +1622,14 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
+    default:
+        return 0;
+    }
+}
+
+/* What a title asks of the kernel about memory, time and the machine. */
+static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, uint32_t ordinal) {
+    switch (ordinal) {
     case 198: {
         /* How much memory there is and how much is left.
          *
@@ -1801,6 +1837,17 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
          * carrying on, so this reports the state a working console is in. */
         ctx->r[3] = 1;
         return 1;
+    default:
+        return 0;
+    }
+}
+
+/* What a title asks of the kernel about what it can see.
+ *
+ * There is no graphics hardware here, so most of these say what they cannot
+ * rather than pretending they did. */
+static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uint32_t ordinal) {
+    switch (ordinal) {
     case 617:
     case 618:
         /* Retraining the memory the graphics hardware draws into. There is

@@ -11,6 +11,7 @@
 
 mod honest;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -856,4 +857,128 @@ int main(void) {
     if let Err(complaint) = runs("full_sections", program) {
         panic!("a full critical section table did not report failure:\n{complaint}");
     }
+}
+
+/// The ordinals the runtime answers are exactly the ones the list names.
+///
+/// The switch that answered them was one function holding all of them. Splitting
+/// it by library and by subject is only safe if the set stays what it was: an
+/// ordinal dropped in the move is an import that stops working, and an ordinal
+/// added without being written down is one nobody reviews. The list is read as
+/// well as the runtime, so the two have to be changed together.
+#[test]
+fn the_ordinals_the_runtime_answers_are_the_ones_written_down() {
+    let runtime = include_str!("../runtime/xenolith.c");
+    let written = include_str!("../runtime/ordinals.txt");
+
+    let mut expected: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
+    let mut library = String::new();
+    for line in written.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            library = line.trim_matches(['[', ']'].as_slice()).to_owned();
+            expected.entry(library.clone()).or_default();
+            continue;
+        }
+        let ordinal: u32 = line
+            .parse()
+            .unwrap_or_else(|error| panic!("{line:?} is not an ordinal: {error}"));
+        expected.entry(library.clone()).or_default().insert(ordinal);
+    }
+    assert_eq!(
+        expected.len(),
+        2,
+        "the list names {} libraries and the runtime answers two",
+        expected.len()
+    );
+
+    let found = ordinals_in(runtime);
+    assert_eq!(
+        found, expected,
+        "the ordinals the runtime answers and the ones written down disagree"
+    );
+}
+
+/// The ordinals each library's answers are written as, read out of the source.
+///
+/// The three kernel functions are found by name and the `xam.xex` answers are
+/// the cases in `serviced` that are not a call to one of them, which is what the
+/// split left in that function.
+fn ordinals_in(runtime: &str) -> BTreeMap<String, BTreeSet<u32>> {
+    let mut found = BTreeMap::new();
+    found.insert("xam.xex".to_owned(), cases_of(runtime, "serviced"));
+    let mut kernel = BTreeSet::new();
+    for name in [
+        "serviced_about_what_it_holds",
+        "serviced_about_memory_and_time",
+        "serviced_about_what_it_sees",
+    ] {
+        kernel.extend(cases_of(runtime, name));
+    }
+    found.insert("xboxkrnl.exe".to_owned(), kernel);
+    found
+}
+
+/// Every `case N:` in the body of the function called `name`.
+///
+/// The body is taken from the definition rather than from the declaration of the
+/// same name, which is why the search skips anything ending in a semicolon.
+fn cases_of(runtime: &str, name: &str) -> BTreeSet<u32> {
+    /* The definition rather than the declaration of the same name, and only the
+     * first one: `serviced` is not `serviced_by_the_kernel`, and looking for more
+     * than one would read every function whose name starts the same way. */
+    /* The name has to be the whole name. `static int serviced(` is a prefix of
+     * `static int serviced_about_what_it_holds(`, so what follows the name has
+     * to be the bracket that opens its own arguments rather than more letters. */
+    let opening = format!("static int {name}");
+    let Some(start) = runtime
+        .match_indices(&opening)
+        .map(|(at, _)| at)
+        .find(|at| {
+            let after = at + opening.len();
+            if !runtime[after..].starts_with('(') {
+                return false;
+            }
+            /* A declaration ends in a semicolon before any brace, so the first
+             * brace after the name has to be the one that opens the body. */
+            match runtime[after..].find(['{', ';']) {
+                Some(at) => runtime[after + at..].starts_with('{'),
+                None => false,
+            }
+        })
+    else {
+        return BTreeSet::new();
+    };
+    let Some(brace) = runtime[start..].find('{') else {
+        return BTreeSet::new();
+    };
+    let body_at = start + brace;
+    let mut depth = 0usize;
+    let mut end = body_at;
+    for (offset, letter) in runtime[body_at..].char_indices() {
+        match letter {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = body_at + offset;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &runtime[body_at..=end];
+    let mut found = BTreeSet::new();
+    for (case, _) in body.match_indices("case ") {
+        let rest = &body[case + "case ".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(number) = digits.parse() {
+            found.insert(number);
+        }
+    }
+    found
 }
