@@ -41,8 +41,20 @@
  */
 #define XENOLITH_GUEST_SPAN ((size_t)1 << 32)
 
+/* A page past the end, so that reading a word that starts in the last few bytes
+ * lands on something.
+ *
+ * Guest addresses are four bytes wide and a read works out where it is reading
+ * before taking the bytes, so a word begun at the very top runs off the end
+ * rather than round to the bottom. Only a title reading through a pointer that
+ * is already nonsense gets there, and it reads nothing either way, but it should
+ * not bring the whole run down when it does.
+ */
+#define XENOLITH_A_LITTLE_PAST_THE_END ((size_t)4096)
+
 uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
-    void *base = mmap(NULL, XENOLITH_GUEST_SPAN, PROT_READ | PROT_WRITE,
+    void *base = mmap(NULL, XENOLITH_GUEST_SPAN + XENOLITH_A_LITTLE_PAST_THE_END,
+                      PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (base == MAP_FAILED) {
         fprintf(stderr, "xenolith: could not map the guest address space\n");
@@ -490,6 +502,97 @@ static void signal_object(struct object *woken, int state) {
     pthread_mutex_unlock(&woken->lock);
 }
 
+/* The block a title reaches through r13, and the count of ticks inside it.
+ *
+ * The console gives every hardware thread a block holding what the kernel keeps
+ * about it, and a title reads it for two things this runtime has to answer: how
+ * many ticks have passed, and which processor this is.
+ *
+ * The count advances a thousand times a second. That the unit is a millisecond
+ * is an assumption: what is checkable is that a title compares it against five
+ * thousand and treats that as long enough to give up on a frame, and five
+ * seconds is a length that fits. It is reported as an assumption rather than
+ * left implied.
+ *
+ * Which processor this is matters for a reason worth writing down. A title's
+ * vector code picks a slot in the block by that number and steps a counter
+ * there. Left at nothing every thread reads processor nought, so they all take
+ * the same slot and the same counter, and two threads stepping it at once carry
+ * it past the end of the block. What that looks like is memory elsewhere in the
+ * image turning into vectors. So each thread is given one of the six in turn. A
+ * console runs many software threads on those six and only one holds a hardware
+ * thread at a time; here they really are concurrent, so handing them out in
+ * turn makes two threads sharing a block rare rather than impossible.
+ */
+#define XENOLITH_PROCESSOR_SHARED 256u
+#define XENOLITH_PROCESSOR_TICKS 88u
+#define XENOLITH_PROCESSOR_NUMBER 268u
+#define XENOLITH_PROCESSORS 6u
+
+/* The block holding the tick count, shared by every processor's block. */
+static uint32_t shared_processor_state;
+static pthread_mutex_t starting_the_count = PTHREAD_MUTEX_INITIALIZER;
+
+/* Keeps the shared tick count up to date.
+ *
+ * What the count says is how long has passed, not how many times this woke.
+ * Counting a tick each time round asks to be woken every millisecond and trusts
+ * that it was. Asking to sleep for one is asking for at least one, and a host
+ * gives back rather more, so a count made that way falls behind whatever it is
+ * meant to be a count of by however much the host overshot. Everything a title
+ * times against it then takes longer than it asked for, and how much longer
+ * depends on what else the machine was doing.
+ */
+static void *count_the_ticks(void *given) {
+    uint8_t *base = given;
+    struct timespec began;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &began) != 0) {
+        return NULL;
+    }
+
+    while (1) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+            uint64_t since = (uint64_t)(now.tv_sec - began.tv_sec) * 1000ull
+                             + (uint64_t)(now.tv_nsec / 1000000)
+                             - (uint64_t)(began.tv_nsec / 1000000);
+            xenolith_store32(base, shared_processor_state + XENOLITH_PROCESSOR_TICKS,
+                             (uint32_t)since);
+        }
+
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    return NULL;
+}
+
+/* Hands out a block for a guest thread, all of them sharing the one count. */
+static uint32_t take_processor_block(uint8_t *base) {
+    pthread_mutex_lock(&starting_the_count);
+    if (shared_processor_state == 0) {
+        assumed("the kernel's tick counts a millisecond",
+                "a title compares two readings of it against five thousand and "
+                "gives up on a frame, and nothing here says what one tick is");
+        shared_processor_state = take_guest_memory(XENOLITH_HEAP_GRAIN, XENOLITH_HEAP_GRAIN);
+
+        pthread_t counting;
+        if (pthread_create(&counting, NULL, count_the_ticks, base) == 0) {
+            pthread_detach(counting);
+        }
+    }
+    pthread_mutex_unlock(&starting_the_count);
+
+    static uint32_t processors_handed_out;
+
+    uint32_t block = take_guest_memory(XENOLITH_HEAP_GRAIN, XENOLITH_HEAP_GRAIN);
+    uint32_t which = __atomic_fetch_add(&processors_handed_out, 1u, __ATOMIC_RELAXED);
+    xenolith_store32(base, block + XENOLITH_PROCESSOR_SHARED, shared_processor_state);
+    xenolith_store8(base, block + XENOLITH_PROCESSOR_NUMBER,
+                    (uint8_t)(which % XENOLITH_PROCESSORS));
+    return block;
+}
+
 /* Where each thread's stack is taken from, below the one the first thread was
  * given so that none of them meet. */
 #define XENOLITH_THREAD_STACK 0x00100000u
@@ -516,6 +619,7 @@ static void *run_guest_thread(void *given) {
     static _Thread_local xenolith_context state;
 
     state.r[1] = take_thread_stack() - 64;
+    state.r[13] = take_processor_block(self->base);
     if (self->startup != 0) {
         state.r[3] = self->entry;
         state.r[4] = self->argument;

@@ -164,3 +164,212 @@ int main(void) {
         status.code().unwrap_or(-1)
     );
 }
+
+/// The runtime, compiled beside a program that drives it.
+///
+/// The header checks say the interface is usable. They say nothing about the
+/// runtime that implements it, which is where the guest address space, the heap
+/// and the processor block live. So this compiles both and runs one against the
+/// other.
+fn runs(name: &str, program: &str) -> Result<(), String> {
+    let compiler = honest::host_compiler();
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
+
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text)
+            .map_err(|error| format!("writing {file}: {error}"))?;
+    }
+
+    let program_path = directory.join("program");
+    let output = Command::new(compiler)
+        .args(["-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .args(["-lm", "-lpthread"])
+        .output()
+        .map_err(|error| format!("running the compiler: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+
+    let ran = Command::new(&program_path)
+        .output()
+        .map_err(|error| format!("running the check: {error}"))?;
+    if ran.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "check {} failed:\n{}",
+            ran.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&ran.stderr)
+        ))
+    }
+}
+
+/// A guest thread reaches the block the kernel keeps for it through r13.
+///
+/// The block holds the tick count and which processor this is. Left at nothing
+/// every thread reads processor nought, and a title's vector code picks a slot
+/// from that number and steps a counter there, so two threads on the same block
+/// step the same counter and carry it past the end of it.
+///
+/// The thread is started the way a title starts one, by importing the kernel's
+/// own create-thread call, and what it found is left where this can read it.
+#[test]
+fn a_thread_reaches_a_processor_block_through_r13() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <time.h>
+
+/* What the guest thread found, written by the thread itself. */
+static uint32_t reached_r13;
+static uint32_t ticks;
+static uint8_t processor;
+static uint32_t done;
+
+void sub_82000000(xenolith_context *ctx, uint8_t *base) {
+    reached_r13 = (uint32_t)ctx->r[13];
+    if (reached_r13 == 0) {
+        done = 1;
+        return;
+    }
+    uint32_t shared = xenolith_load32(base, reached_r13 + 256u);
+    if (shared != 0) {
+        /* The count is kept by another thread that starts with the first block,
+         * so it is waited for rather than read once: what matters is that it
+         * moves, not that it has already moved. */
+        for (int waited = 0; waited < 2000 && ticks == 0; waited++) {
+            struct timespec once = {0, 1000000};
+            nanosleep(&once, NULL);
+            ticks = xenolith_load32(base, shared + 88u);
+        }
+    }
+    processor = base[reached_r13 + 268u + 3u];
+    done = 1;
+}
+
+/* The table an indirect branch resolves against. */
+xenolith_function xenolith_lookup(uint32_t address) {
+    return address == 0x82000000u ? sub_82000000 : 0;
+}
+
+int main(void) {
+    /* The runtime reads and writes guest addresses all over the span, so the
+     * span has to be mapped before it is handed over. */
+    uint8_t *base = mmap(NULL, (size_t)1 << 32, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) {
+        fprintf(stderr, "could not map the guest span\n");
+        return 6;
+    }
+
+    /* A context where the thread body is the one above and nothing else is
+     * named. The handle and the id are written into the guest span, which the
+     * runtime is handed. */
+    xenolith_context ctx = {0};
+    uint32_t handle_at = 64;
+    uint32_t id_at = 128;
+    ctx.r[3] = handle_at;
+    ctx.r[5] = id_at;
+    ctx.r[6] = 0;
+    ctx.r[7] = 0x82000000u;
+    ctx.r[8] = 0;
+    ctx.r[9] = 0;
+
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 13, "NtCreateThreadEx");
+    if (ctx.r[3] != 0u) {
+        return 1;
+    }
+
+    for (int waited = 0; waited < 2000 && done == 0; waited++) {
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    if (done == 0) {
+        fprintf(stderr, "the guest thread never ran\n");
+        return 2;
+    }
+    if (reached_r13 == 0) {
+        fprintf(stderr, "the guest thread read nothing through r13\n");
+        return 3;
+    }
+    if (ticks == 0) {
+        fprintf(stderr, "the shared tick count was never written\n");
+        return 4;
+    }
+    if (processor >= 6) {
+        fprintf(stderr, "the processor number was %u, and the console has six\n",
+                (unsigned)processor);
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("processor_block", program) {
+        panic!("a thread did not reach its processor block:\n{complaint}");
+    }
+}
+
+/// A read that begins in the last bytes of the guest span lands on something.
+///
+/// Guest addresses are four bytes wide and a read works out where it is reading
+/// before taking the bytes, so a word begun at the very top would otherwise run
+/// past the end of the mapping. Only a title reading through a pointer that is
+/// already nonsense gets there, and what it reads is nothing either way, but
+/// bringing the whole run down is not the same as reading nothing.
+#[test]
+fn a_read_at_the_top_of_the_span_does_not_fall_off_the_end() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    /* The last address a four byte read can start at, which runs two bytes past
+     * the span. */
+    uint32_t at = 0xfffffffeu;
+    if (xenolith_load32(base, at) != 0u) {
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("top_of_span", program) {
+        panic!("a read at the top of the span did not land:\n{complaint}");
+    }
+}

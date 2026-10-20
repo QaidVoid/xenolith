@@ -102,19 +102,27 @@ typedef struct xenolith_context {
 typedef void (*xenolith_function)(xenolith_context *ctx, uint8_t *base);
 
 /* Guest memory is reached through these rather than by casting a pointer, so
- * that the byte order is stated once here instead of at every access. */
+ * that the byte order is stated once here instead of at every access.
+ *
+ * Each takes the pointer before adding to it. Adding to the address first would
+ * be adding in the guest's own thirty two bits, so a word begun in the last few
+ * bytes would carry into the first few instead of running past the end, and a
+ * title reading through a pointer that is already nonsense would read the front
+ * of its own memory rather than nothing. */
 
 static inline uint8_t xenolith_load8(const uint8_t *base, uint32_t address) {
-    return base[address];
+    return (base + address)[0];
 }
 
 static inline uint16_t xenolith_load16(const uint8_t *base, uint32_t address) {
-    return (uint16_t)((uint16_t)base[address] << 8 | (uint16_t)base[address + 1]);
+    const uint8_t *at = base + address;
+    return (uint16_t)((uint16_t)at[0] << 8 | (uint16_t)at[1]);
 }
 
 static inline uint32_t xenolith_load32(const uint8_t *base, uint32_t address) {
-    return (uint32_t)base[address] << 24 | (uint32_t)base[address + 1] << 16 |
-           (uint32_t)base[address + 2] << 8 | (uint32_t)base[address + 3];
+    const uint8_t *at = base + address;
+    return (uint32_t)at[0] << 24 | (uint32_t)at[1] << 16 | (uint32_t)at[2] << 8 |
+           (uint32_t)at[3];
 }
 
 static inline uint64_t xenolith_load64(const uint8_t *base, uint32_t address) {
@@ -123,19 +131,21 @@ static inline uint64_t xenolith_load64(const uint8_t *base, uint32_t address) {
 }
 
 static inline void xenolith_store8(uint8_t *base, uint32_t address, uint8_t value) {
-    base[address] = value;
+    (base + address)[0] = value;
 }
 
 static inline void xenolith_store16(uint8_t *base, uint32_t address, uint16_t value) {
-    base[address] = (uint8_t)(value >> 8);
-    base[address + 1] = (uint8_t)value;
+    uint8_t *at = base + address;
+    at[0] = (uint8_t)(value >> 8);
+    at[1] = (uint8_t)value;
 }
 
 static inline void xenolith_store32(uint8_t *base, uint32_t address, uint32_t value) {
-    base[address] = (uint8_t)(value >> 24);
-    base[address + 1] = (uint8_t)(value >> 16);
-    base[address + 2] = (uint8_t)(value >> 8);
-    base[address + 3] = (uint8_t)value;
+    uint8_t *at = base + address;
+    at[0] = (uint8_t)(value >> 24);
+    at[1] = (uint8_t)(value >> 16);
+    at[2] = (uint8_t)(value >> 8);
+    at[3] = (uint8_t)value;
 }
 
 static inline void xenolith_store64(uint8_t *base, uint32_t address, uint64_t value) {
