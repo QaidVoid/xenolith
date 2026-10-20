@@ -82,7 +82,7 @@ impl Instruction {
             return None;
         }
         let width = form.extended_opcode_bits();
-        Some((self.word >> 1) & ((1 << width) - 1))
+        Some((self.word >> form.extended_opcode_shift()) & ((1 << width) - 1))
     }
 
     /// Returns the target register field.
@@ -595,6 +595,25 @@ mod tests {
         );
         assert_eq!(Instruction::decode(0x7c62_1838).extended_opcode(), Some(28));
         assert_eq!(Instruction::decode(0x3862_0001).extended_opcode(), None);
+    }
+
+    /// The field starts where its form puts it, which is not always bit one.
+    #[test]
+    fn reads_the_extended_opcode_where_its_form_puts_it() {
+        // A vector comparison keeps the field at the bottom of the word.
+        assert_eq!(
+            Instruction::decode(0x1000_04c6).extended_opcode(),
+            Some(198)
+        );
+        // The extended form puts the record bit below it.
+        assert_eq!(
+            Instruction::decode(0x7c62_1a14).extended_opcode(),
+            Some(266)
+        );
+        // The doubleword forms keep two bits below the field.
+        assert_eq!(Instruction::decode(0x7c62_1838).extended_opcode(), Some(28));
+        // A form with no extended opcode has none to read.
+        assert_eq!(Instruction::decode(0x4400_0202).extended_opcode(), None);
     }
 }
 
