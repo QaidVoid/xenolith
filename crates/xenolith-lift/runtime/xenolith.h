@@ -13,6 +13,7 @@
 #ifndef XENOLITH_H
 #define XENOLITH_H
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -140,6 +141,91 @@ static inline void xenolith_store32(uint8_t *base, uint32_t address, uint32_t va
 static inline void xenolith_store64(uint8_t *base, uint32_t address, uint64_t value) {
     xenolith_store32(base, address, (uint32_t)(value >> 32));
     xenolith_store32(base, address + 4, (uint32_t)value);
+}
+
+/* Converting a single precision value to a whole number, with saturation.
+ *
+ * The instruction set clamps rather than wrapping, and a C cast does neither:
+ * a value that is not a number gives the console's one answer for that too, and
+ * a C cast leaves it to the host. Both are stated here so that every host gives
+ * the console's answer rather than its own.
+ *
+ * `nearbyint` and not `llrint`, because `llrint` honours the rounding mode and
+ * the rounding mode is not modelled: the header says so at the floating point
+ * status register. `nearbyint` rounds to nearest with ties to even whatever the
+ * mode says, which is the mode this starts in and the one the console rounds in.
+ */
+static inline int64_t xenolith_to_a_whole_number(double given) {
+    /* The console's answer for a value that is not a number is its most negative
+     * whole number, which is what a machine holding an invalid operation gives. */
+    if (isnan(given)) {
+        return INT64_MIN;
+    }
+    /* And for a value too large to be one, it is the largest. The comparison is
+     * against the power rather than the largest whole number, because a double
+     * cannot hold 2^63 exactly and saying `> (double)INT64_MAX` would let a value
+     * through that rounds up past the end. */
+    if (given >= 9223372036854775808.0) {
+        return INT64_MAX;
+    }
+    if (given < -9223372036854775808.0) {
+        return INT64_MIN;
+    }
+    return (int64_t)nearbyint(given);
+}
+
+/* The same for the form that gives a 32-bit whole number.
+ *
+ * The result is sign extended into the 64-bit register, which is what a cast
+ * through a 32-bit type does and what the register holds afterwards on a console
+ * that sign extends it. The value out of range is the 32-bit one the console
+ * gives, not the 64-bit one: a 32-bit conversion that overflows has nowhere to
+ * put a 64-bit answer.
+ */
+static inline int64_t xenolith_to_a_whole_word(double given) {
+    if (isnan(given)) {
+        return (int64_t)(int32_t)INT32_MIN;
+    }
+    if (given >= 2147483648.0) {
+        return (int64_t)INT32_MAX;
+    }
+    if (given < -2147483648.0) {
+        return (int64_t)(int32_t)INT32_MIN;
+    }
+    return (int64_t)(int32_t)nearbyint(given);
+}
+
+/* The form that cuts the fraction off rather than rounding.
+ *
+ * A cast does exactly this, so the cast is the whole of it. What a cast does not
+ * do is answer for a value outside the range, and that is the same as above: a
+ * value that is not a number, and a value too large, each have the console's one
+ * answer and this states it rather than leaving it to the host.
+ */
+static inline int64_t xenolith_to_a_whole_number_by_cutting(double given) {
+    if (isnan(given)) {
+        return INT64_MIN;
+    }
+    if (given >= 9223372036854775808.0) {
+        return INT64_MAX;
+    }
+    if (given < -9223372036854775808.0) {
+        return INT64_MIN;
+    }
+    return (int64_t)given;
+}
+
+static inline int64_t xenolith_to_a_whole_word_by_cutting(double given) {
+    if (isnan(given)) {
+        return (int64_t)(int32_t)INT32_MIN;
+    }
+    if (given >= 2147483648.0) {
+        return (int64_t)INT32_MAX;
+    }
+    if (given < -2147483648.0) {
+        return (int64_t)(int32_t)INT32_MIN;
+    }
+    return (int64_t)(int32_t)given;
 }
 
 /* Reaching one lane of a vector register.

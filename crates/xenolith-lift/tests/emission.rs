@@ -71,7 +71,7 @@ fn run_program(name: &str, program: &str) -> Option<String> {
 
     let binary = directory.join("program");
     let built = Command::new("clang")
-        .args(["-std=c17", "-Wall", "-Wextra", "-Werror", "-O2"])
+        .args(["-std=c17", "-Wall", "-Wextra", "-Werror", "-O2", "-lm"])
         .arg("-o")
         .arg(&binary)
         .arg(&source)
@@ -522,6 +522,178 @@ fn a_single_form_rounds_its_result_not_its_operands() {
         "rounding the result did not give what the console gives"
     );
     assert_eq!(compiles("single-multiply", &emitted), Ok(()));
+}
+
+/// One value in the conversion cases, and what the console gives for it.
+struct Conversion {
+    given: &'static str,
+    rounded: i64,
+    cut: i64,
+    about_the_range: bool,
+}
+
+/// The values the conversion cases are checked against.
+///
+/// The first six are what tell rounding from cutting: a half going to the even
+/// one beside it, a half going to the odd one, and a value with a small
+/// fraction, each in both directions. The last three are what the range does,
+/// where a C cast is undefined behaviour and this host happens to agree with the
+/// console on one end and not the other.
+const CONVERSIONS: &[Conversion] = &[
+    Conversion {
+        given: "2.5",
+        rounded: 2,
+        cut: 2,
+        about_the_range: false,
+    },
+    Conversion {
+        given: "3.5",
+        rounded: 4,
+        cut: 3,
+        about_the_range: false,
+    },
+    Conversion {
+        given: "-2.5",
+        rounded: -2,
+        cut: -2,
+        about_the_range: false,
+    },
+    Conversion {
+        given: "-3.5",
+        rounded: -4,
+        cut: -3,
+        about_the_range: false,
+    },
+    Conversion {
+        given: "2.6",
+        rounded: 3,
+        cut: 2,
+        about_the_range: false,
+    },
+    Conversion {
+        given: "-1.7",
+        rounded: -2,
+        cut: -1,
+        about_the_range: false,
+    },
+    Conversion {
+        given: "1e300",
+        rounded: i64::MAX,
+        cut: i64::MAX,
+        about_the_range: true,
+    },
+    Conversion {
+        given: "-1e300",
+        rounded: i64::MIN,
+        cut: i64::MIN,
+        about_the_range: true,
+    },
+    Conversion {
+        given: "(0.0 / 0.0)",
+        rounded: i64::MIN,
+        cut: i64::MIN,
+        about_the_range: true,
+    },
+];
+
+/// Writes the program that runs one conversion over every case and prints what
+/// each left behind.
+fn conversion_program(emitted: &str) -> String {
+    let values: Vec<&str> = CONVERSIONS.iter().map(|case| case.given).collect();
+    format!(
+        "#include \"xenolith.h\"\n\
+         #include <stdio.h>\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a, uint32_t f) \
+         {{ (void)c; (void)b; (void)a; (void)f; }}\n\
+         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) \
+         {{ (void)c; (void)b; (void)a; }}\n\
+         \n\
+         {emitted}\n\
+         int main(void) {{\n\
+         \x20 static uint8_t memory[256];\n\
+         \x20 static const double values[] = {{ {} }};\n\
+         \x20 for (unsigned at = 0; at < {}u; at++) {{\n\
+         \x20   xenolith_context ctx = {{0}};\n\
+         \x20   ctx.f[2].f64 = values[at];\n\
+         \x20   sub_{:08x}(&ctx, memory);\n\
+         \x20   printf(\"%lld\\n\", (long long)ctx.f[1].s64);\n\
+         \x20 }}\n\
+         \x20 return 0;\n\
+         }}\n",
+        values.join(", "),
+        CONVERSIONS.len(),
+        BASE
+    )
+}
+
+/// Turning a float into a whole number is four different instructions, and the
+/// two that round were being emitted as the two that cut.
+///
+/// A C cast cuts the fraction off, so `fctid` and `fctiw` were cutting too. A
+/// title converting a measurement got a whole number half a unit out on every
+/// value with a fraction of a half or more, and an error of that shape is the
+/// kind a title's own arithmetic would make, so nothing about it looks like a
+/// fault.
+///
+/// The answers come from the console's rules written out beside this test, so it
+/// compares the emitted code against the rule rather than restating whatever the
+/// code does.
+#[test]
+fn the_conversions_to_a_whole_number_round_or_cut_as_they_are_told_to() {
+    /// The three fields of one of these: the destination register, the source,
+    /// and which conversion. The four differ only in the last.
+    const fn conversion(destination: u32, source: u32, code: u32) -> u32 {
+        (63 << 26) | (destination << 21) | (source << 11) | (code << 1)
+    }
+
+    for (name, code) in [
+        ("fctid", 814),
+        ("fctidz", 815),
+        ("fctiw", 14),
+        ("fctiwz", 15),
+    ] {
+        let word = conversion(1, 2, code);
+        let rounding = !name.ends_with('z');
+        let narrow = name.starts_with("fctiw");
+
+        let wanted: Vec<i64> = CONVERSIONS
+            .iter()
+            .map(|case| {
+                let answer = if case.about_the_range || rounding {
+                    case.rounded
+                } else {
+                    case.cut
+                };
+                if narrow {
+                    answer.clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+                } else {
+                    answer
+                }
+            })
+            .collect();
+
+        let emitted = lift_entry(&[word]).unwrap_or_else(|why| panic!("{name}: {why}"));
+        let Some(said) = run_program(&format!("whole_{name}"), &conversion_program(&emitted))
+        else {
+            return;
+        };
+        let got: Vec<i64> = said
+            .lines()
+            .map(|line| line.trim().parse::<i64>().expect("a whole number"))
+            .collect();
+        assert_eq!(got.len(), CONVERSIONS.len(), "{name} answered {got:?}");
+
+        for ((case, got), wanted) in CONVERSIONS.iter().zip(&got).zip(&wanted) {
+            assert_eq!(
+                got,
+                wanted,
+                "{name} of {} answered {got} rather than {wanted}, so the {} form is not the \
+                 instruction it is",
+                case.given,
+                if rounding { "rounding" } else { "cutting" }
+            );
+        }
+    }
 }
 
 /// A floating point operation with a record bit writes the floating status

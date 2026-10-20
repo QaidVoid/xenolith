@@ -2228,13 +2228,34 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         Opcode::Fcfid => {
             writeln!(out, "    ctx->f[{rt}].f64 = (double)ctx->f[{rb}].s64;").ok()?;
         }
-        Opcode::Fctid | Opcode::Fctidz => {
-            writeln!(out, "    ctx->f[{rt}].s64 = (int64_t)ctx->f[{rb}].f64;").ok()?;
-        }
-        Opcode::Fctiw | Opcode::Fctiwz => {
+        // The conversions clamp rather than wrap, and a value that is not a
+        // number has one answer of its own. A C cast does neither, so each of
+        // the four has a helper that states the answer instead.
+        Opcode::Fctid => {
             writeln!(
                 out,
-                "    ctx->f[{rt}].s64 = (int64_t)(int32_t)ctx->f[{rb}].f64;"
+                "    ctx->f[{rt}].s64 = xenolith_to_a_whole_number(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fctidz => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].s64 = xenolith_to_a_whole_number_by_cutting(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fctiw => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].s64 = xenolith_to_a_whole_word(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        Opcode::Fctiwz => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].s64 = xenolith_to_a_whole_word_by_cutting(ctx->f[{rb}].f64);"
             )
             .ok()?;
         }
