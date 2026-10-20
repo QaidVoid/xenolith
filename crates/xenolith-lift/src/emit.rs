@@ -865,6 +865,94 @@ fn vector_console_arrangement(instruction: Instruction) -> Option<String> {
     None
 }
 
+/// Returns the words one packed vertex format takes, and the C for each.
+///
+/// The lanes a format reads are the first ones, and a format taking four of
+/// them fills two words rather than one. Only the formats settled well enough
+/// to write down are here: the one that packs three tens and a two is left out
+/// because what its published results mean has not been worked out, and a
+/// wrong packing would be silently wrong output where an absent one is a
+/// function that reports itself.
+fn packed_vertex_words(kind: u32, source: u32) -> Option<Vec<String>> {
+    let pair = |first: u32, second: u32, how: &str| {
+        format!(
+            "((xenolith_pack_{how}(xenolith_vector_u32(&ctx->v[{source}], {first})) << 16) \
+             | xenolith_pack_{how}(xenolith_vector_u32(&ctx->v[{source}], {second})))"
+        )
+    };
+
+    match kind {
+        // A colour, whose lanes leave in the order the console stores them:
+        // alpha first, then red, green and blue.
+        0 => {
+            let byte = |lane: u32, place: u32| {
+                format!(
+                    "(xenolith_pack_colour(xenolith_vector_u32(&ctx->v[{source}], {lane})) << {place})"
+                )
+            };
+            Some(vec![format!(
+                "({} | {} | {} | {})",
+                byte(3, 24),
+                byte(0, 16),
+                byte(1, 8),
+                byte(2, 0)
+            )])
+        }
+        1 => Some(vec![pair(0, 1, "short")]),
+        3 => Some(vec![pair(0, 1, "half")]),
+        4 => Some(vec![pair(0, 1, "short"), pair(2, 3, "short")]),
+        5 => Some(vec![pair(0, 1, "half"), pair(2, 3, "half")]),
+        _ => None,
+    }
+}
+
+/// Returns the C for packing lanes into a vertex format.
+///
+/// The result lands at the end of the register and is then moved towards the
+/// front by whole words. How many words it occupies is said separately from
+/// the format, so a format filling fewer than were asked for leaves the words
+/// ahead of it zero. Words moved past the front fall off rather than coming
+/// back round.
+///
+/// A width of three is left out. It is documented as a special case and what
+/// its published results do is not the same as either of the other two.
+fn vector_vertex_pack(instruction: Instruction) -> Option<String> {
+    if instruction.opcode() != Opcode::Vpkd3d128 {
+        return None;
+    }
+
+    let (d, _, b, _) = vector_operands(instruction);
+    let field = (instruction.word() >> 16) & 0x1f;
+    let width = field & 3;
+    let places = (instruction.word() >> 6) & 3;
+    if width == 0 || width == 3 {
+        return None;
+    }
+
+    let words = packed_vertex_words(field >> 2, b)?;
+    if words.len() > width as usize {
+        return None;
+    }
+
+    let mut out = String::from("    { xenolith_vector t = ctx->v[");
+    let _ = writeln!(out, "{d}];");
+    // The words a format produces sit at the end, so the lanes of the window
+    // ahead of them are the ones left zero.
+    let empty = 4 - words.len();
+    for lane in (4 - width as usize)..4 {
+        let Some(into) = lane.checked_sub(places as usize) else {
+            continue;
+        };
+        let value = match words.get(lane.wrapping_sub(empty)) {
+            Some(word) => word.as_str(),
+            None => "0u",
+        };
+        let _ = writeln!(out, "    xenolith_vector_set_u32(&t, {into}, {value});");
+    }
+    let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+    Some(out)
+}
+
 /// Returns the C for a vector instruction that narrows, widens, or slides.
 fn vector_pack(instruction: Instruction) -> Option<String> {
     let (d, a, b, _) = vector_operands(instruction);
@@ -873,6 +961,10 @@ fn vector_pack(instruction: Instruction) -> Option<String> {
         return Some(code);
     }
     if let Some(code) = vector_vertex_unpack(instruction) {
+        return Some(code);
+    }
+
+    if let Some(code) = vector_vertex_pack(instruction) {
         return Some(code);
     }
 

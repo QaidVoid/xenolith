@@ -414,6 +414,7 @@ fn vector_access_shape(opcode: Opcode) -> bool {
             | Opcode::Vperm128
             | Opcode::Vpermwi128
             | Opcode::Vrlimi128
+            | Opcode::Vpkd3d128
     )
 }
 
@@ -871,8 +872,9 @@ fn vector_access_effect(instruction: Instruction, effect: &mut Effect) {
             effect.write(Location::Vector(d));
         }
         // Inserting leaves the lanes the mask excludes alone, so what it writes
-        // is also something it reads.
-        Opcode::Vrlimi128 => {
+        // is also something it reads. Packing a vertex format writes only the
+        // words it was given room for, and so does the same.
+        Opcode::Vrlimi128 | Opcode::Vpkd3d128 => {
             let (d, _, b, _) = vector_operands(instruction);
             effect.read(Location::Vector(b));
             effect.read(Location::Vector(d));

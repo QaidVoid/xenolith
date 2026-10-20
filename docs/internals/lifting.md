@@ -122,6 +122,23 @@ lanes the loop has already passed. Building the result elsewhere makes the
 aliasing impossible rather than making it depend on the order the lanes happen
 to be visited in.
 
+## Packing a vertex format
+
+`vpkd3d128` writes a vertex component into the words of a register that already
+holds one, so it is a vector access that reads its destination as well as its
+source. The format selects how each lane is narrowed: a colour and a signed
+halfword are read from the bits of the float rather than converted, while a half
+precision value is converted and rounds.
+
+Five formats are modelled: the colour, a pair of signed halfwords, a pair of half
+precision values, and the two quartets of the same. Two things are refused. The
+format that packs three tens and a two is left out because what its published
+results mean has not been worked out. The third of the three widths is left out
+because it is documented as a special case that behaves like neither of the
+other two. A refused format leaves the whole function unlifted, which a title
+reaching one reports, where a guessed packing would draw something wrong and
+nothing would say so.
+
 ## What is approximated, and why
 
 The rule is that an instruction with no semantics is admitted rather than

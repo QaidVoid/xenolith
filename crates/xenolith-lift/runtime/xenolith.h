@@ -204,6 +204,104 @@ static inline void xenolith_vector_set_f32(xenolith_vector *v, unsigned lane, fl
     xenolith_vector_set_u32(v, lane, bits);
 }
 
+/* One lane of a colour a title is packing into a vertex.
+ *
+ * The console does not convert the number, it reads the bits underneath it. A
+ * shader hands over a value between three and the next two hundred and
+ * fifty five representable above it, so the byte wanted is already sitting in
+ * the low bits of the float and the whole of the work is deciding whether the
+ * value is in that window. Below it, or not a number at all, gives nothing;
+ * above it gives everything.
+ *
+ * Comparing the bits for the upper bound is only sound once the value is known
+ * to be at least three, which the first test establishes: over the positive
+ * floats the bit patterns run in the same order as the values.
+ */
+static inline uint32_t xenolith_pack_colour(uint32_t bits) {
+    float value;
+    __builtin_memcpy(&value, &bits, 4);
+    if (!(value >= 3.0f)) {
+        return 0;
+    }
+    if (bits > 0x404000ffu) {
+        return 255;
+    }
+    return bits & 0xffu;
+}
+
+/* One lane of a pair or a quartet of signed halfwords, read the same way.
+ *
+ * The window is the thirty two thousand seven hundred and sixty seven either
+ * side of three, and what falls outside it stops at the end it left by. The
+ * low bound is one above the most negative halfword, which is what the console
+ * saturates to rather than the halfword below it.
+ */
+static inline uint32_t xenolith_pack_short(uint32_t bits) {
+    float value;
+    float low;
+    uint32_t low_bits = 0x403f8001u;
+    __builtin_memcpy(&value, &bits, 4);
+    __builtin_memcpy(&low, &low_bits, 4);
+    if (!(value >= low)) {
+        return 0x8001u;
+    }
+    if (bits > 0x40407fffu) {
+        return 0x7fffu;
+    }
+    return bits & 0xffffu;
+}
+
+/* One lane of a pair or a quartet of half precision values.
+ *
+ * This one is a conversion rather than a reading of bits, so it rounds, and it
+ * rounds to nearest with ties going to even the way every other narrowing in
+ * this instruction set does. A value too large to hold becomes an infinity, one
+ * too small becomes a zero of the sign it had, and one that is not a number
+ * stays one rather than becoming an infinity, which is why the mantissa keeps a
+ * bit set on that path.
+ */
+static inline uint32_t xenolith_pack_half(uint32_t bits) {
+    uint32_t sign = (bits >> 16) & 0x8000u;
+    uint32_t raw = (bits >> 23) & 0xffu;
+    uint32_t mantissa = bits & 0x7fffffu;
+    int32_t exponent = (int32_t)raw - 127 + 15;
+    uint32_t rounded;
+
+    if (raw == 0xffu) {
+        return mantissa != 0 ? (sign | 0x7e00u | (mantissa >> 13)) : (sign | 0x7c00u);
+    }
+    if (exponent >= 0x1f) {
+        return sign | 0x7c00u;
+    }
+    if (exponent <= 0) {
+        uint32_t places;
+        if (exponent < -10) {
+            return sign;
+        }
+        mantissa |= 0x800000u;
+        places = (uint32_t)(14 - exponent);
+        rounded = mantissa >> places;
+        if ((mantissa & ((1u << places) - 1u)) > (1u << (places - 1u))
+            || ((mantissa & ((1u << places) - 1u)) == (1u << (places - 1u)) && (rounded & 1u))) {
+            rounded++;
+        }
+        return sign | rounded;
+    }
+    rounded = mantissa >> 13;
+    if ((mantissa & 0x1fffu) > 0x1000u
+        || ((mantissa & 0x1fffu) == 0x1000u && (rounded & 1u))) {
+        rounded++;
+    }
+    if (rounded == 0x400u) {
+        rounded = 0;
+        exponent++;
+        if (exponent >= 0x1f) {
+            return sign | 0x7c00u;
+        }
+    }
+    return sign | ((uint32_t)exponent << 10) | rounded;
+}
+
 /* Converting a single precision value to a fixed point one, with saturation.
  *
  * The instruction set clamps rather than wrapping, and a value that is not a
