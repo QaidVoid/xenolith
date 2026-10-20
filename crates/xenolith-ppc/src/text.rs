@@ -622,8 +622,14 @@ fn status_operands(
 /// literal zero.
 fn string_operands(f: &mut fmt::Formatter<'_>, instruction: Instruction) -> fmt::Result {
     let (rt, ra) = (instruction.rt(), instruction.ra());
+    // A count of zero means thirty two bytes, so the field does not mean itself
+    // for the one value that would otherwise read as moving nothing.
+    let count = match instruction.rb() {
+        0 => 32,
+        count => count,
+    };
 
-    write!(f, " r{rt}, {}, {}", base(ra), instruction.rb())
+    write!(f, " r{rt}, {}, {count}", base(ra))
 }
 
 impl fmt::Display for Rendered {
@@ -944,6 +950,11 @@ mod tests {
         assert_eq!(render(0x7c01_24aa, 0), "lswi r0, r1, 4");
         assert_eq!(render(0x7c01_25aa, 0), "stswi r0, r1, 4");
         assert_eq!(render(0x7c02_24aa, 0), "lswi r0, r2, 4");
+        // A count of zero means thirty two, so the one value that does not mean
+        // itself is printed as what it means.
+        assert_eq!(render(0x7c00_04aa, 0), "lswi r0, 0, 32");
+        assert_eq!(render(0x7c00_05aa, 0), "stswi r0, 0, 32");
+        assert_eq!(render(0x7c01_04aa, 0), "lswi r0, r1, 32");
     }
 
     #[test]
