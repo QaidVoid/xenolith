@@ -451,12 +451,6 @@ fn default_of(block: &Block) -> Option<u32> {
     }
 }
 
-/// Recovers the jump table behind one indirect branch, if it can be read.
-///
-/// The values and the bound are collected in one forward pass, because the
-/// register an index was derived from is only known while walking. Reading the
-/// bound afterwards would mean comparing register numbers that no longer refer
-/// to the same value.
 /// Returns every way into a block, as a chain ending at it.
 ///
 /// One chain when the block has a single predecessor, which is the shape a
@@ -548,6 +542,12 @@ fn walk(image: &Image, chain: &[&Block]) -> Option<(Value, Vec<Bound>)> {
     Some((target_value, bounds))
 }
 
+/// Recovers the jump table behind one indirect branch, if it can be read.
+///
+/// The values and the bound are collected in one forward pass, because the
+/// register an index was derived from is only known while walking. Reading the
+/// bound afterwards would mean comparing register numbers that no longer refer
+/// to the same value.
 fn recover_one(image: &Image, function: &Function, block: &Block) -> Option<JumpTable> {
     // Every way in has to give the same answer. A table read on one path and a
     // bound checked on another says nothing about the path actually taken, so
