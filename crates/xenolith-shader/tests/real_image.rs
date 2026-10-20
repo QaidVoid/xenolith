@@ -33,8 +33,8 @@ fn image() -> Vec<u32> {
 /// The four a title was watched handing over, as the word each starts on
 /// counted from the front of the image.
 ///
-/// The addresses they were seen at are 0x82053be4, 0x82053fb0, 0x82054010 and
-/// 0x82054070, and the image loads at 0x82000000.
+/// The addresses they were seen at are `0x8205_3be4`, `0x8205_3fb0`,
+/// `0x8205_4010` and `0x8205_4070`, and the image loads at `0x8200_0000`.
 const SEEN: [(usize, usize); 4] = [
     ((0x0005_3be4) / 4, 9),
     ((0x0005_3fb0) / 4, 24),

@@ -45,3 +45,19 @@ finished, the stretches cover the shader with nothing left over and nothing
 twice, and the shader stops on the one operation that means stop. A layout read
 wrongly does not do that, which is what `tests/real_shaders.rs` checks against
 two shaders taken from a retail title as it ran.
+
+## The golden module
+
+Nothing here can say whether a translation draws the right thing, and the
+validator that would say whether the module is well formed is not installed on
+every machine. So the module one shader becomes is committed as a word list in
+`tests/fixtures/pixel_shader.txt`, and a test compares the translator's output
+against it word for word.
+
+That is the regression guard. A change that alters one emitted word fails with
+the word and its position named. The fixture is also walked as a module, every
+instruction stepping by the length it declares, so a copy of a broken module
+would not match either.
+
+The fixture was emitted once and read through before being committed. It is not
+evidence that the translation is correct, only that it has not changed.

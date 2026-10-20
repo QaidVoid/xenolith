@@ -10,7 +10,11 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/QaidVoid/xenolith"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Denied rather than forbidden, and denied everywhere but one module: saying a
+# shader while a title runs hands a pointer across to C, which cannot be done
+# without it. Forbidding outright would mean a whole crate existing only to hold
+# that one boundary.
+unsafe_code = "deny"
 missing_docs = "warn"
 unreachable_pub = "warn"
 

@@ -20,11 +20,16 @@ pub use alu::{Alu, ScalarOperation, VectorOperation};
 pub use fetch::{Fetch, FetchKind, Format, Packed};
 pub use find::{Found, reads_as_shader, scan};
 pub use flow::{Flow, FlowOperation};
+pub use translate::{Refused, Stream, Translated, translate};
 
 mod alu;
 mod fetch;
 mod find;
 mod flow;
+#[allow(unsafe_code)]
+pub mod running;
+pub mod spirv;
+mod translate;
 
 /// How many words one control flow instruction takes, counted in halves because
 /// two of them share three words.
