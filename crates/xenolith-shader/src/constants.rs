@@ -29,7 +29,7 @@ pub(crate) const DRAWN_WHATEVER_IT_IS: u32 = 7;
 /// The console's own number for it, and what this title's shaders use: they
 /// export to nought and one, which are carried on to whatever runs next, and to
 /// this, which is where the vertex went.
-pub(crate) const POSITION: u8 = 62;
+pub const POSITION: u8 = 62;
 
 /// How many things a shader carries on to whatever runs after it.
 ///
@@ -38,7 +38,7 @@ pub(crate) const POSITION: u8 = 62;
 /// to name up to the seventh: a shader naming one past the end is refused
 /// whole, so whatever it drew is not drawn at all. The number the hardware has
 /// is the only one that cannot be wrong.
-pub(crate) const CARRIED: u32 = 16;
+pub const CARRIED: u32 = 16;
 
 /// How many more than the constants a shader names are handed to it.
 ///

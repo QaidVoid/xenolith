@@ -38,6 +38,7 @@ That is a weaker result than it looks. To run the checks that mean something:
 | `XENOLITH_ANALYSIS_TABLE` | one hand worked table, to pin the recovery |
 | `XENOLITH_LIFT_IMAGE` | the container an emitted corpus came from |
 | `XENOLITH_LIFT_CORPUS` | a directory of emitted C++ to compare semantics against |
+| `XENOLITH_SHADER_IMAGE` | a title's image, to find the shaders a title handed over among |
 | `XENOLITH_PPC_BINUTILS` | a cross binutils prefix, for the operand comparison |
 | `XENOLITH_PPC_CODE` | a code section to compare operands over |
 | `XENOLITH_PPC_TOOLCHAIN` | a big endian ppc64 toolchain prefix |

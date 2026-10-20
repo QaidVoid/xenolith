@@ -17,6 +17,7 @@
 //! becomes silently wrong output while an unknown one is a loud failure at the
 //! time of reading.
 pub use alu::{Alu, ScalarOperation, VectorOperation};
+pub use constants::{CARRIED, POSITION};
 pub use dispatch::translate;
 pub use fetch::{Fetch, FetchKind, Format, Packed};
 pub use find::{Found, reads_as_shader, scan};

@@ -52,6 +52,13 @@ raw=${XENOLITH_PPC_CODE-$corpus/pes6-recomp/xex_image.raw}
 [ -f "$raw" ] || fail "no raw image at $raw for the operand comparison"
 export XENOLITH_PPC_CODE=$raw
 
+# The shader tests read a decoded image rather than a container, to find the
+# shaders a title handed over among everything else in it. The lift output
+# already keeps one, so nothing is copied and nothing is written into the tree.
+shader_image=${XENOLITH_SHADER_IMAGE-$corpus/ac6_lifted/image.bin}
+[ -f "$shader_image" ] || fail "no decoded image at $shader_image for the shader checks"
+export XENOLITH_SHADER_IMAGE=$shader_image
+
 # One package per line, because a failure in one must not stop the report from
 # saying which others were fine.
 run() {
@@ -71,7 +78,7 @@ run() {
     # A test target with no tests in it is not a dark oracle, so only the ones
     # that must run something are held to it.
     case $name in
-        analysis | corpus | execution | title | operands)
+        analysis | corpus | execution | title | operands | exports)
             # Summed over the package's targets, since a package may hold an
             # empty target beside the ones that matter.
             passed=$(printf '%s\n' "$out" \
@@ -90,5 +97,9 @@ run emission cargo test --release -p xenolith-lift --test emission -- --include-
 run execution cargo test --release -p xenolith-lift --test execution -- --include-ignored
 run title cargo test --release -p xenolith-lift --test title -- --include-ignored
 run operands cargo test --release -p xenolith-ppc --lib operands -- --include-ignored
+# Only the export count, which needs the image and no validator. The shader
+# tests that need spirv-val are left to a plain `cargo test`, where they report
+# themselves ignored rather than passed, and to a machine that has the tool.
+run exports cargo test --release -p xenolith-shader --test exports -- --include-ignored
 
 printf 'check-oracles: every oracle ran\n'

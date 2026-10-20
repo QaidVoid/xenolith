@@ -17,8 +17,14 @@ use std::process::{Command, Stdio};
 
 use xenolith_shader::{Kind, translate};
 
-/// What a validator says about a module, or nothing where none is installed.
-fn validate(words: &[u32]) -> Option<Result<(), String>> {
+/// What a validator says about a module.
+///
+/// # Panics
+///
+/// Where no validator is installed, because the test that calls this is the one
+/// that needs it and a test may not report a pass it did not earn.
+#[allow(clippy::expect_used, clippy::panic)]
+fn validate(words: &[u32]) -> Result<(), String> {
     let bytes: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
 
     let mut running = Command::new("spirv-val")
@@ -27,12 +33,17 @@ fn validate(words: &[u32]) -> Option<Result<(), String>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .ok()?;
+        .expect("spirv-val could not be run, so this check could not run");
 
-    running.stdin.take()?.write_all(&bytes).ok()?;
-    let done = running.wait_with_output().ok()?;
+    running
+        .stdin
+        .take()
+        .expect("spirv-val took no input")
+        .write_all(&bytes)
+        .expect("writing to spirv-val");
+    let done = running.wait_with_output().expect("waiting for spirv-val");
 
-    Some(if done.status.success() {
+    if done.status.success() {
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&done.stderr)
@@ -40,7 +51,7 @@ fn validate(words: &[u32]) -> Option<Result<(), String>> {
             .next()
             .unwrap_or_default()
             .to_owned())
-    })
+    }
 }
 
 /// The words the title handed over, as they sat in its memory.
@@ -55,27 +66,43 @@ const WORDS: &str = "\
     91002b2b c8038000 001a1a00 c2010100 c80f8001 00000000 c2020200 4e4a0000 \
     649bd3d7 177391ea";
 
-#[test]
-fn the_one_a_title_hands_over_while_running_is_said_in_a_host_s_terms() {
-    let words: Vec<u32> = WORDS
+/// The words the title handed over, read as words.
+// A word that is not hexadecimal is a failure of the fixture rather than
+// something to carry on from, so this panics where a reader would want to know.
+#[allow(clippy::expect_used)]
+fn words() -> Vec<u32> {
+    WORDS
         .split_whitespace()
         .map(|word| u32::from_str_radix(word, 16).expect("a hexadecimal word"))
-        .collect();
+        .collect()
+}
+
+#[test]
+fn the_one_a_title_hands_over_while_running_is_said_in_a_host_s_terms() {
+    let words = words();
     assert_eq!(words.len(), 66);
 
-    let said = match translate(Kind::Vertex, &words) {
-        Ok(said) => said,
-        Err(why) => panic!("the shader a title hands over was refused: {why:?}"),
-    };
+    let said = translate(Kind::Vertex, &words)
+        .unwrap_or_else(|why| panic!("the shader a title hands over was refused: {why:?}"));
     assert!(
         !said.words.is_empty(),
         "a shader that translates says something"
     );
+    assert_eq!(said.words[0], 0x0723_0203, "a module begins as one does");
+}
 
-    let Some(checked) = validate(&said.words) else {
-        eprintln!("skipping the check: no validator is installed");
-        return;
-    };
+/// The same shader, checked by a validator where one is installed.
+///
+/// Ignored rather than passed where `spirv-val` is absent, because a test that
+/// reports a pass it did not earn is worse than one that reports it did not run.
+/// `scripts/check-oracles` treats the ignore as a failure.
+#[test]
+#[ignore = "needs spirv-val"]
+#[allow(clippy::expect_used)]
+fn the_validator_accepts_the_one_a_title_hands_over() {
+    let said =
+        translate(Kind::Vertex, &words()).expect("the shader a title hands over should translate");
+    let checked = validate(&said.words);
     if let Err(complaint) = checked {
         panic!("the shader was translated and then turned down: {complaint}");
     }
