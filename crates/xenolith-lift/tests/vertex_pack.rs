@@ -22,6 +22,8 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod honest;
+
 use xenolith_lift::RUNTIME_HEADER;
 use xenolith_ppc::Instruction;
 
@@ -514,10 +516,7 @@ fn a_function_holding_a_pack_lifts_and_compiles() {
         lifted.code
     );
 
-    let Some(compiler) = host_compiler() else {
-        eprintln!("skipping the compile: no host C compiler is installed");
-        return;
-    };
+    let compiler = honest::host_compiler();
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("vertex-pack-function");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a directory to build in");
@@ -550,16 +549,6 @@ fn a_function_holding_a_pack_lifts_and_compiles() {
         "the emitted C did not compile:\n{}",
         String::from_utf8_lossy(&built.stderr)
     );
-}
-
-/// Returns a host C compiler, or nothing where none is installed.
-fn host_compiler() -> Option<&'static str> {
-    ["clang", "cc", "gcc"].into_iter().find(|candidate| {
-        Command::new(candidate)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-    })
 }
 
 /// Writes the C that runs every case and prints what each left behind.
@@ -596,9 +585,7 @@ fn program(cases: &[Case]) -> Option<String> {
 
 /// Builds and runs the cases, returning a line of four words for each.
 fn on_the_model(cases: &[Case]) -> Result<Vec<Vec<u32>>, String> {
-    let Some(compiler) = host_compiler() else {
-        return Err("skip: no host C compiler is installed".to_owned());
-    };
+    let compiler = honest::host_compiler();
     let Some(source) = program(cases) else {
         return Err("the model has no code for an encoding under test".to_owned());
     };

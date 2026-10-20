@@ -17,6 +17,8 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod honest;
+
 use xenolith_lift::RUNTIME_HEADER;
 use xenolith_ppc::Instruction;
 
@@ -175,16 +177,6 @@ fn emulator() -> Option<String> {
         .ok()
         .filter(|output| output.status.success())
         .map(|_| name)
-}
-
-/// Returns a host C compiler, if one is installed.
-fn host_compiler() -> Option<&'static str> {
-    ["clang", "cc", "gcc"].into_iter().find(|candidate| {
-        Command::new(candidate)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-    })
 }
 
 /// Returns a directory to build in, made fresh.
@@ -431,12 +423,11 @@ fn vector_seed() -> Vec<String> {
 
 /// Runs each encoding on emulated hardware, once per seed.
 fn on_hardware(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> Result<Vec<State>, String> {
-    let Some(prefix) = cross_prefix() else {
-        return Err("skip: XENOLITH_PPC_TOOLCHAIN names no working toolchain".to_owned());
-    };
-    let Some(emulator) = emulator() else {
-        return Err("skip: no emulator is installed".to_owned());
-    };
+    let prefix = cross_prefix().ok_or_else(|| {
+        "XENOLITH_PPC_TOOLCHAIN names no working big endian ppc64 toolchain".to_owned()
+    })?;
+    let emulator =
+        emulator().ok_or_else(|| "no ppc64 user mode emulator is installed".to_owned())?;
 
     let directory = workspace("execution-guest")?;
     std::fs::write(directory.join("run.s"), guest_assembly(words, seeds.len()))
@@ -702,9 +693,7 @@ fn model_program(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> String {
 
 /// Runs each encoding through the model on the host.
 fn on_the_model(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> Result<Vec<State>, String> {
-    let Some(compiler) = host_compiler() else {
-        return Err("skip: no host C compiler is installed".to_owned());
-    };
+    let compiler = honest::host_compiler();
 
     let directory = workspace("execution-model")?;
     std::fs::write(directory.join("xenolith.h"), RUNTIME_HEADER)
@@ -1197,6 +1186,7 @@ fn vector_subjects() -> Vec<(u32, &'static str)> {
 
 /// Runs every instruction on hardware and through the model, and compares.
 #[test]
+#[ignore = "needs XENOLITH_PPC_TOOLCHAIN"]
 fn the_model_computes_what_the_hardware_computes() {
     // An instruction the model cannot write out cannot be run through it. That
     // is reported rather than treated as agreement, since a check that did not
@@ -1208,22 +1198,8 @@ fn the_model_computes_what_the_hardware_computes() {
         .partition(|(word, _)| xenolith_lift::code_for(Instruction::decode(*word), 0).is_some());
     let words: Vec<u32> = subjects.iter().map(|(word, _)| *word).collect();
 
-    let hardware = match on_hardware(&words, &SEEDS) {
-        Ok(states) => states,
-        Err(complaint) if complaint.starts_with("skip: ") => {
-            eprintln!("{complaint}");
-            return;
-        }
-        Err(complaint) => panic!("{complaint}"),
-    };
-    let model = match on_the_model(&words, &SEEDS) {
-        Ok(states) => states,
-        Err(complaint) if complaint.starts_with("skip: ") => {
-            eprintln!("{complaint}");
-            return;
-        }
-        Err(complaint) => panic!("{complaint}"),
-    };
+    let hardware = honest::or_fail(on_hardware(&words, &SEEDS), "running on hardware");
+    let model = honest::or_fail(on_the_model(&words, &SEEDS), "running through the model");
 
     assert_eq!(
         hardware.len(),
@@ -1375,12 +1351,11 @@ fn sequences_on_hardware(
     sequences: &[(&str, Vec<u32>)],
     seeds: &[[u64; WATCHED_COUNT]],
 ) -> Result<Vec<State>, String> {
-    let Some(prefix) = cross_prefix() else {
-        return Err("skip: XENOLITH_PPC_TOOLCHAIN names no working toolchain".to_owned());
-    };
-    let Some(emulator) = emulator() else {
-        return Err("skip: no emulator is installed".to_owned());
-    };
+    let prefix = cross_prefix().ok_or_else(|| {
+        "XENOLITH_PPC_TOOLCHAIN names no working big endian ppc64 toolchain".to_owned()
+    })?;
+    let emulator =
+        emulator().ok_or_else(|| "no ppc64 user mode emulator is installed".to_owned())?;
 
     let directory = workspace("sequence-guest")?;
     std::fs::write(directory.join("run.s"), sequence_assembly(sequences, seeds))
@@ -1517,9 +1492,7 @@ fn sequences_on_the_model(
     sequences: &[(&str, Vec<u32>)],
     seeds: &[[u64; WATCHED_COUNT]],
 ) -> Result<Vec<State>, String> {
-    let Some(compiler) = host_compiler() else {
-        return Err("skip: no host C compiler is installed".to_owned());
-    };
+    let compiler = honest::host_compiler();
 
     let out = sequence_program(sequences, seeds)?;
 
@@ -1692,25 +1665,18 @@ fn sequences() -> Vec<(&'static str, Vec<u32>)> {
 
 /// Runs whole functions on hardware and through the lifter, and compares.
 #[test]
+#[ignore = "needs XENOLITH_PPC_TOOLCHAIN"]
 fn lifted_control_flow_goes_where_the_hardware_goes() {
     let sequences = sequences();
 
-    let hardware = match sequences_on_hardware(&sequences, &SEEDS) {
-        Ok(states) => states,
-        Err(complaint) if complaint.starts_with("skip: ") => {
-            eprintln!("{complaint}");
-            return;
-        }
-        Err(complaint) => panic!("{complaint}"),
-    };
-    let model = match sequences_on_the_model(&sequences, &SEEDS) {
-        Ok(states) => states,
-        Err(complaint) if complaint.starts_with("skip: ") => {
-            eprintln!("{complaint}");
-            return;
-        }
-        Err(complaint) => panic!("{complaint}"),
-    };
+    let hardware = honest::or_fail(
+        sequences_on_hardware(&sequences, &SEEDS),
+        "running whole functions on hardware",
+    );
+    let model = honest::or_fail(
+        sequences_on_the_model(&sequences, &SEEDS),
+        "running whole functions through the model",
+    );
 
     assert_eq!(
         hardware.len(),

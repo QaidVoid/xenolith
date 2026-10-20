@@ -6,8 +6,10 @@
 //! emitted code works on one machine and not another, which is the kind of
 //! mistake that is found years later.
 //!
-//! These tests skip when no C compiler is present, since the crate itself does
-//! not need one.
+//! A C compiler is required: a check that skipped when it was absent would leave
+//! the interface itself unverified while reporting green.
+
+mod honest;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,25 +17,9 @@ use std::process::Command;
 /// The interface, shipped alongside the code emitted against it.
 const HEADER: &str = include_str!("../runtime/xenolith.h");
 
-/// Returns a C compiler to check with, if one is installed.
-fn compiler() -> Option<&'static str> {
-    for candidate in ["clang", "cc", "gcc"] {
-        let found = Command::new(candidate)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success());
-        if found {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 /// Compiles `program` against the header, returning what the compiler said.
 fn compiles(name: &str, program: &str) -> Result<(), String> {
-    let Some(compiler) = compiler() else {
-        return Ok(());
-    };
+    let compiler = honest::host_compiler();
 
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
@@ -164,10 +150,6 @@ int main(void) {
 
     if let Err(complaint) = compiles("byte_order", program) {
         panic!("the check did not compile:\n{complaint}");
-    }
-    if compiler().is_none() {
-        eprintln!("skipping: no C compiler is installed");
-        return;
     }
     let program_path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("byte_order")

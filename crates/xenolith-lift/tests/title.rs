@@ -13,6 +13,8 @@
 //! No game data is committed. The title, the toolchain, and the emulator all
 //! come from the environment and every test skips when they are absent.
 
+mod honest;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -156,15 +158,18 @@ fn scratch_seed() -> Vec<u8> {
         .collect()
 }
 
-/// Returns the title named by the environment, decoded.
-fn title() -> Option<Image> {
-    let path = std::env::var_os("XENOLITH_ANALYSIS_XEX")?;
-    let bytes = std::fs::read(path).ok()?;
-    let container = Container::parse(&bytes).ok()?;
+/// Returns the title named by the environment, decoded, or says why it could not.
+fn title() -> Result<Image, String> {
+    let path = honest::require_path("XENOLITH_ANALYSIS_XEX")?;
+    let bytes = std::fs::read(path).map_err(|error| format!("reading the title: {error}"))?;
+    let container =
+        Container::parse(&bytes).map_err(|error| format!("parsing the title: {error}"))?;
     let key = std::env::var("XENOLITH_XEX_KEY")
         .ok()
         .and_then(|text| KeyMaterial::from_hex(&text).ok());
-    container.load(key.as_ref()).ok()
+    container
+        .load(key.as_ref())
+        .map_err(|error| format!("decoding the title: {error}"))
 }
 
 /// Returns the cross toolchain prefix, if it works.
@@ -187,16 +192,6 @@ fn emulator() -> Option<String> {
         .ok()
         .filter(|output| output.status.success())
         .map(|_| name)
-}
-
-/// Returns a host C compiler, if one is installed.
-fn host_compiler() -> Option<&'static str> {
-    ["clang", "cc", "gcc"].into_iter().find(|candidate| {
-        Command::new(candidate)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-    })
 }
 
 /// Returns a directory to build in, made fresh.
@@ -685,7 +680,7 @@ fn build_guest(directory: &Path, image: &Image) -> Option<PathBuf> {
 
 /// Builds the model side over the functions chosen.
 fn build_model(directory: &Path, image: &Image, pool: &BTreeMap<u32, String>) -> Option<PathBuf> {
-    let compiler = host_compiler()?;
+    let compiler = honest::host_compiler();
     let _ = std::fs::write(directory.join("xenolith.h"), RUNTIME_HEADER);
     let _ = std::fs::write(directory.join("xenolith.c"), RUNTIME_SOURCE);
 
@@ -790,15 +785,19 @@ fn once(
 /// finishes on hardware and not through the model is a disagreement, and is
 /// reported as one.
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX and XENOLITH_PPC_TOOLCHAIN"]
 fn the_model_runs_what_the_title_holds() {
-    let Some(image) = title() else {
-        eprintln!("skipping: XENOLITH_ANALYSIS_XEX names no title this can decode");
-        return;
-    };
-    if cross_prefix().is_none() || emulator().is_none() || host_compiler().is_none() {
-        eprintln!("skipping: the toolchain, the emulator, or a host compiler is missing");
-        return;
-    }
+    let image = honest::or_fail(title(), "the title this runs");
+    assert!(
+        cross_prefix().is_some(),
+        "XENOLITH_PPC_TOOLCHAIN names no working big endian ppc64 toolchain"
+    );
+    assert!(
+        emulator().is_some(),
+        "no ppc64 user mode emulator is installed"
+    );
+    // Required, so that a machine without one fails here rather than later.
+    let _ = honest::host_compiler();
 
     let wanted = sample();
     let (chosen, pool) = candidates(&image, wanted);

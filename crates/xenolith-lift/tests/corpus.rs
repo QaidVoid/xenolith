@@ -16,6 +16,8 @@
 //! No game data is committed. The corpus and the image are supplied through the
 //! environment and every test here skips when they are absent.
 
+mod honest;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -42,9 +44,9 @@ struct Emitted {
     writes: BTreeSet<Location>,
 }
 
-/// Returns the corpus directory, if one was supplied.
-fn corpus_directory() -> Option<PathBuf> {
-    std::env::var_os("XENOLITH_LIFT_CORPUS").map(PathBuf::from)
+/// Returns the corpus directory, or fails naming the variable that names one.
+fn corpus_directory() -> Result<PathBuf, String> {
+    honest::require_path("XENOLITH_LIFT_CORPUS")
 }
 
 /// Parses a place the corpus names into one this crate knows.
@@ -424,45 +426,39 @@ macro_rules! supplied_image {
         // The corpus is one title's, so it needs that title's image. A separate
         // name keeps it from being pointed at whichever image the analysis
         // tests happen to be using.
-        match std::env::var_os("XENOLITH_LIFT_IMAGE") {
-            Some(path) => {
-                let bytes = std::fs::read(&path).expect("reading the analysis container");
-                let container = Container::parse(&bytes).expect("parsing the container");
-                let key = std::env::var("XENOLITH_XEX_KEY")
-                    .ok()
-                    .map(|text| KeyMaterial::from_hex(text.trim()).expect("the supplied key"));
-                container.load(key.as_ref()).expect("decoding the image")
-            }
-            None => {
-                eprintln!("skipping: XENOLITH_LIFT_IMAGE is not set");
-                return;
-            }
+        {
+            let path = honest::or_fail(
+                honest::require_path("XENOLITH_LIFT_IMAGE"),
+                "the image the corpus came from",
+            );
+            let bytes = std::fs::read(&path).expect("reading the analysis container");
+            let container = Container::parse(&bytes).expect("parsing the container");
+            let key = std::env::var("XENOLITH_XEX_KEY")
+                .ok()
+                .map(|text| KeyMaterial::from_hex(text.trim()).expect("the supplied key"));
+            container.load(key.as_ref()).expect("decoding the image")
         }
     };
 }
 
 /// Reads every corpus file, or skips the enclosing test.
 macro_rules! supplied_corpus {
-    () => {
-        match corpus_directory() {
-            Some(directory) => {
-                let mut all = Vec::new();
-                let entries = std::fs::read_dir(&directory).expect("reading the corpus directory");
-                for entry in entries {
-                    let path = entry.expect("a corpus entry").path();
-                    if path.extension().is_some_and(|extension| extension == "cpp") {
-                        let text = std::fs::read_to_string(&path).expect("reading a corpus file");
-                        all.extend(parse(&text));
-                    }
-                }
-                all
-            }
-            None => {
-                eprintln!("skipping: XENOLITH_LIFT_CORPUS is not set");
-                return;
+    () => {{
+        let directory = honest::or_fail(
+            corpus_directory(),
+            "the directory of emitted code to compare against",
+        );
+        let mut all = Vec::new();
+        let entries = std::fs::read_dir(&directory).expect("reading the corpus directory");
+        for entry in entries {
+            let path = entry.expect("a corpus entry").path();
+            if path.extension().is_some_and(|extension| extension == "cpp") {
+                let text = std::fs::read_to_string(&path).expect("reading a corpus file");
+                all.extend(parse(&text));
             }
         }
-    };
+        all
+    }};
 }
 
 /// Prints what the comparison found and returns how many instructions
@@ -561,6 +557,7 @@ fn outside_the_oracle(instruction: Instruction, spelling: &str) -> bool {
 /// near zero until the common instructions are nearly all modelled, and reporting
 /// only the instruction figure would make that look like progress it is not.
 #[test]
+#[ignore = "needs XENOLITH_LIFT_IMAGE and XENOLITH_LIFT_CORPUS"]
 fn reports_how_much_of_the_corpus_is_modelled() {
     let image = supplied_image!();
     let emitted = supplied_corpus!();
@@ -693,6 +690,7 @@ fn without_the_recorded_read(
 /// Compares what the model says an instruction touches against what the corpus
 /// says, for every instruction the model claims to describe.
 #[test]
+#[ignore = "needs XENOLITH_LIFT_IMAGE and XENOLITH_LIFT_CORPUS"]
 fn the_model_agrees_with_the_corpus_about_what_is_touched() {
     let image = supplied_image!();
     let emitted = supplied_corpus!();

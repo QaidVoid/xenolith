@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use xenolith_analysis::analyze;
+mod honest;
+
 use xenolith_lift::{Imported, Imports, RUNTIME_HEADER, lift};
 use xenolith_ppc::Instruction;
 use xenolith_xex::{Image, PageKind, Section};
@@ -54,14 +56,7 @@ fn lift_entry(words: &[u32]) -> Result<String, String> {
 /// The interface computes some things itself rather than declaring them, and
 /// what it computes has to be checked by running it. Reading it is not a check.
 fn run_program(name: &str, program: &str) -> Option<String> {
-    let usable = Command::new("clang")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !usable {
-        eprintln!("skipping the run: clang is not installed");
-        return None;
-    }
+    let compiler = honest::host_compiler();
 
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::create_dir_all(&directory);
@@ -71,7 +66,7 @@ fn run_program(name: &str, program: &str) -> Option<String> {
     let _ = std::fs::write(&source, program);
 
     let binary = directory.join("program");
-    let built = Command::new("clang")
+    let built = Command::new(compiler)
         .args(["-std=c17", "-Wall", "-Wextra", "-Werror", "-O2", "-lm"])
         .arg("-o")
         .arg(&binary)
@@ -91,14 +86,7 @@ fn run_program(name: &str, program: &str) -> Option<String> {
 
 /// Compiles emitted C against the interface, returning what the compiler said.
 fn compiles(name: &str, emitted: &str) -> Result<(), String> {
-    let usable = Command::new("clang")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !usable {
-        eprintln!("skipping the compile: clang is not installed");
-        return Ok(());
-    }
+    let compiler = honest::host_compiler();
 
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
@@ -120,7 +108,7 @@ fn compiles(name: &str, emitted: &str) -> Result<(), String> {
     );
     std::fs::write(&source, &program).map_err(|error| format!("writing the source: {error}"))?;
 
-    let output = Command::new("clang")
+    let output = Command::new(compiler)
         // A guest function that recurses on every path is a statement about
         // the program that was translated, not about the translation. That
         // warning reads intent, and lifted code has none to read.
@@ -293,11 +281,12 @@ fn other_functions_still_lift() {
 /// the result, which is the strongest statement available about the emitted code
 /// while there is no way to run it.
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn a_real_title_lifts_and_compiles() {
-    let Some(path) = std::env::var_os("XENOLITH_ANALYSIS_XEX") else {
-        eprintln!("skipping: XENOLITH_ANALYSIS_XEX is not set");
-        return;
-    };
+    let path = honest::or_fail(
+        honest::require_path("XENOLITH_ANALYSIS_XEX"),
+        "the title this lifts",
+    );
     let bytes = std::fs::read(&path).expect("reading the container");
     let container = xenolith_xex::Container::parse(&bytes).expect("parsing the container");
     let key = std::env::var("XENOLITH_XEX_KEY")
