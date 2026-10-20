@@ -28,6 +28,31 @@ brings back.
 as a shader, at the word it starts on. It is how a shader handed over at runtime
 is matched to one found in the image beforehand.
 
+## How the translation is laid out
+
+The decode layer is one module per thing read. The translation is one module per
+thing written, because what it says is not one subject:
+
+- `constants.rs` holds the console's own numbers: registers, constants, what is
+  carried on, and where among the constants a title's run time values sit.
+- `bindings.rs` makes what a shader is handed from outside: the constant block,
+  the window on a title's memory, and the pictures.
+- `edges.rs` makes what a shader says at its edges: what it produces, what it
+  carries on, how big a point is, and which vertex this is.
+- `preamble.rs` calls those in the order a module needs them and hands back the
+  names the rest of the translation is written against.
+- `operands.rs` reads what an instruction reads. `values.rs` holds the small
+  operations everything else is written from. `arithmetic.rs` is the four lane
+  half, `single_lane.rs` the single lane half, `fetching.rs` the fetches, and
+  `plan.rs` reads a shader ahead of writing it to find what a fetch needs named.
+- `dispatch.rs` writes one instruction out and gives the two ways of reaching
+  instructions, straight through and jumping. `translate.rs` holds the result
+  types and the reasons a shader is refused.
+
+No file in `src` may exceed 700 lines, and `tests/file_size.rs` fails the build
+where one does. The translator arrived as a single file of nearly four thousand
+lines, and the cap is what stops that happening again.
+
 ## Decoding never fails
 
 A word encoding nothing this crate recognizes reports an unknown operation

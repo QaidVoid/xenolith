@@ -10,9 +10,10 @@
 //! same by ending the invocation.
 
 use crate::Kind;
-use crate::arithmetic::read_a_constant;
+use crate::constants::ALL_THE_CONSTANTS;
 use crate::opcodes;
-use crate::preamble::{ALL_THE_CONSTANTS, Named};
+use crate::operands::read_a_constant;
+use crate::preamble::Named;
 use crate::spirv::Module;
 
 /// Writes out what a shader puts out, and the end of it.

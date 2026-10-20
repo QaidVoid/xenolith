@@ -17,13 +17,18 @@
 //! becomes silently wrong output while an unknown one is a loud failure at the
 //! time of reading.
 pub use alu::{Alu, ScalarOperation, VectorOperation};
+pub use dispatch::translate;
 pub use fetch::{Fetch, FetchKind, Format, Packed};
 pub use find::{Found, reads_as_shader, scan};
 pub use flow::{Flow, FlowOperation};
-pub use translate::{Refused, Stream, Translated, translate};
+pub use translate::{Refused, Stream, Translated};
 
 mod alu;
 mod arithmetic;
+mod bindings;
+mod constants;
+mod dispatch;
+mod edges;
 mod export;
 mod fetch;
 mod fetching;
@@ -31,12 +36,15 @@ mod find;
 mod flow;
 mod layout;
 pub mod opcodes;
+mod operands;
+mod plan;
 mod preamble;
 #[allow(unsafe_code)]
 pub mod running;
 pub mod single_lane;
 mod spirv;
 mod translate;
+mod values;
 
 /// How many words one control flow instruction takes, counted in halves because
 /// two of them share three words.

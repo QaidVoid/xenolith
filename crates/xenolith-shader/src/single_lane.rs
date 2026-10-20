@@ -8,11 +8,12 @@
 //! comparison said so, and a module written as one straight run says that by
 //! choosing between the answer and what was already there.
 
-use crate::arithmetic::{chosen, extract, lane_by_lane, read, what_is_exported};
+use crate::constants::POSITION;
 use crate::opcodes;
+use crate::operands::read;
 use crate::preamble::Named;
-use crate::preamble::POSITION;
 use crate::spirv::Module;
+use crate::values::{chosen, extract, lane_by_lane, what_is_exported};
 use crate::{Alu, Kind, Refused, ScalarOperation};
 
 /// Returns what one of the operations that set the predicate works out, and
