@@ -208,10 +208,23 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 #define XENOLITH_STATUS_NOT_FOUND 0xC0000225u
 
 /* Guest memory is handed out a grain at a time, so a size becomes a whole
- * number of grains, and a size of nothing still takes one. */
+ * number of grains, and a size of nothing still takes one.
+ *
+ * A size close to the top of what a word holds rounds up past it, so the
+ * rounding is worked out in a wider number and reported as nought where the
+ * answer does not fit. Rounded in a word instead, a request for nearly four
+ * gigabytes came back as one grain: the addition wrapped to nought, and the
+ * caller was handed a sixteenth of a megabyte where it asked for all of memory.
+ */
 static uint32_t whole_grains(uint32_t size) {
-    uint32_t grains = (size + XENOLITH_HEAP_GRAIN - 1) / XENOLITH_HEAP_GRAIN;
-    return grains == 0 ? XENOLITH_HEAP_GRAIN : grains * XENOLITH_HEAP_GRAIN;
+    uint64_t grains = ((uint64_t)size + XENOLITH_HEAP_GRAIN - 1) / XENOLITH_HEAP_GRAIN;
+    if (grains == 0) {
+        return XENOLITH_HEAP_GRAIN;
+    }
+    if (grains > UINT32_MAX / XENOLITH_HEAP_GRAIN) {
+        return 0;
+    }
+    return (uint32_t)(grains * XENOLITH_HEAP_GRAIN);
 }
 
 /* Where guest memory is handed out from.
@@ -259,12 +272,21 @@ static uint32_t take_guest_memory(uint32_t size, uint32_t alignment) {
 static void allocate_virtual_memory(xenolith_context *ctx, uint8_t *base) {
     uint32_t address_at = (uint32_t)ctx->r[3];
     uint32_t size_at = (uint32_t)ctx->r[4];
+    uint32_t alignment = (uint32_t)ctx->r[8];
     uint32_t wanted = address_at ? xenolith_load32(base, address_at) : 0;
     uint32_t size = size_at ? xenolith_load32(base, size_at) : 0;
 
+    /* A size that cannot be rounded into a word is refused rather than handed
+     * back as the nought it rounds to, which a title would take for an answer. */
+    uint32_t rounded = whole_grains(size);
+    if (rounded == 0) {
+        ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+        return;
+    }
+
     uint32_t at = wanted & ~(XENOLITH_HEAP_GRAIN - 1);
     if (at == 0) {
-        at = take_guest_memory(size, XENOLITH_HEAP_GRAIN);
+        at = take_guest_memory(size, alignment);
         if (at == 0) {
             ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
             return;
@@ -275,7 +297,7 @@ static void allocate_virtual_memory(xenolith_context *ctx, uint8_t *base) {
         xenolith_store32(base, address_at, at);
     }
     if (size_at) {
-        xenolith_store32(base, size_at, whole_grains(size));
+        xenolith_store32(base, size_at, rounded);
     }
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }

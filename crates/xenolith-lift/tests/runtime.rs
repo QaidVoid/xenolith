@@ -199,7 +199,12 @@ fn runs(name: &str, program: &str) -> Result<(), String> {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
 
+    /* Run where the program was built rather than where the tests were
+     * started. Several of these write an image file of their own beside
+     * themselves, and sharing one directory would have them writing over each
+     * other's. */
     let ran = Command::new(&program_path)
+        .current_dir(&directory)
         .output()
         .map_err(|error| format!("running the check: {error}"))?;
     if ran.status.success() {
@@ -371,5 +376,163 @@ int main(void) {
 "#;
     if let Err(complaint) = runs("top_of_span", program) {
         panic!("a read at the top of the span did not land:\n{complaint}");
+    }
+}
+
+/// Guest memory is handed out in distinct grains, aligned as asked.
+///
+/// Two allocations that overlap would put one title structure on top of another,
+/// which is the kind of fault that shows up as corruption far from the call.
+/// The alignment is what a title asks for and gets told it got, so it has to be
+/// the alignment it asked for.
+#[test]
+fn two_allocations_do_not_overlap_and_are_aligned() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Asks for `size` bytes at `alignment`, the way a title asks. */
+static int allocate(xenolith_context *ctx, uint8_t *base, uint32_t size,
+                    uint32_t alignment, uint32_t *got_at, uint32_t *got_size) {
+    uint32_t address = 0;
+    uint32_t size_slot = size;
+    ctx->r[3] = 0;          /* nowhere in particular */
+    ctx->r[4] = 0;
+    xenolith_store32(base, 0x100, 0);
+    xenolith_store32(base, 0x104, size);
+    ctx->r[3] = 0x100;
+    ctx->r[4] = 0x104;
+    ctx->r[5] = 0;
+    ctx->r[6] = 0;
+    ctx->r[7] = 0;
+    ctx->r[8] = alignment;
+    (void)address;
+    (void)size_slot;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
+    if (ctx->r[3] != 0u) {
+        return 1;
+    }
+    *got_at = xenolith_load32(base, 0x100);
+    *got_size = xenolith_load32(base, 0x104);
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    uint32_t first_at = 0, first_size = 0;
+    uint32_t second_at = 0, second_size = 0;
+    if (allocate(&ctx, base, 0x3000, 0x10000, &first_at, &first_size) != 0) {
+        fprintf(stderr, "the first allocation failed\n");
+        return 3;
+    }
+    if (allocate(&ctx, base, 0x3000, 0x20000, &second_at, &second_size) != 0) {
+        fprintf(stderr, "the second allocation failed\n");
+        return 4;
+    }
+
+    if (first_at == 0 || second_at == 0) {
+        fprintf(stderr, "an allocation came back as nothing\n");
+        return 5;
+    }
+    if (first_at % 0x10000u != 0 || second_at % 0x20000u != 0) {
+        fprintf(stderr, "an allocation was not aligned as asked: %#x at %u, %#x at %u\n",
+                first_at, (unsigned)(first_at % 0x10000u),
+                second_at, (unsigned)(second_at % 0x20000u));
+        return 6;
+    }
+    /* A size is rounded up to whole grains, and nothing of it is smaller than
+     * what was asked for. */
+    if (first_size < 0x3000 || second_size < 0x3000) {
+        fprintf(stderr, "a size came back smaller than it was asked for\n");
+        return 7;
+    }
+    if (second_at < first_at + first_size) {
+        fprintf(stderr, "the two allocations overlap: %#x+%u and %#x\n",
+                first_at, (unsigned)first_size, second_at);
+        return 8;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("two_allocations", program) {
+        panic!("guest memory was not handed out as asked:\n{complaint}");
+    }
+}
+
+/// A size that cannot be rounded into a word is refused rather than answered.
+///
+/// A request close to the top of what a word holds rounds past it. Rounded in a
+/// word, the addition wraps to nought and the request comes back as one grain,
+/// so the caller is handed a sixteenth of a megabyte where it asked for nearly
+/// four gigabytes and is told it succeeded.
+#[test]
+fn an_unroundable_size_is_refused() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    xenolith_store32(base, 0x100, 0);
+    xenolith_store32(base, 0x104, 0xffffffffu);
+    ctx.r[3] = 0x100;
+    ctx.r[4] = 0x104;
+    ctx.r[8] = 0x10000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
+
+    /* No memory left is what the kernel says when it cannot do what was asked,
+     * and it is the only honest answer here: the size asked for does not fit. */
+    if (ctx.r[3] != 0xC0000017u) {
+        fprintf(stderr, "a size of four gigabytes came back as %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("unroundable", program) {
+        panic!("an unroundable size was answered rather than refused:\n{complaint}");
     }
 }
