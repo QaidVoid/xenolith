@@ -78,6 +78,21 @@ impl Origin {
     }
 }
 
+/// Every origin a function can have.
+///
+/// The report prints one line per entry, and a test asserts they sum to the
+/// function count, so an origin added without a line here fails rather than
+/// going unmentioned.
+pub const ORIGINS: &[Origin] = &[
+    Origin::EntryPoint,
+    Origin::Root,
+    Origin::Called,
+    Origin::Scanned,
+    Origin::Recorded,
+    Origin::Tabled,
+    Origin::Surrounded,
+];
+
 /// Where control goes when it leaves a block.
 ///
 /// Edges describe movement inside one function. A transfer that leaves it, by
@@ -1410,6 +1425,30 @@ mod tests {
     /// A word of flags, which is what the second of each pair holds. It is not
     /// an address of anything that decodes.
     const FLAGS: u32 = 0x4000_1204;
+
+    /// Every function has exactly one origin, so the counts the report prints
+    /// add up to the function count. An origin added without a line in the
+    /// report would otherwise go unmentioned and the numbers would not agree.
+    #[test]
+    fn origins_sum() {
+        let words = vec![
+            encode::blr(),
+            0,
+            encode::addi(3, 4, 1),
+            encode::addi(3, 3, 1),
+            encode::blr(),
+        ];
+        let program = analyze(&image(&words), &[]);
+
+        let counted: usize = ORIGINS.iter().map(|one| program.count_from(*one)).sum();
+
+        assert_eq!(counted, program.function_count());
+        assert_eq!(
+            ORIGINS.len(),
+            7,
+            "the report prints one line per origin, so this is the number of lines"
+        );
+    }
 
     /// Builds the pairs an image's record of its functions is made of.
     fn record_of(addresses: &[u32]) -> Vec<u32> {

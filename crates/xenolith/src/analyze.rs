@@ -12,7 +12,7 @@
 use clap::Parser;
 use miette::{Result, miette};
 use xenolith_analysis::{
-    Function, JumpTable, JumpTables, Origin, Program, analyze, detect, recover,
+    Function, JumpTable, JumpTables, ORIGINS, Origin, Program, analyze, detect, recover,
 };
 use xenolith_xex::Image;
 
@@ -65,34 +65,18 @@ fn report_discovery(program: &Program, words: u64) {
     let tail_calls: usize = program.functions().map(|f| f.tail_calls.len()).sum();
 
     println!("functions          {:>10}", program.function_count());
-    println!(
-        "  entry point      {:>10}",
-        program.count_from(Origin::EntryPoint)
-    );
-    println!(
-        "  exported         {:>10}",
-        program.count_from(Origin::Root)
-    );
-    println!(
-        "  called           {:>10}",
-        program.count_from(Origin::Called)
-    );
-    println!(
-        "  found by shape   {:>10}",
-        program.count_from(Origin::Scanned)
-    );
-    println!(
-        "  in the record    {:>10}",
-        program.count_from(Origin::Recorded)
-    );
-    println!(
-        "  named by a table {:>10}",
-        program.count_from(Origin::Tabled)
-    );
-    println!(
-        "  by surroundings  {:>10}",
-        program.count_from(Origin::Surrounded)
-    );
+    for (origin, label) in [
+        (Origin::EntryPoint, "entry point"),
+        (Origin::Root, "exported"),
+        (Origin::Called, "called"),
+        (Origin::Scanned, "found by shape"),
+        (Origin::Recorded, "in the record"),
+        (Origin::Tabled, "named by a table"),
+        (Origin::Surrounded, "by surroundings"),
+    ] {
+        debug_assert!(ORIGINS.contains(&origin));
+        println!("  {label:<17}{:>10}", program.count_from(origin));
+    }
     println!("blocks             {blocks:>10}");
     println!("edges              {edges:>10}");
     println!("tail calls         {tail_calls:>10}");

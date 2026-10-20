@@ -79,6 +79,11 @@ The report gives the function count, how each was found, what proportion of
 executable words a function claims, and how many indirect branches were resolved
 against how many were not.
 
+The function count is followed by one line per origin, and they sum to it:
+`entry point`, `exported`, `called`, `found by shape`, `in the record`,
+`named by a table`, and `by surroundings`. The first three are functions
+something proves; the rest are functions the image or a shape suggests.
+
 ```sh
 xenolith analyze default.xex
 xenolith analyze default.xex --tables
