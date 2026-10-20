@@ -26,6 +26,7 @@ mod alu;
 mod fetch;
 mod find;
 mod flow;
+pub mod opcodes;
 #[allow(unsafe_code)]
 pub mod running;
 pub mod spirv;

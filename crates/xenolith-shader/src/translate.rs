@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::opcodes;
+
 use crate::{
     ALU_WORDS, Alu, Fetch, FetchKind, Flow, FlowOperation, Format, Kind, ScalarOperation,
     VectorOperation, spirv::Module,
@@ -418,14 +420,17 @@ fn the_values(
      * between two things needs both, and a constant cannot be written inside
      * the function that uses it. */
     let boolean = module.name();
-    module.add(20, &[boolean.number()]);
+    module.add(opcodes::TYPE_BOOL, &[boolean.number()]);
     let four_bools = module.name();
-    module.add(23, &[four_bools.number(), boolean.number(), 4]);
+    module.add(
+        opcodes::TYPE_VECTOR,
+        &[four_bools.number(), boolean.number(), 4],
+    );
     let zero = module.name();
-    module.add(43, &[float.number(), zero.number(), 0]);
+    module.add(opcodes::CONSTANT, &[float.number(), zero.number(), 0]);
     let nothing = module.name();
     module.add(
-        44,
+        opcodes::CONSTANT_COMPOSITE,
         &[
             four.number(),
             nothing.number(),
@@ -437,10 +442,13 @@ fn the_values(
     );
 
     let one = module.name();
-    module.add(43, &[float.number(), one.number(), 0x3f80_0000]);
+    module.add(
+        opcodes::CONSTANT,
+        &[float.number(), one.number(), 0x3f80_0000],
+    );
     let all_ones = module.name();
     module.add(
-        44,
+        opcodes::CONSTANT_COMPOSITE,
         &[
             four.number(),
             all_ones.number(),
@@ -455,9 +463,12 @@ fn the_values(
      * counter writes, and a predicate that does not hold, which is what one
      * starts as. */
     let biggest = module.name();
-    module.add(43, &[float.number(), biggest.number(), 0x7f7f_ffff]);
+    module.add(
+        opcodes::CONSTANT,
+        &[float.number(), biggest.number(), 0x7f7f_ffff],
+    );
     let never = module.name();
-    module.add(42, &[boolean.number(), never.number()]);
+    module.add(opcodes::CONSTANT_FALSE, &[boolean.number(), never.number()]);
 
     /* Every number a register or a constant is reached by, named before the
      * function begins. There are more constants than registers, so the count is
@@ -467,7 +478,7 @@ fn the_values(
     let mut indices = Vec::with_capacity((ALL_THE_CONSTANTS + BESIDE_THE_CONSTANTS) as usize);
     for which in 0..ALL_THE_CONSTANTS + BESIDE_THE_CONSTANTS {
         let index = module.name();
-        module.add(43, &[count.number(), index.number(), which]);
+        module.add(opcodes::CONSTANT, &[count.number(), index.number(), which]);
         indices.push(index);
     }
 
@@ -528,7 +539,7 @@ fn the_outputs(
     for which in 0..CARRIED {
         let one = module.name();
         let goes = if matches!(kind, Kind::Vertex) { 3 } else { 1 };
-        module.add(59, &[to_out.number(), one.number(), goes]);
+        module.add(opcodes::VARIABLE, &[to_out.number(), one.number(), goes]);
         module.annotate(71, &[one.number(), 30, which]);
         carried.push(one);
     }
@@ -573,8 +584,11 @@ fn what_a_shader_starts_with(
      * says it is one a host will not draw points with at all. */
     if let Some(one) = how_big {
         let across = module.name();
-        module.add(81, &[float.number(), across.number(), all_ones.number(), 0]);
-        module.add(62, &[one.number(), across.number()]);
+        module.add(
+            opcodes::COMPOSITE_EXTRACT,
+            &[float.number(), across.number(), all_ones.number(), 0],
+        );
+        module.add(opcodes::STORE, &[one.number(), across.number()]);
     }
 
     /* What was carried here, put in the registers a pixel shader finds it in. */
@@ -584,10 +598,10 @@ fn what_a_shader_starts_with(
                 break;
             };
             let read = module.name();
-            module.add(61, &[four.number(), read.number(), one.number()]);
+            module.add(opcodes::LOAD, &[four.number(), read.number(), one.number()]);
             let where_to = module.name();
             module.add(
-                65,
+                opcodes::ACCESS_CHAIN,
                 &[
                     to_one.number(),
                     where_to.number(),
@@ -595,19 +609,25 @@ fn what_a_shader_starts_with(
                     index.number(),
                 ],
             );
-            module.add(62, &[where_to.number(), read.number()]);
+            module.add(opcodes::STORE, &[where_to.number(), read.number()]);
         }
     }
 
     /* The number of the vertex, put where the hardware puts it. */
     if let Some((one, counting)) = which_vertex {
         let read = module.name();
-        module.add(61, &[counting.number(), read.number(), one.number()]);
+        module.add(
+            opcodes::LOAD,
+            &[counting.number(), read.number(), one.number()],
+        );
         let as_a_number = module.name();
-        module.add(111, &[float.number(), as_a_number.number(), read.number()]);
+        module.add(
+            opcodes::CONVERT_SIGNED_TO_FLOAT,
+            &[float.number(), as_a_number.number(), read.number()],
+        );
         let together = module.name();
         module.add(
-            80,
+            opcodes::COMPOSITE_CONSTRUCT,
             &[
                 four.number(),
                 together.number(),
@@ -622,7 +642,7 @@ fn what_a_shader_starts_with(
         };
         let where_to = module.name();
         module.add(
-            65,
+            opcodes::ACCESS_CHAIN,
             &[
                 to_one.number(),
                 where_to.number(),
@@ -630,7 +650,7 @@ fn what_a_shader_starts_with(
                 first.number(),
             ],
         );
-        module.add(62, &[where_to.number(), together.number()]);
+        module.add(opcodes::STORE, &[where_to.number(), together.number()]);
     }
 }
 
@@ -670,16 +690,28 @@ fn what_a_fetch_reads(
      * this decides: the runtime puts what a fetch names into it and says where,
      * and the first words of it are those wheres. */
     let run_of_words = module.name();
-    module.add(29, &[run_of_words.number(), count.number()]);
+    module.add(
+        opcodes::TYPE_RUNTIME_ARRAY,
+        &[run_of_words.number(), count.number()],
+    );
     module.annotate(71, &[run_of_words.number(), 6, 4]);
     let holding = module.name();
-    module.add(30, &[holding.number(), run_of_words.number()]);
+    module.add(
+        opcodes::TYPE_STRUCT,
+        &[holding.number(), run_of_words.number()],
+    );
     module.annotate(71, &[holding.number(), 2]);
     module.annotate(72, &[holding.number(), 0, 35, 0]);
     let to_holding = module.name();
-    module.add(32, &[to_holding.number(), 12, holding.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_holding.number(), 12, holding.number()],
+    );
     let memory = module.name();
-    module.add(59, &[to_holding.number(), memory.number(), 12]);
+    module.add(
+        opcodes::VARIABLE,
+        &[to_holding.number(), memory.number(), 12],
+    );
     module.annotate(71, &[memory.number(), 34, 0]);
     module.annotate(71, &[memory.number(), 33, 1]);
     /* Read and never written, which has to be said rather than left to be seen:
@@ -689,7 +721,10 @@ fn what_a_fetch_reads(
     module.annotate(71, &[memory.number(), 24]);
     module.annotate(72, &[holding.number(), 0, 24]);
     let to_memory = module.name();
-    module.add(32, &[to_memory.number(), 12, count.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_memory.number(), 12, count.number()],
+    );
 
     /* Every other number a fetch works its address out of, named here because a
      * number cannot be written inside the function that uses it. */
@@ -697,7 +732,7 @@ fn what_a_fetch_reads(
     for &which in wanted {
         if let std::collections::btree_map::Entry::Vacant(slot) = numbers.entry(which) {
             let named = module.name();
-            module.add(43, &[count.number(), named.number(), which]);
+            module.add(opcodes::CONSTANT, &[count.number(), named.number(), which]);
             slot.insert(named);
         }
     }
@@ -717,7 +752,12 @@ fn what_the_module_is(
     let [void, signature, float, four] = *types;
 
     module.add_early(17, &[1]);
-    module.add_early_with_text(11, &[extended.number()], "GLSL.std.450", &[]);
+    module.add_early_with_text(
+        opcodes::EXT_INST_IMPORT,
+        &[extended.number()],
+        opcodes::GLSL_STANDARD,
+        &[],
+    );
     module.add_early(14, &[0, 1]);
 
     let model = match kind {
@@ -735,10 +775,10 @@ fn what_the_module_is(
         Kind::Pixel => module.annotate(71, &[out.number(), 30, 0]),
     }
 
-    module.add(19, &[void.number()]);
-    module.add(33, &[signature.number(), void.number()]);
-    module.add(22, &[float.number(), 32]);
-    module.add(23, &[four.number(), float.number(), 4]);
+    module.add(opcodes::TYPE_VOID, &[void.number()]);
+    module.add(opcodes::TYPE_FUNCTION, &[signature.number(), void.number()]);
+    module.add(opcodes::TYPE_FLOAT, &[float.number(), 32]);
+    module.add(opcodes::TYPE_VECTOR, &[four.number(), float.number(), 4]);
 
     model
 }
@@ -751,15 +791,27 @@ fn where_a_shader_works(
 ) -> (crate::spirv::Name, crate::spirv::Name) {
     let [count, four, float, bank, to_bank, to_out, out] = *names;
     let length = module.name();
-    module.add(43, &[count.number(), length.number(), REGISTERS]);
-    module.add(28, &[bank.number(), four.number(), length.number()]);
-    module.add(32, &[to_bank.number(), 7, bank.number()]);
-    module.add(32, &[to_out.number(), 3, four.number()]);
+    module.add(
+        opcodes::CONSTANT,
+        &[count.number(), length.number(), REGISTERS],
+    );
+    module.add(
+        opcodes::TYPE_ARRAY,
+        &[bank.number(), four.number(), length.number()],
+    );
+    module.add(opcodes::TYPE_POINTER, &[to_bank.number(), 7, bank.number()]);
+    module.add(opcodes::TYPE_POINTER, &[to_out.number(), 3, four.number()]);
     let to_carried = module.name();
-    module.add(32, &[to_carried.number(), 1, four.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_carried.number(), 1, four.number()],
+    );
     let to_size = module.name();
-    module.add(32, &[to_size.number(), 3, float.number()]);
-    module.add(59, &[to_out.number(), out.number(), 3]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_size.number(), 3, float.number()],
+    );
+    module.add(opcodes::VARIABLE, &[to_out.number(), out.number(), 3]);
 
     /* Which vertex this is.
      *
@@ -797,18 +849,21 @@ fn what_a_shader_says(
      * size this says until a title is seen to ask for another. */
     let how_big = matches!(kind, Kind::Vertex).then(|| {
         let one = module.name();
-        module.add(59, &[to_size.number(), one.number(), 3]);
+        module.add(opcodes::VARIABLE, &[to_size.number(), one.number(), 3]);
         module.annotate(71, &[one.number(), 11, 1]);
         one
     });
 
     let which_vertex = matches!(kind, Kind::Vertex).then(|| {
         let counting = module.name();
-        module.add(21, &[counting.number(), 32, 1]);
+        module.add(opcodes::TYPE_INT, &[counting.number(), 32, 1]);
         let to_counting = module.name();
-        module.add(32, &[to_counting.number(), 1, counting.number()]);
+        module.add(
+            opcodes::TYPE_POINTER,
+            &[to_counting.number(), 1, counting.number()],
+        );
         let one = module.name();
-        module.add(59, &[to_counting.number(), one.number(), 1]);
+        module.add(opcodes::VARIABLE, &[to_counting.number(), one.number(), 1]);
         module.annotate(71, &[one.number(), 11, 42]);
         (one, counting)
     });
@@ -850,7 +905,7 @@ fn what_a_shader_is_handed(
      * shader looks for it. */
     let bank_of_constants = module.name();
     module.add(
-        43,
+        opcodes::CONSTANT,
         &[
             count.number(),
             bank_of_constants.number(),
@@ -859,7 +914,7 @@ fn what_a_shader_is_handed(
     );
     let constant_array = module.name();
     module.add(
-        28,
+        opcodes::TYPE_ARRAY,
         &[
             constant_array.number(),
             four.number(),
@@ -868,17 +923,29 @@ fn what_a_shader_is_handed(
     );
     module.annotate(71, &[constant_array.number(), 6, 16]);
     let block = module.name();
-    module.add(30, &[block.number(), constant_array.number()]);
+    module.add(
+        opcodes::TYPE_STRUCT,
+        &[block.number(), constant_array.number()],
+    );
     module.annotate(71, &[block.number(), 2]);
     module.annotate(72, &[block.number(), 0, 35, 0]);
     let to_block = module.name();
-    module.add(32, &[to_block.number(), 2, block.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_block.number(), 2, block.number()],
+    );
     let constants = module.name();
-    module.add(59, &[to_block.number(), constants.number(), 2]);
+    module.add(
+        opcodes::VARIABLE,
+        &[to_block.number(), constants.number(), 2],
+    );
     module.annotate(71, &[constants.number(), 34, 0]);
     module.annotate(71, &[constants.number(), 33, 0]);
     let to_constant = module.name();
-    module.add(32, &[to_constant.number(), 2, four.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_constant.number(), 2, four.number()],
+    );
 
     (constants, to_constant)
 }
@@ -900,26 +967,41 @@ fn what_a_shader_looks_at(
     count: crate::spirv::Name,
 ) -> (crate::spirv::Name, crate::spirv::Name, crate::spirv::Name) {
     let picture = module.name();
-    module.add(25, &[picture.number(), float.number(), 1, 0, 0, 0, 1, 0]);
+    module.add(
+        opcodes::TYPE_IMAGE,
+        &[picture.number(), float.number(), 1, 0, 0, 0, 1, 0],
+    );
     let read_one = module.name();
-    module.add(27, &[read_one.number(), picture.number()]);
+    module.add(
+        opcodes::TYPE_SAMPLED_IMAGE,
+        &[read_one.number(), picture.number()],
+    );
 
     let how_many = module.name();
-    module.add(43, &[count.number(), how_many.number(), TEXTURES]);
+    module.add(
+        opcodes::CONSTANT,
+        &[count.number(), how_many.number(), TEXTURES],
+    );
     let all_of_them = module.name();
     module.add(
-        28,
+        opcodes::TYPE_ARRAY,
         &[all_of_them.number(), read_one.number(), how_many.number()],
     );
     let to_all = module.name();
-    module.add(32, &[to_all.number(), 0, all_of_them.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_all.number(), 0, all_of_them.number()],
+    );
     let looked_at = module.name();
-    module.add(59, &[to_all.number(), looked_at.number(), 0]);
+    module.add(opcodes::VARIABLE, &[to_all.number(), looked_at.number(), 0]);
     module.annotate(71, &[looked_at.number(), 34, 0]);
     module.annotate(71, &[looked_at.number(), 33, 2]);
 
     let to_one = module.name();
-    module.add(32, &[to_one.number(), 0, read_one.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_one.number(), 0, read_one.number()],
+    );
 
     (looked_at, to_one, read_one)
 }
@@ -966,10 +1048,10 @@ fn preamble(
     let model = what_the_module_is(module, kind, extended, out, &[void, signature, float, four]);
 
     let two = module.name();
-    module.add(23, &[two.number(), float.number(), 2]);
+    module.add(opcodes::TYPE_VECTOR, &[two.number(), float.number(), 2]);
     let three = module.name();
-    module.add(23, &[three.number(), float.number(), 3]);
-    module.add(21, &[count.number(), 32, 0]);
+    module.add(opcodes::TYPE_VECTOR, &[three.number(), float.number(), 3]);
+    module.add(opcodes::TYPE_INT, &[count.number(), 32, 0]);
 
     let (to_carried, to_size) =
         where_a_shader_works(module, &[count, four, float, bank, to_bank, to_out, out]);
@@ -982,12 +1064,12 @@ fn preamble(
     );
 
     let to_one = module.name();
-    module.add(32, &[to_one.number(), 7, four.number()]);
+    module.add(opcodes::TYPE_POINTER, &[to_one.number(), 7, four.number()]);
 
     let (constants, to_constant) = what_a_shader_is_handed(module, count, four);
 
     let zero_index = module.name();
-    module.add(43, &[count.number(), zero_index.number(), 0]);
+    module.add(opcodes::CONSTANT, &[count.number(), zero_index.number(), 0]);
 
     let (memory, to_memory, numbers) = what_a_fetch_reads(module, count, wanted);
 
@@ -1013,23 +1095,32 @@ fn preamble(
      * make anything at all of, and a shader reading one before writing it is
      * ordinary rather than a mistake. */
     let empty = module.name();
-    module.add(46, &[bank.number(), empty.number()]);
+    module.add(opcodes::CONSTANT_NULL, &[bank.number(), empty.number()]);
 
     /* Somewhere to keep what carries between stretches that are not run one
      * after another, made here because a place to keep something belongs at
      * the front of a function and nowhere else. */
     let to_whole = module.name();
-    module.add(32, &[to_whole.number(), 7, count.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_whole.number(), 7, count.number()],
+    );
     let to_boolean = module.name();
-    module.add(32, &[to_boolean.number(), 7, boolean.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_boolean.number(), 7, boolean.number()],
+    );
     let to_float = module.name();
-    module.add(32, &[to_float.number(), 7, float.number()]);
+    module.add(
+        opcodes::TYPE_POINTER,
+        &[to_float.number(), 7, float.number()],
+    );
     let no_number = module.name();
-    module.add(43, &[float.number(), no_number.number(), 0]);
+    module.add(opcodes::CONSTANT, &[float.number(), no_number.number(), 0]);
     /* The lowest eight bits of a word, which is how many times round a loop
      * goes out of the count holding it. */
     let a_byte = module.name();
-    module.add(43, &[count.number(), a_byte.number(), 255]);
+    module.add(opcodes::CONSTANT, &[count.number(), a_byte.number(), 255]);
     /* One number for each stretch, and one past the last to mean the shader is
      * done, so that where it is up to can be written. */
     /* Small whole numbers, for naming a bit of a word and a place among the
@@ -1037,7 +1128,7 @@ fn preamble(
     let mut whole_numbers = Vec::new();
     for at in 0..=32u32 {
         let one = module.name();
-        module.add(43, &[count.number(), one.number(), at]);
+        module.add(opcodes::CONSTANT, &[count.number(), one.number(), at]);
         whole_numbers.push(one);
     }
     /* Filled by the loop above for every number from nought to thirty two. */
@@ -1046,7 +1137,7 @@ fn preamble(
     for at in 0..=stretches {
         let one = module.name();
         let at = u32::try_from(at).unwrap_or(u32::MAX);
-        module.add(43, &[count.number(), one.number(), at]);
+        module.add(opcodes::CONSTANT, &[count.number(), one.number(), at]);
         which_stretch.push(one);
     }
     let where_it_is_up_to = module.name();
@@ -1065,24 +1156,33 @@ fn preamble(
     let cutoff = match kind {
         Kind::Pixel => {
             let which = module.name();
-            module.add(50, &[count.number(), which.number(), DRAWN_WHATEVER_IT_IS]);
+            module.add(
+                opcodes::SPEC_CONSTANT,
+                &[count.number(), which.number(), DRAWN_WHATEVER_IT_IS],
+            );
             module.annotate(71, &[which.number(), SAID_WHEN_BUILT, WHICH_TEST]);
             let against = module.name();
-            module.add(50, &[float.number(), against.number(), 0]);
+            module.add(
+                opcodes::SPEC_CONSTANT,
+                &[float.number(), against.number(), 0],
+            );
             module.annotate(71, &[against.number(), SAID_WHEN_BUILT, WHAT_IT_IS_AGAINST]);
             Some((which, against))
         }
         Kind::Vertex => None,
     };
 
-    module.add(54, &[void.number(), entry.number(), 0, signature.number()]);
-    module.add(248, &[body.number()]);
     module.add(
-        59,
+        opcodes::FUNCTION,
+        &[void.number(), entry.number(), 0, signature.number()],
+    );
+    module.add(opcodes::LABEL, &[body.number()]);
+    module.add(
+        opcodes::VARIABLE,
         &[to_bank.number(), registers.number(), 7, empty.number()],
     );
     module.add(
-        59,
+        opcodes::VARIABLE,
         &[
             to_whole.number(),
             where_it_is_up_to.number(),
@@ -1091,7 +1191,7 @@ fn preamble(
         ],
     );
     module.add(
-        59,
+        opcodes::VARIABLE,
         &[
             to_whole.number(),
             times_round.number(),
@@ -1100,7 +1200,7 @@ fn preamble(
         ],
     );
     module.add(
-        59,
+        opcodes::VARIABLE,
         &[
             to_boolean.number(),
             predicate_kept.number(),
@@ -1109,7 +1209,7 @@ fn preamble(
         ],
     );
     module.add(
-        59,
+        opcodes::VARIABLE,
         &[
             to_float.number(),
             previous_kept.number(),
@@ -1118,7 +1218,7 @@ fn preamble(
         ],
     );
     module.add(
-        59,
+        opcodes::VARIABLE,
         &[to_one.number(), exported_kept.number(), 7, nothing.number()],
     );
 
@@ -1192,60 +1292,66 @@ fn plainly(
     let produced = module.name();
     match what {
         VectorOperation::Add => {
-            module.add(129, &[named.four.number(), produced.number(), left, right]);
+            module.add(
+                opcodes::FLOAT_ADD,
+                &[named.four.number(), produced.number(), left, right],
+            );
         }
         VectorOperation::Multiply => {
-            module.add(133, &[named.four.number(), produced.number(), left, right]);
+            module.add(
+                opcodes::FLOAT_MULTIPLY,
+                &[named.four.number(), produced.number(), left, right],
+            );
         }
         VectorOperation::Max => module.add(
-            12,
+            opcodes::EXT_INST,
             &[
                 named.four.number(),
                 produced.number(),
                 named.extended.number(),
-                40,
+                opcodes::GLSL_MAXIMUM,
                 left,
                 right,
             ],
         ),
         VectorOperation::Min => module.add(
-            12,
+            opcodes::EXT_INST,
             &[
                 named.four.number(),
                 produced.number(),
                 named.extended.number(),
-                37,
+                opcodes::GLSL_MINIMUM,
                 left,
                 right,
             ],
         ),
         VectorOperation::Floor => module.add(
-            12,
+            opcodes::EXT_INST,
             &[
                 named.four.number(),
                 produced.number(),
                 named.extended.number(),
-                8,
+                opcodes::GLSL_FLOOR,
                 left,
             ],
         ),
         VectorOperation::Fraction => module.add(
-            12,
+            opcodes::EXT_INST,
             &[
                 named.four.number(),
                 produced.number(),
                 named.extended.number(),
-                10,
+                opcodes::GLSL_FRACT,
                 left,
             ],
         ),
         VectorOperation::Truncate => module.add(
-            12,
+            opcodes::EXT_INST,
             &[
                 named.four.number(),
                 produced.number(),
                 named.extended.number(),
-                3,
+                opcodes::GLSL_TRUNC,
                 left,
             ],
         ),
@@ -1266,18 +1372,18 @@ fn dot_two_add(
 ) {
     let left_pair = module.name();
     module.add(
-        79,
+        opcodes::VECTOR_SHUFFLE,
         &[named.two.number(), left_pair.number(), left, left, 0, 1],
     );
     let right_pair = module.name();
     module.add(
-        79,
+        opcodes::VECTOR_SHUFFLE,
         &[named.two.number(), right_pair.number(), right, right, 0, 1],
     );
 
     let dotted = module.name();
     module.add(
-        148,
+        opcodes::DOT,
         &[
             named.float.number(),
             dotted.number(),
@@ -1287,10 +1393,13 @@ fn dot_two_add(
     );
 
     let added_to = module.name();
-    module.add(81, &[named.float.number(), added_to.number(), last, 0]);
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), added_to.number(), last, 0],
+    );
     let summed = module.name();
     module.add(
-        129,
+        opcodes::FLOAT_ADD,
         &[
             named.float.number(),
             summed.number(),
@@ -1300,7 +1409,7 @@ fn dot_two_add(
     );
 
     module.add(
-        80,
+        opcodes::COMPOSITE_CONSTRUCT,
         &[
             named.four.number(),
             produced.number(),
@@ -1324,7 +1433,7 @@ fn dot_three(
 ) {
     let left_three = module.name();
     module.add(
-        79,
+        opcodes::VECTOR_SHUFFLE,
         &[
             named.three.number(),
             left_three.number(),
@@ -1337,7 +1446,7 @@ fn dot_three(
     );
     let right_three = module.name();
     module.add(
-        79,
+        opcodes::VECTOR_SHUFFLE,
         &[
             named.three.number(),
             right_three.number(),
@@ -1351,7 +1460,7 @@ fn dot_three(
 
     let dotted = module.name();
     module.add(
-        148,
+        opcodes::DOT,
         &[
             named.float.number(),
             dotted.number(),
@@ -1361,7 +1470,7 @@ fn dot_three(
     );
 
     module.add(
-        80,
+        opcodes::COMPOSITE_CONSTRUCT,
         &[
             named.four.number(),
             produced.number(),
@@ -1398,22 +1507,25 @@ fn throw_the_pixel_away(
 
     let asked = module.name();
     module.add(
-        180,
+        opcodes::FLOAT_ORDERED_EQUAL,
         &[named.four_bools.number(), asked.number(), left, right],
     );
     let any = module.name();
-    module.add(154, &[named.boolean.number(), any.number(), asked.number()]);
+    module.add(
+        opcodes::ANY,
+        &[named.boolean.number(), any.number(), asked.number()],
+    );
 
     let throwing = module.name();
     let carrying_on = module.name();
-    module.add(247, &[carrying_on.number(), 0]);
+    module.add(opcodes::SELECTION_MERGE, &[carrying_on.number(), 0]);
     module.add(
-        250,
+        opcodes::BRANCH_CONDITIONAL,
         &[any.number(), throwing.number(), carrying_on.number()],
     );
-    module.add(248, &[throwing.number()]);
-    module.add(252, &[]);
-    module.add(248, &[carrying_on.number()]);
+    module.add(opcodes::LABEL, &[throwing.number()]);
+    module.add(opcodes::KILL, &[]);
+    module.add(opcodes::LABEL, &[carrying_on.number()]);
     Ok(())
 }
 
@@ -1456,12 +1568,12 @@ fn arithmetic(
                 third_negated,
             );
             module.add(
-                12,
+                opcodes::EXT_INST,
                 &[
                     named.four.number(),
                     produced.number(),
                     named.extended.number(),
-                    50,
+                    opcodes::GLSL_FUSED_MULTIPLY_ADD,
                     left,
                     right,
                     last,
@@ -1484,9 +1596,9 @@ fn arithmetic(
             );
             let asked = module.name();
             let comparison = match alu.vector_operation() {
-                VectorOperation::ChooseOnEqual => 180,
-                VectorOperation::ChooseOnGreater => 186,
-                _ => 190,
+                VectorOperation::ChooseOnEqual => opcodes::FLOAT_ORDERED_EQUAL,
+                VectorOperation::ChooseOnGreater => opcodes::FLOAT_ORDERED_GREATER_THAN,
+                _ => opcodes::FLOAT_ORDERED_GREATER_THAN_EQUAL,
             };
             module.add(
                 comparison,
@@ -1498,7 +1610,7 @@ fn arithmetic(
                 ],
             );
             module.add(
-                169,
+                opcodes::SELECT,
                 &[
                     named.four.number(),
                     produced.number(),
@@ -1512,9 +1624,9 @@ fn arithmetic(
          * which is a comparison and a choice between two constants. */
         VectorOperation::SetEqual | VectorOperation::SetNotEqual | VectorOperation::SetGreater => {
             let comparing = match alu.vector_operation() {
-                VectorOperation::SetEqual => 180,
-                VectorOperation::SetNotEqual => 183,
-                _ => 186,
+                VectorOperation::SetEqual => opcodes::FLOAT_ORDERED_EQUAL,
+                VectorOperation::SetNotEqual => opcodes::FLOAT_UNORDERED_NOT_EQUAL,
+                _ => opcodes::FLOAT_ORDERED_GREATER_THAN,
             };
             let asked = module.name();
             module.add(
@@ -1522,7 +1634,7 @@ fn arithmetic(
                 &[named.four_bools.number(), asked.number(), left, right],
             );
             module.add(
-                169,
+                opcodes::SELECT,
                 &[
                     named.four.number(),
                     produced.number(),
@@ -1535,11 +1647,11 @@ fn arithmetic(
         VectorOperation::SetGreaterOrEqual => {
             let asked = module.name();
             module.add(
-                190,
+                opcodes::FLOAT_ORDERED_GREATER_THAN_EQUAL,
                 &[named.four_bools.number(), asked.number(), left, right],
             );
             module.add(
-                169,
+                opcodes::SELECT,
                 &[
                     named.four.number(),
                     produced.number(),
@@ -1569,9 +1681,12 @@ fn arithmetic(
          * out put in every lane. */
         VectorOperation::DotFour => {
             let dot = module.name();
-            module.add(148, &[named.float.number(), dot.number(), left, right]);
             module.add(
-                80,
+                opcodes::DOT,
+                &[named.float.number(), dot.number(), left, right],
+            );
+            module.add(
+                opcodes::COMPOSITE_CONSTRUCT,
                 &[
                     named.four.number(),
                     produced.number(),
@@ -1595,10 +1710,10 @@ fn arithmetic(
         | VectorOperation::PredicateGreaterPush
         | VectorOperation::PredicateGreaterOrEqualPush => {
             let comparing = match alu.vector_operation() {
-                VectorOperation::PredicateEqualPush => 180,
-                VectorOperation::PredicateNotEqualPush => 183,
-                VectorOperation::PredicateGreaterPush => 186,
-                _ => 190,
+                VectorOperation::PredicateEqualPush => opcodes::FLOAT_ORDERED_EQUAL,
+                VectorOperation::PredicateNotEqualPush => opcodes::FLOAT_UNORDERED_NOT_EQUAL,
+                VectorOperation::PredicateGreaterPush => opcodes::FLOAT_ORDERED_GREATER_THAN,
+                _ => opcodes::FLOAT_ORDERED_GREATER_THAN_EQUAL,
             };
             *predicate = push_holds(module, named, left, right, comparing, 3);
             let holds = push_holds(module, named, left, right, comparing, 0);
@@ -1606,10 +1721,13 @@ fn arithmetic(
             let one = extract(module, named, named.all_ones.number(), 0);
             let nothing = extract(module, named, named.nothing.number(), 0);
             let one_more = module.name();
-            module.add(129, &[named.float.number(), one_more.number(), first, one]);
+            module.add(
+                opcodes::FLOAT_ADD,
+                &[named.float.number(), one_more.number(), first, one],
+            );
             let picked = module.name();
             module.add(
-                169,
+                opcodes::SELECT,
                 &[
                     named.float.number(),
                     picked.number(),
@@ -1619,7 +1737,7 @@ fn arithmetic(
                 ],
             );
             module.add(
-                80,
+                opcodes::COMPOSITE_CONSTRUCT,
                 &[
                     named.four.number(),
                     produced.number(),
@@ -1652,7 +1770,7 @@ fn push_holds(
     let b = extract(module, named, right, lane);
     let a_is_nothing = module.name();
     module.add(
-        180,
+        opcodes::FLOAT_ORDERED_EQUAL,
         &[named.boolean.number(), a_is_nothing.number(), a, nothing],
     );
     let b_compares = module.name();
@@ -1662,7 +1780,7 @@ fn push_holds(
     );
     let both = module.name();
     module.add(
-        167,
+        opcodes::LOGICAL_AND,
         &[
             named.boolean.number(),
             both.number(),
@@ -1677,7 +1795,7 @@ fn push_holds(
 fn one_word(module: &mut Module, named: &Named, at: u32) -> u32 {
     let where_from = module.name();
     module.add(
-        65,
+        opcodes::ACCESS_CHAIN,
         &[
             named.to_memory.number(),
             where_from.number(),
@@ -1689,7 +1807,7 @@ fn one_word(module: &mut Module, named: &Named, at: u32) -> u32 {
 
     let value = module.name();
     module.add(
-        61,
+        opcodes::LOAD,
         &[named.whole.number(), value.number(), where_from.number()],
     );
     value.number()
@@ -1733,7 +1851,7 @@ fn the_way_a_fetch_says(
                  * nothing about the other two, and reading them out of memory
                  * it never named would be reading whatever sat next to it. */
                 None => module.add(
-                    81,
+                    opcodes::COMPOSITE_EXTRACT,
                     &[
                         named.float.number(),
                         part.number(),
@@ -1743,7 +1861,7 @@ fn the_way_a_fetch_says(
                 ),
             },
             5 => module.add(
-                81,
+                opcodes::COMPOSITE_EXTRACT,
                 &[
                     named.float.number(),
                     part.number(),
@@ -1751,9 +1869,12 @@ fn the_way_a_fetch_says(
                     step,
                 ],
             ),
-            7 => module.add(81, &[named.float.number(), part.number(), already, step]),
+            7 => module.add(
+                opcodes::COMPOSITE_EXTRACT,
+                &[named.float.number(), part.number(), already, step],
+            ),
             _ => module.add(
-                81,
+                opcodes::COMPOSITE_EXTRACT,
                 &[
                     named.float.number(),
                     part.number(),
@@ -1797,19 +1918,19 @@ fn the_numbers_in_the_words(
             let from = *words.get(word as usize).ok_or(Refused::Fetch)?;
             let pair = module.name();
             module.add(
-                12,
+                opcodes::EXT_INST,
                 &[
                     named.two.number(),
                     pair.number(),
                     named.extended.number(),
-                    62,
+                    opcodes::GLSL_UNPACK_HALF2X16,
                     from,
                 ],
             );
             for lane in 0..2u32 {
                 let one = module.name();
                 module.add(
-                    81,
+                    opcodes::COMPOSITE_EXTRACT,
                     &[named.float.number(), one.number(), pair.number(), lane],
                 );
                 fetched.push(Some(one.number()));
@@ -1837,7 +1958,10 @@ fn the_numbers_in_the_words(
             }
             let word = *words.get(step as usize).ok_or(Refused::Fetch)?;
             let as_a_number = module.name();
-            module.add(124, &[named.float.number(), as_a_number.number(), word]);
+            module.add(
+                opcodes::BITCAST,
+                &[named.float.number(), as_a_number.number(), word],
+            );
             fetched.push(Some(as_a_number.number()));
         }
     }
@@ -1870,7 +1994,11 @@ fn taken_apart(
 
     let bits = module.name();
     module.add(
-        if fetch.is_signed() { 202 } else { 203 },
+        if fetch.is_signed() {
+            opcodes::BIT_FIELD_SIGNED_EXTRACT
+        } else {
+            opcodes::BIT_FIELD_UNSIGNED_EXTRACT
+        },
         &[
             named.whole.number(),
             bits.number(),
@@ -1882,7 +2010,11 @@ fn taken_apart(
 
     let value = module.name();
     module.add(
-        if fetch.is_signed() { 111 } else { 112 },
+        if fetch.is_signed() {
+            opcodes::CONVERT_SIGNED_TO_FLOAT
+        } else {
+            opcodes::CONVERT_UNSIGNED_TO_FLOAT
+        },
         &[named.float.number(), value.number(), bits.number()],
     );
 
@@ -1899,12 +2031,15 @@ fn taken_apart(
         number((1u32 << width) - 1)?
     };
     let over = module.name();
-    module.add(112, &[named.float.number(), over.number(), whole]);
+    module.add(
+        opcodes::CONVERT_UNSIGNED_TO_FLOAT,
+        &[named.float.number(), over.number(), whole],
+    );
 
     if !(fetch.is_signed() && fetch.has_no_zero()) {
         let made = module.name();
         module.add(
-            136,
+            opcodes::FLOAT_DIVIDE,
             &[
                 named.float.number(),
                 made.number(),
@@ -1918,16 +2053,19 @@ fn taken_apart(
     /* One that reaches both ends evenly is moved half a step first, so that
      * nothing is not one of the values it takes, and divided by half as much. */
     let two = module.name();
-    module.add(112, &[named.float.number(), two.number(), number(2)?]);
+    module.add(
+        opcodes::CONVERT_UNSIGNED_TO_FLOAT,
+        &[named.float.number(), two.number(), number(2)?],
+    );
     let one = extract(module, named, named.all_ones.number(), 0);
     let half = module.name();
     module.add(
-        136,
+        opcodes::FLOAT_DIVIDE,
         &[named.float.number(), half.number(), one, two.number()],
     );
     let moved = module.name();
     module.add(
-        129,
+        opcodes::FLOAT_ADD,
         &[
             named.float.number(),
             moved.number(),
@@ -1937,7 +2075,7 @@ fn taken_apart(
     );
     let halved = module.name();
     module.add(
-        136,
+        opcodes::FLOAT_DIVIDE,
         &[
             named.float.number(),
             halved.number(),
@@ -1948,7 +2086,7 @@ fn taken_apart(
 
     let made = module.name();
     module.add(
-        136,
+        opcodes::FLOAT_DIVIDE,
         &[
             named.float.number(),
             made.number(),
@@ -1979,7 +2117,7 @@ fn go_and_get(
     let source = read_whole(module, named, fetch.source(), true);
     let picked = module.name();
     module.add(
-        81,
+        opcodes::COMPOSITE_EXTRACT,
         &[
             named.float.number(),
             picked.number(),
@@ -1989,13 +2127,13 @@ fn go_and_get(
     );
     let which_vertex = module.name();
     module.add(
-        109,
+        opcodes::CONVERT_FLOAT_TO_UNSIGNED,
         &[named.whole.number(), which_vertex.number(), picked.number()],
     );
 
     let stepped = module.name();
     module.add(
-        132,
+        opcodes::INTEGER_MULTIPLY,
         &[
             named.whole.number(),
             stepped.number(),
@@ -2006,12 +2144,12 @@ fn go_and_get(
     let from = one_word(module, named, number(slot)?);
     let began = module.name();
     module.add(
-        128,
+        opcodes::INTEGER_ADD,
         &[named.whole.number(), began.number(), from, stepped.number()],
     );
     let at = module.name();
     module.add(
-        128,
+        opcodes::INTEGER_ADD,
         &[
             named.whole.number(),
             at.number(),
@@ -2025,7 +2163,7 @@ fn go_and_get(
     for step in 0..format.words().ok_or(Refused::Fetch)? {
         let here = module.name();
         module.add(
-            128,
+            opcodes::INTEGER_ADD,
             &[
                 named.whole.number(),
                 here.number(),
@@ -2043,7 +2181,7 @@ fn go_and_get(
     let together = module.name();
     let mut making = vec![named.four.number(), together.number()];
     making.extend(parts);
-    module.add(80, &making);
+    module.add(opcodes::COMPOSITE_CONSTRUCT, &making);
 
     let index = named
         .indices
@@ -2051,7 +2189,7 @@ fn go_and_get(
         .ok_or(Refused::Fetch)?;
     let where_to = module.name();
     module.add(
-        65,
+        opcodes::ACCESS_CHAIN,
         &[
             named.to_one.number(),
             where_to.number(),
@@ -2059,7 +2197,7 @@ fn go_and_get(
             index.number(),
         ],
     );
-    module.add(62, &[where_to.number(), together.number()]);
+    module.add(opcodes::STORE, &[where_to.number(), together.number()]);
 
     Ok(())
 }
@@ -2091,7 +2229,7 @@ fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result
     let where_in_it = read_whole(module, named, fetch.source(), true);
     let across = module.name();
     module.add(
-        79,
+        opcodes::VECTOR_SHUFFLE,
         &[
             named.two.number(),
             across.number(),
@@ -2108,7 +2246,7 @@ fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result
         .ok_or(Refused::Fetch)?;
     let at = module.name();
     module.add(
-        65,
+        opcodes::ACCESS_CHAIN,
         &[
             to_one.number(),
             at.number(),
@@ -2117,14 +2255,17 @@ fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result
         ],
     );
     let reading = module.name();
-    module.add(61, &[read_one.number(), reading.number(), at.number()]);
+    module.add(
+        opcodes::LOAD,
+        &[read_one.number(), reading.number(), at.number()],
+    );
 
     let got = module.name();
     if matches!(named.kind, Kind::Vertex) {
         /* Reading the whole picture rather than a smaller copy of it, said
          * outright because nothing here can be worked out from the screen. */
         module.add(
-            88,
+            opcodes::IMAGE_SAMPLE_EXPLICIT_LOD,
             &[
                 named.four.number(),
                 got.number(),
@@ -2136,7 +2277,7 @@ fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result
         );
     } else {
         module.add(
-            87,
+            opcodes::IMAGE_SAMPLE_IMPLICIT_LOD,
             &[
                 named.four.number(),
                 got.number(),
@@ -2163,14 +2304,17 @@ fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result
             7 => (already, step),
             _ => (named.nothing.number(), step),
         };
-        module.add(81, &[named.float.number(), part.number(), from, lane]);
+        module.add(
+            opcodes::COMPOSITE_EXTRACT,
+            &[named.float.number(), part.number(), from, lane],
+        );
         parts.push(part.number());
     }
 
     let put = module.name();
     let mut making = vec![named.four.number(), put.number()];
     making.extend(parts);
-    module.add(80, &making);
+    module.add(opcodes::COMPOSITE_CONSTRUCT, &making);
 
     let into = named
         .indices
@@ -2178,7 +2322,7 @@ fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result
         .ok_or(Refused::Fetch)?;
     let where_to = module.name();
     module.add(
-        65,
+        opcodes::ACCESS_CHAIN,
         &[
             named.to_one.number(),
             where_to.number(),
@@ -2186,7 +2330,7 @@ fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result
             into.number(),
         ],
     );
-    module.add(62, &[where_to.number(), put.number()]);
+    module.add(opcodes::STORE, &[where_to.number(), put.number()]);
 
     Ok(())
 }
@@ -2360,7 +2504,7 @@ fn lane_by_lane(module: &mut Module, named: &Named, first: u32, second: u32, tak
             lane + 4
         });
     }
-    module.add(79, &operands);
+    module.add(opcodes::VECTOR_SHUFFLE, &operands);
     mixed.number()
 }
 
@@ -2408,7 +2552,7 @@ fn what_is_exported(
         let alone = alone.ok_or(Refused::SingleLaneHalf)?;
         let across = module.name();
         module.add(
-            80,
+            opcodes::COMPOSITE_CONSTRUCT,
             &[
                 named.four.number(),
                 across.number(),
@@ -2433,7 +2577,10 @@ fn what_is_exported(
 /// Returns one lane of a value.
 fn extract(module: &mut Module, named: &Named, from: u32, lane: u32) -> u32 {
     let one = module.name();
-    module.add(81, &[named.float.number(), one.number(), from, lane]);
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), one.number(), from, lane],
+    );
     one.number()
 }
 
@@ -2460,14 +2607,20 @@ fn holds_of(module: &mut Module, named: &Named, operation: u16, left: u32, right
 /// One number or the other, according to whether something holds.
 fn one_or_the_other(module: &mut Module, named: &Named, holds: u32, yes: u32, no: u32) -> u32 {
     let made = module.name();
-    module.add(169, &[named.float.number(), made.number(), holds, yes, no]);
+    module.add(
+        opcodes::SELECT,
+        &[named.float.number(), made.number(), holds, yes, no],
+    );
     made.number()
 }
 
 /// The same number the other way about.
 fn the_other_way(module: &mut Module, named: &Named, value: u32) -> u32 {
     let made = module.name();
-    module.add(127, &[named.float.number(), made.number(), value]);
+    module.add(
+        opcodes::FLOAT_NEGATE,
+        &[named.float.number(), made.number(), value],
+    );
     made.number()
 }
 
@@ -2475,12 +2628,12 @@ fn the_other_way(module: &mut Module, named: &Named, value: u32) -> u32 {
 fn how_far_from_nothing(module: &mut Module, named: &Named, value: u32) -> u32 {
     let made = module.name();
     module.add(
-        12,
+        opcodes::EXT_INST,
         &[
             named.float.number(),
             made.number(),
             named.extended.number(),
-            4,
+            opcodes::GLSL_ABSOLUTE,
             value,
         ],
     );
@@ -2500,12 +2653,13 @@ fn how_far_from_nothing(module: &mut Module, named: &Named, value: u32) -> u32 {
 /// and then chosen between, which says the same thing as running one of three
 /// stretches and leaves a driver free to do whichever is cheaper.
 fn a_cube_is_read(module: &mut Module, named: &Named, from: u32, produced: u32) {
-    /* At least, below, both, added, and multiplied. */
-    const AT_LEAST: u16 = 190;
-    const BELOW: u16 = 184;
-    const BOTH: u16 = 167;
-    const ADDED: u16 = 129;
-    const MULTIPLIED: u16 = 133;
+    /* The five operations the choice is written from, under the names this
+     * function reads them by. */
+    const AT_LEAST: u16 = opcodes::FLOAT_ORDERED_GREATER_THAN_EQUAL;
+    const BELOW: u16 = opcodes::FLOAT_ORDERED_LESS_THAN;
+    const BOTH: u16 = opcodes::LOGICAL_AND;
+    const ADDED: u16 = opcodes::FLOAT_ADD;
+    const MULTIPLIED: u16 = opcodes::FLOAT_MULTIPLY;
 
     let along_x = extract(module, named, from, 2);
     let along_y = extract(module, named, from, 3);
@@ -2566,7 +2720,7 @@ fn a_cube_is_read(module: &mut Module, named: &Named, from: u32, produced: u32) 
     let face = one_or_the_other(module, named, mostly_z.number(), face_z, face);
 
     module.add(
-        80,
+        opcodes::COMPOSITE_CONSTRUCT,
         &[named.four.number(), produced, across, down, twice, face],
     );
 }
@@ -2584,7 +2738,7 @@ fn chosen(module: &mut Module, named: &Named, holds: u32, when: f32, otherwise: 
     let second = extract(module, named, pick(otherwise), 0);
     let made = module.name();
     module.add(
-        169,
+        opcodes::SELECT,
         &[named.float.number(), made.number(), holds, first, second],
     );
     made.number()
@@ -2610,10 +2764,10 @@ fn setting_the_predicate(
 
     let against = extract(module, named, named.nothing.number(), 0);
     let comparing = match operation {
-        ScalarOperation::PredicateEqual => 180,
-        ScalarOperation::PredicateNotEqual => 182,
-        ScalarOperation::PredicateGreater => 186,
-        _ => 190,
+        ScalarOperation::PredicateEqual => opcodes::FLOAT_ORDERED_EQUAL,
+        ScalarOperation::PredicateNotEqual => opcodes::FLOAT_ORDERED_NOT_EQUAL,
+        ScalarOperation::PredicateGreater => opcodes::FLOAT_ORDERED_GREATER_THAN,
+        _ => opcodes::FLOAT_ORDERED_GREATER_THAN_EQUAL,
     };
     let holds = module.name();
     module.add(
@@ -2658,7 +2812,10 @@ fn single_lane(
 
     let lane = |module: &mut Module, which: u32| {
         let one = module.name();
-        module.add(81, &[named.float.number(), one.number(), third, which]);
+        module.add(
+            opcodes::COMPOSITE_EXTRACT,
+            &[named.float.number(), one.number(), third, which],
+        );
         one.number()
     };
     let left = lane(module, 3);
@@ -2680,22 +2837,22 @@ fn single_lane(
             which,
         ];
         all.extend_from_slice(operands);
-        module.add(12, &all);
+        module.add(opcodes::EXT_INST, &all);
         made.number()
     };
 
     let made = match operation {
         ScalarOperation::Add => {
             let right = lane(module, 0);
-            two(module, 129, right)
+            two(module, opcodes::FLOAT_ADD, right)
         }
         ScalarOperation::Subtract => {
             let right = lane(module, 0);
-            two(module, 131, right)
+            two(module, opcodes::FLOAT_SUBTRACT, right)
         }
         ScalarOperation::Multiply => {
             let right = lane(module, 0);
-            two(module, 133, right)
+            two(module, opcodes::FLOAT_MULTIPLY, right)
         }
         ScalarOperation::Max => {
             let right = lane(module, 0);
@@ -2707,16 +2864,19 @@ fn single_lane(
         }
         ScalarOperation::AddToPrevious => {
             let right = previous.ok_or(Refused::SingleLaneOperation(operation))?;
-            two(module, 129, right)
+            two(module, opcodes::FLOAT_ADD, right)
         }
         ScalarOperation::MultiplyPrevious | ScalarOperation::MultiplyPreviousAgain => {
             let right = previous.ok_or(Refused::SingleLaneOperation(operation))?;
-            two(module, 133, right)
+            two(module, opcodes::FLOAT_MULTIPLY, right)
         }
         ScalarOperation::SubtractFromPrevious => {
             let right = previous.ok_or(Refused::SingleLaneOperation(operation))?;
             let made = module.name();
-            module.add(131, &[named.float.number(), made.number(), right, left]);
+            module.add(
+                opcodes::FLOAT_SUBTRACT,
+                &[named.float.number(), made.number(), right, left],
+            );
             made.number()
         }
         ScalarOperation::KeepPrevious => previous.ok_or(Refused::SingleLaneOperation(operation))?,
@@ -2736,10 +2896,10 @@ fn single_lane(
         | ScalarOperation::SetGreaterOrEqual => {
             let against = extract(module, named, named.nothing.number(), 0);
             let comparing = match operation {
-                ScalarOperation::SetEqual => 180,
-                ScalarOperation::SetNotEqual => 183,
-                ScalarOperation::SetGreater => 186,
-                _ => 190,
+                ScalarOperation::SetEqual => opcodes::FLOAT_ORDERED_EQUAL,
+                ScalarOperation::SetNotEqual => opcodes::FLOAT_UNORDERED_NOT_EQUAL,
+                ScalarOperation::SetGreater => opcodes::FLOAT_ORDERED_GREATER_THAN,
+                _ => opcodes::FLOAT_ORDERED_GREATER_THAN_EQUAL,
             };
             let holds = module.name();
             module.add(
@@ -2756,16 +2916,19 @@ fn single_lane(
             let one = extract(module, named, named.all_ones.number(), 0);
             let nothing = extract(module, named, named.nothing.number(), 0);
             let holds = module.name();
-            module.add(180, &[named.boolean.number(), holds.number(), left, one]);
+            module.add(
+                opcodes::FLOAT_ORDERED_EQUAL,
+                &[named.boolean.number(), holds.number(), left, one],
+            );
             *predicate = holds.number();
             let is_nothing = module.name();
             module.add(
-                180,
+                opcodes::FLOAT_ORDERED_EQUAL,
                 &[named.boolean.number(), is_nothing.number(), left, nothing],
             );
             let inner = module.name();
             module.add(
-                169,
+                opcodes::SELECT,
                 &[
                     named.float.number(),
                     inner.number(),
@@ -2776,7 +2939,7 @@ fn single_lane(
             );
             let made = module.name();
             module.add(
-                169,
+                opcodes::SELECT,
                 &[
                     named.float.number(),
                     made.number(),
@@ -2795,10 +2958,13 @@ fn single_lane(
             let one = extract(module, named, named.all_ones.number(), 0);
             let nothing = extract(module, named, named.nothing.number(), 0);
             let left_over = module.name();
-            module.add(131, &[named.float.number(), left_over.number(), left, one]);
+            module.add(
+                opcodes::FLOAT_SUBTRACT,
+                &[named.float.number(), left_over.number(), left, one],
+            );
             let holds = module.name();
             module.add(
-                188,
+                opcodes::FLOAT_ORDERED_LESS_THAN_EQUAL,
                 &[
                     named.boolean.number(),
                     holds.number(),
@@ -2809,7 +2975,7 @@ fn single_lane(
             *predicate = holds.number();
             let made = module.name();
             module.add(
-                169,
+                opcodes::SELECT,
                 &[
                     named.float.number(),
                     made.number(),
@@ -2864,18 +3030,26 @@ fn with_a_constant(
     );
 
     let from_constant = module.name();
-    module.add(81, &[named.float.number(), from_constant.number(), held, 3]);
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), from_constant.number(), held, 3],
+    );
     let from_register = module.name();
-    module.add(81, &[named.float.number(), from_register.number(), kept, 0]);
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), from_register.number(), kept, 0],
+    );
 
     /* All three work on numbers with a point in them, so all three are the
      * operation for those rather than the one for whole numbers. Taking one
      * away used to name the whole number operation, which a driver rejects
      * outright, so every shader reaching it was thrown out entire. */
     let doing = match operation {
-        ScalarOperation::MultiplyByConstant0 | ScalarOperation::MultiplyByConstant1 => 133,
-        ScalarOperation::AddConstant0 | ScalarOperation::AddConstant1 => 129,
-        _ => 131,
+        ScalarOperation::MultiplyByConstant0 | ScalarOperation::MultiplyByConstant1 => {
+            opcodes::FLOAT_MULTIPLY
+        }
+        ScalarOperation::AddConstant0 | ScalarOperation::AddConstant1 => opcodes::FLOAT_ADD,
+        _ => opcodes::FLOAT_SUBTRACT,
     };
     let made = module.name();
     module.add(
@@ -2907,7 +3081,7 @@ fn on_its_own(
             which,
         ];
         all.extend_from_slice(operands);
-        module.add(12, &all);
+        module.add(opcodes::EXT_INST, &all);
         made.number()
     };
 
@@ -2930,7 +3104,7 @@ fn on_its_own(
         | ScalarOperation::ReciprocalRough => {
             let one = module.name();
             module.add(
-                81,
+                opcodes::COMPOSITE_EXTRACT,
                 &[
                     named.float.number(),
                     one.number(),
@@ -2940,7 +3114,7 @@ fn on_its_own(
             );
             let made = module.name();
             module.add(
-                136,
+                opcodes::FLOAT_DIVIDE,
                 &[named.float.number(), made.number(), one.number(), left],
             );
             made.number()
@@ -2971,7 +3145,7 @@ fn only_where_it_runs(
      * into all four first. */
     let across = module.name();
     module.add(
-        80,
+        opcodes::COMPOSITE_CONSTRUCT,
         &[
             named.four_bools.number(),
             across.number(),
@@ -2984,7 +3158,7 @@ fn only_where_it_runs(
 
     let chosen = module.name();
     module.add(
-        169,
+        opcodes::SELECT,
         &[
             named.four.number(),
             chosen.number(),
@@ -3022,7 +3196,7 @@ fn the_single_lane_write(
 
         let where_to = module.name();
         module.add(
-            65,
+            opcodes::ACCESS_CHAIN,
             &[
                 named.to_one.number(),
                 where_to.number(),
@@ -3033,7 +3207,7 @@ fn the_single_lane_write(
 
         let across = module.name();
         module.add(
-            80,
+            opcodes::COMPOSITE_CONSTRUCT,
             &[
                 named.four.number(),
                 across.number(),
@@ -3048,7 +3222,10 @@ fn the_single_lane_write(
             across.number()
         } else {
             let held = module.name();
-            module.add(61, &[named.four.number(), held.number(), where_to.number()]);
+            module.add(
+                opcodes::LOAD,
+                &[named.four.number(), held.number(), where_to.number()],
+            );
             let kept = lane_by_lane(
                 module,
                 named,
@@ -3058,7 +3235,7 @@ fn the_single_lane_write(
             );
             only_where_it_runs(module, named, running, kept, held.number())
         };
-        module.add(62, &[where_to.number(), kept]);
+        module.add(opcodes::STORE, &[where_to.number(), kept]);
     }
 
     Ok(())
@@ -3090,7 +3267,10 @@ fn put_it_where_it_goes(
             /* Read before writing, so that the lanes this instruction does not
              * name keep what an earlier one carried on. */
             let held = module.name();
-            module.add(61, &[named.four.number(), held.number(), one.number()]);
+            module.add(
+                opcodes::LOAD,
+                &[named.four.number(), held.number(), one.number()],
+            );
             let leaving = what_is_exported(
                 module,
                 named,
@@ -3101,7 +3281,7 @@ fn put_it_where_it_goes(
                 Some(held.number()),
             )?;
             let leaving = only_where_it_runs(module, named, running, leaving, held.number());
-            module.add(62, &[one.number(), leaving]);
+            module.add(opcodes::STORE, &[one.number(), leaving]);
             return Ok(None);
         }
         let leaving = what_is_exported(
@@ -3116,7 +3296,7 @@ fn put_it_where_it_goes(
         if running.is_some() {
             let held = module.name();
             module.add(
-                61,
+                opcodes::LOAD,
                 &[named.four.number(), held.number(), named.out.number()],
             );
             return Ok(Some(only_where_it_runs(
@@ -3149,7 +3329,7 @@ fn put_it_where_it_goes(
             return Err(Refused::NotAShader);
         };
         module.add(
-            65,
+            opcodes::ACCESS_CHAIN,
             &[
                 named.to_one.number(),
                 where_to.number(),
@@ -3162,11 +3342,14 @@ fn put_it_where_it_goes(
             produced
         } else {
             let held = module.name();
-            module.add(61, &[named.four.number(), held.number(), where_to.number()]);
+            module.add(
+                opcodes::LOAD,
+                &[named.four.number(), held.number(), where_to.number()],
+            );
             let kept = lane_by_lane(module, named, produced, held.number(), writing);
             only_where_it_runs(module, named, running, kept, held.number())
         };
-        module.add(62, &[where_to.number(), kept]);
+        module.add(opcodes::STORE, &[where_to.number(), kept]);
     }
 
     the_single_lane_write(module, named, alu, alone, running)?;
@@ -3197,7 +3380,7 @@ fn whether_it_runs(
 
     let other_way = module.name();
     module.add(
-        168,
+        opcodes::LOGICAL_NOT,
         &[named.boolean.number(), other_way.number(), predicate],
     );
     Some(other_way.number())
@@ -3308,12 +3491,18 @@ fn one_of_the_truths(module: &mut Module, named: &Named, which: u8) -> u32 {
 
     let held = read_a_constant(module, named, THE_TRUTHS + word / 4);
     let one = module.name();
-    module.add(81, &[named.float.number(), one.number(), held, word % 4]);
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), one.number(), held, word % 4],
+    );
     let bits = module.name();
-    module.add(124, &[named.whole.number(), bits.number(), one.number()]);
+    module.add(
+        opcodes::BITCAST,
+        &[named.whole.number(), bits.number(), one.number()],
+    );
     let moved = module.name();
     module.add(
-        194,
+        opcodes::SHIFT_RIGHT_LOGICAL,
         &[
             named.whole.number(),
             moved.number(),
@@ -3323,7 +3512,7 @@ fn one_of_the_truths(module: &mut Module, named: &Named, which: u8) -> u32 {
     );
     let kept = module.name();
     module.add(
-        199,
+        opcodes::BITWISE_AND,
         &[
             named.whole.number(),
             kept.number(),
@@ -3333,7 +3522,7 @@ fn one_of_the_truths(module: &mut Module, named: &Named, which: u8) -> u32 {
     );
     let holds = module.name();
     module.add(
-        171,
+        opcodes::INTEGER_NOT_EQUAL,
         &[
             named.boolean.number(),
             holds.number(),
@@ -3350,13 +3539,19 @@ fn how_many_times_round(module: &mut Module, named: &Named, which: u8) -> u32 {
     let which = u32::from(which);
     let held = read_a_constant(module, named, THE_COUNTS + which / 4);
     let one = module.name();
-    module.add(81, &[named.float.number(), one.number(), held, which % 4]);
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), one.number(), held, which % 4],
+    );
     let bits = module.name();
-    module.add(124, &[named.whole.number(), bits.number(), one.number()]);
+    module.add(
+        opcodes::BITCAST,
+        &[named.whole.number(), bits.number(), one.number()],
+    );
     /* How many times round is the lowest eight bits of it. */
     let how_many = module.name();
     module.add(
-        199,
+        opcodes::BITWISE_AND,
         &[
             named.whole.number(),
             how_many.number(),
@@ -3377,10 +3572,13 @@ fn what_it_puts_out(module: &mut Module, named: &Named, exported: Option<u32>) {
             let scale = read_a_constant(module, named, ALL_THE_CONSTANTS);
             let offset = read_a_constant(module, named, ALL_THE_CONSTANTS + 1);
             let scaled = module.name();
-            module.add(133, &[named.four.number(), scaled.number(), value, scale]);
+            module.add(
+                opcodes::FLOAT_MULTIPLY,
+                &[named.four.number(), scaled.number(), value, scale],
+            );
             let moved = module.name();
             module.add(
-                129,
+                opcodes::FLOAT_ADD,
                 &[named.four.number(), moved.number(), scaled.number(), offset],
             );
             moved.number()
@@ -3392,11 +3590,11 @@ fn what_it_puts_out(module: &mut Module, named: &Named, exported: Option<u32>) {
             throw_away_what_is_not_solid_enough(module, named, value, which, against);
         }
 
-        module.add(62, &[named.out.number(), value]);
+        module.add(opcodes::STORE, &[named.out.number(), value]);
     }
 
-    module.add(253, &[]);
-    module.add(56, &[]);
+    module.add(opcodes::RETURN, &[]);
+    module.add(opcodes::FUNCTION_END, &[]);
 }
 
 /// Writes the test a title sets on how solid a place has to be to be drawn.
@@ -3422,10 +3620,17 @@ fn throw_away_what_is_not_solid_enough(
     };
 
     let solid = module.name();
-    module.add(81, &[named.float.number(), solid.number(), value, 3]);
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), solid.number(), value, 3],
+    );
 
     let mut drawn = None;
-    for (comparison, bit) in [(184u16, 1usize), (180, 2), (186, 4)] {
+    for (comparison, bit) in [
+        (opcodes::FLOAT_ORDERED_LESS_THAN, 1usize),
+        (opcodes::FLOAT_ORDERED_EQUAL, 2),
+        (opcodes::FLOAT_ORDERED_GREATER_THAN, 4),
+    ] {
         let Some(one) = named.whole_numbers.get(bit).copied() else {
             return;
         };
@@ -3442,7 +3647,7 @@ fn throw_away_what_is_not_solid_enough(
         );
         let kept = module.name();
         module.add(
-            199,
+            opcodes::BITWISE_AND,
             &[
                 named.whole.number(),
                 kept.number(),
@@ -3452,7 +3657,7 @@ fn throw_away_what_is_not_solid_enough(
         );
         let asked = module.name();
         module.add(
-            171,
+            opcodes::INTEGER_NOT_EQUAL,
             &[
                 named.boolean.number(),
                 asked.number(),
@@ -3462,7 +3667,7 @@ fn throw_away_what_is_not_solid_enough(
         );
         let both = module.name();
         module.add(
-            167,
+            opcodes::LOGICAL_AND,
             &[
                 named.boolean.number(),
                 both.number(),
@@ -3476,7 +3681,7 @@ fn throw_away_what_is_not_solid_enough(
             Some(before) => {
                 let either = module.name();
                 module.add(
-                    166,
+                    opcodes::LOGICAL_OR,
                     &[
                         named.boolean.number(),
                         either.number(),
@@ -3495,11 +3700,14 @@ fn throw_away_what_is_not_solid_enough(
 
     let thrown = module.name();
     let after = module.name();
-    module.add(247, &[after.number(), 0]);
-    module.add(250, &[drawn, after.number(), thrown.number()]);
-    module.add(248, &[thrown.number()]);
-    module.add(252, &[]);
-    module.add(248, &[after.number()]);
+    module.add(opcodes::SELECTION_MERGE, &[after.number(), 0]);
+    module.add(
+        opcodes::BRANCH_CONDITIONAL,
+        &[drawn, after.number(), thrown.number()],
+    );
+    module.add(opcodes::LABEL, &[thrown.number()]);
+    module.add(opcodes::KILL, &[]);
+    module.add(opcodes::LABEL, &[after.number()]);
 }
 
 /// Writes out a shader whose stretches are not run one after another.
@@ -3531,23 +3739,23 @@ fn a_shader_that_jumps(
         .ok_or(Refused::NotAShader)?
         .number();
 
-    module.add(249, &[header.number()]);
+    module.add(opcodes::BRANCH, &[header.number()]);
 
-    module.add(248, &[header.number()]);
-    module.add(246, &[done.number(), onwards.number(), 0]);
-    module.add(249, &[check.number()]);
+    module.add(opcodes::LABEL, &[header.number()]);
+    module.add(opcodes::LOOP_MERGE, &[done.number(), onwards.number(), 0]);
+    module.add(opcodes::BRANCH, &[check.number()]);
 
-    module.add(248, &[check.number()]);
+    module.add(opcodes::LABEL, &[check.number()]);
     let up_to = module.name();
     module.add(
-        61,
+        opcodes::LOAD,
         &[
             named.whole.number(),
             up_to.number(),
             named.where_it_is_up_to.number(),
         ],
     );
-    module.add(247, &[after.number(), 0]);
+    module.add(opcodes::SELECTION_MERGE, &[after.number(), 0]);
     let mut choosing = vec![up_to.number(), nowhere.number()];
     for (at, label) in labels.iter().enumerate() {
         let Ok(at) = u32::try_from(at) else {
@@ -3556,15 +3764,15 @@ fn a_shader_that_jumps(
         choosing.push(at);
         choosing.push(label.number());
     }
-    module.add(251, &choosing);
+    module.add(opcodes::SWITCH, &choosing);
 
     for (at, stretch) in all.iter().enumerate() {
         let label = labels.get(at).ok_or(Refused::NotAShader)?;
-        module.add(248, &[label.number()]);
+        module.add(opcodes::LABEL, &[label.number()]);
 
         let predicate = module.name();
         module.add(
-            61,
+            opcodes::LOAD,
             &[
                 named.boolean.number(),
                 predicate.number(),
@@ -3573,7 +3781,7 @@ fn a_shader_that_jumps(
         );
         let previous = module.name();
         module.add(
-            61,
+            opcodes::LOAD,
             &[
                 named.float.number(),
                 previous.number(),
@@ -3582,7 +3790,7 @@ fn a_shader_that_jumps(
         );
         let exported = module.name();
         module.add(
-            61,
+            opcodes::LOAD,
             &[
                 named.four.number(),
                 exported.number(),
@@ -3600,12 +3808,15 @@ fn a_shader_that_jumps(
             one_instruction(module, named, words, *step, &mut carrying)?;
         }
 
-        module.add(62, &[named.predicate_kept.number(), carrying.predicate]);
+        module.add(
+            opcodes::STORE,
+            &[named.predicate_kept.number(), carrying.predicate],
+        );
         if let Some(previous) = carrying.previous {
-            module.add(62, &[named.previous_kept.number(), previous]);
+            module.add(opcodes::STORE, &[named.previous_kept.number(), previous]);
         }
         if let Some(exported) = carrying.exported {
-            module.add(62, &[named.exported_kept.number(), exported]);
+            module.add(opcodes::STORE, &[named.exported_kept.number(), exported]);
         }
 
         let onward = named
@@ -3615,21 +3826,24 @@ fn a_shader_that_jumps(
             .number();
         match stretch.next {
             WhereNext::Ends => {
-                module.add(62, &[named.where_it_is_up_to.number(), finished]);
-                module.add(249, &[after.number()]);
+                module.add(
+                    opcodes::STORE,
+                    &[named.where_it_is_up_to.number(), finished],
+                );
+                module.add(opcodes::BRANCH, &[after.number()]);
             }
             WhereNext::Along => {
-                module.add(62, &[named.where_it_is_up_to.number(), onward]);
-                module.add(249, &[after.number()]);
+                module.add(opcodes::STORE, &[named.where_it_is_up_to.number(), onward]);
+                module.add(opcodes::BRANCH, &[after.number()]);
             }
             WhereNext::Rounds { count, past } => {
                 /* How many times round, read where a title put it. Nought
                  * means the loop is passed over altogether. */
                 let how_many = how_many_times_round(module, named, count);
-                module.add(62, &[named.times_round.number(), how_many]);
+                module.add(opcodes::STORE, &[named.times_round.number(), how_many]);
                 let any = module.name();
                 module.add(
-                    171,
+                    opcodes::INTEGER_NOT_EQUAL,
                     &[
                         named.boolean.number(),
                         any.number(),
@@ -3648,7 +3862,7 @@ fn a_shader_that_jumps(
                     .number();
                 let chosen = module.name();
                 module.add(
-                    169,
+                    opcodes::SELECT,
                     &[
                         named.whole.number(),
                         chosen.number(),
@@ -3657,13 +3871,16 @@ fn a_shader_that_jumps(
                         beyond,
                     ],
                 );
-                module.add(62, &[named.where_it_is_up_to.number(), chosen.number()]);
-                module.add(249, &[after.number()]);
+                module.add(
+                    opcodes::STORE,
+                    &[named.where_it_is_up_to.number(), chosen.number()],
+                );
+                module.add(opcodes::BRANCH, &[after.number()]);
             }
             WhereNext::Again { top } => {
                 let left = module.name();
                 module.add(
-                    61,
+                    opcodes::LOAD,
                     &[
                         named.whole.number(),
                         left.number(),
@@ -3672,7 +3889,7 @@ fn a_shader_that_jumps(
                 );
                 let fewer = module.name();
                 module.add(
-                    130,
+                    opcodes::INTEGER_SUBTRACT,
                     &[
                         named.whole.number(),
                         fewer.number(),
@@ -3684,10 +3901,13 @@ fn a_shader_that_jumps(
                             .number(),
                     ],
                 );
-                module.add(62, &[named.times_round.number(), fewer.number()]);
+                module.add(
+                    opcodes::STORE,
+                    &[named.times_round.number(), fewer.number()],
+                );
                 let any = module.name();
                 module.add(
-                    171,
+                    opcodes::INTEGER_NOT_EQUAL,
                     &[
                         named.boolean.number(),
                         any.number(),
@@ -3706,7 +3926,7 @@ fn a_shader_that_jumps(
                     .number();
                 let chosen = module.name();
                 module.add(
-                    169,
+                    opcodes::SELECT,
                     &[
                         named.whole.number(),
                         chosen.number(),
@@ -3715,8 +3935,11 @@ fn a_shader_that_jumps(
                         onward,
                     ],
                 );
-                module.add(62, &[named.where_it_is_up_to.number(), chosen.number()]);
-                module.add(249, &[after.number()]);
+                module.add(
+                    opcodes::STORE,
+                    &[named.where_it_is_up_to.number(), chosen.number()],
+                );
+                module.add(opcodes::BRANCH, &[after.number()]);
             }
             WhereNext::Goes { to } => {
                 let there = named
@@ -3724,8 +3947,8 @@ fn a_shader_that_jumps(
                     .get(to)
                     .ok_or(Refused::NotAShader)?
                     .number();
-                module.add(62, &[named.where_it_is_up_to.number(), there]);
-                module.add(249, &[after.number()]);
+                module.add(opcodes::STORE, &[named.where_it_is_up_to.number(), there]);
+                module.add(opcodes::BRANCH, &[after.number()]);
             }
             WhereNext::Jumps { to, when, asking } => {
                 let asked = match asking {
@@ -3736,7 +3959,10 @@ fn a_shader_that_jumps(
                     asked
                 } else {
                     let turned = module.name();
-                    module.add(168, &[named.boolean.number(), turned.number(), asked]);
+                    module.add(
+                        opcodes::LOGICAL_NOT,
+                        &[named.boolean.number(), turned.number(), asked],
+                    );
                     turned.number()
                 };
                 let there = named
@@ -3746,27 +3972,33 @@ fn a_shader_that_jumps(
                     .number();
                 let chosen = module.name();
                 module.add(
-                    169,
+                    opcodes::SELECT,
                     &[named.whole.number(), chosen.number(), holds, there, onward],
                 );
-                module.add(62, &[named.where_it_is_up_to.number(), chosen.number()]);
-                module.add(249, &[after.number()]);
+                module.add(
+                    opcodes::STORE,
+                    &[named.where_it_is_up_to.number(), chosen.number()],
+                );
+                module.add(opcodes::BRANCH, &[after.number()]);
             }
         }
     }
 
     /* A number naming no stretch is a shader that has run off its own end,
      * which is where it stops. */
-    module.add(248, &[nowhere.number()]);
-    module.add(62, &[named.where_it_is_up_to.number(), finished]);
-    module.add(249, &[after.number()]);
+    module.add(opcodes::LABEL, &[nowhere.number()]);
+    module.add(
+        opcodes::STORE,
+        &[named.where_it_is_up_to.number(), finished],
+    );
+    module.add(opcodes::BRANCH, &[after.number()]);
 
     /* Where every stretch comes back together: on again where there is another
      * to run, and out of the loop where the shader is done. */
-    module.add(248, &[after.number()]);
+    module.add(opcodes::LABEL, &[after.number()]);
     let where_now = module.name();
     module.add(
-        61,
+        opcodes::LOAD,
         &[
             named.whole.number(),
             where_now.number(),
@@ -3775,7 +4007,7 @@ fn a_shader_that_jumps(
     );
     let over = module.name();
     module.add(
-        170,
+        opcodes::INTEGER_EQUAL,
         &[
             named.boolean.number(),
             over.number(),
@@ -3783,15 +4015,18 @@ fn a_shader_that_jumps(
             finished,
         ],
     );
-    module.add(250, &[over.number(), done.number(), onwards.number()]);
+    module.add(
+        opcodes::BRANCH_CONDITIONAL,
+        &[over.number(), done.number(), onwards.number()],
+    );
 
-    module.add(248, &[onwards.number()]);
-    module.add(249, &[header.number()]);
+    module.add(opcodes::LABEL, &[onwards.number()]);
+    module.add(opcodes::BRANCH, &[header.number()]);
 
-    module.add(248, &[done.number()]);
+    module.add(opcodes::LABEL, &[done.number()]);
     let exported = module.name();
     module.add(
-        61,
+        opcodes::LOAD,
         &[
             named.four.number(),
             exported.number(),
@@ -3884,7 +4119,7 @@ fn read_a_constant(module: &mut Module, named: &Named, which: u32) -> u32 {
 
     let where_from = module.name();
     module.add(
-        65,
+        opcodes::ACCESS_CHAIN,
         &[
             named.to_constant.number(),
             where_from.number(),
@@ -3896,7 +4131,7 @@ fn read_a_constant(module: &mut Module, named: &Named, which: u32) -> u32 {
 
     let value = module.name();
     module.add(
-        61,
+        opcodes::LOAD,
         &[named.four.number(), value.number(), where_from.number()],
     );
     value.number()
@@ -3919,13 +4154,16 @@ fn moved_about(module: &mut Module, named: &Named, value: u32, along: u8, negate
             let far = u32::from(along >> (lane * 2)) & 3;
             operands.push((lane + far) & 3);
         }
-        module.add(79, &operands);
+        module.add(opcodes::VECTOR_SHUFFLE, &operands);
         value = moved.number();
     }
 
     if negated {
         let turned = module.name();
-        module.add(127, &[named.four.number(), turned.number(), value]);
+        module.add(
+            opcodes::FLOAT_NEGATE,
+            &[named.four.number(), turned.number(), value],
+        );
         value = turned.number();
     }
 
@@ -3964,7 +4202,7 @@ fn read_whole(module: &mut Module, named: &Named, which: u8, from_register: bool
 
     let where_from = module.name();
     module.add(
-        65,
+        opcodes::ACCESS_CHAIN,
         &[
             named.to_one.number(),
             where_from.number(),
@@ -3975,7 +4213,7 @@ fn read_whole(module: &mut Module, named: &Named, which: u8, from_register: bool
 
     let value = module.name();
     module.add(
-        61,
+        opcodes::LOAD,
         &[named.four.number(), value.number(), where_from.number()],
     );
     value.number()
