@@ -1379,9 +1379,11 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
     // than as a record bit, and it writes the condition field itself from
     // whether the store happened. Letting the comparison run as well would
     // overwrite that with a test of the value stored.
+    //
+    // A vector comparison has a record bit of its own and writes field six.
     let records = (instruction
         .form()
-        .is_some_and(xenolith_ppc::Form::has_record_bit)
+        .is_some_and(|form| form.has_record_bit() && form.record_field() == 0)
         && instruction.record_bit()
         || matches!(
             instruction.opcode(),

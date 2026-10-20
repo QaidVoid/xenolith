@@ -196,7 +196,7 @@ impl Form {
     pub const fn has_record_bit(self) -> bool {
         matches!(
             self,
-            Self::M | Self::A | Self::X | Self::XO | Self::XS | Self::MD | Self::MDS
+            Self::M | Self::A | Self::X | Self::XO | Self::XS | Self::MD | Self::MDS | Self::VC
         )
     }
 
@@ -208,6 +208,33 @@ impl Form {
     #[must_use]
     pub const fn has_overflow_bit(self) -> bool {
         matches!(self, Self::XO)
+    }
+
+    /// Returns the position of this form's record bit.
+    ///
+    /// Almost every form keeps it at the bottom of the word, where the
+    /// identifying mask has already left it free. The vector comparison spends
+    /// the bit above its extended opcode instead, so the position belongs to
+    /// the form rather than to a single constant.
+    #[must_use]
+    pub const fn record_bit_position(self) -> u32 {
+        match self {
+            Self::VC => 10,
+            _ => 0,
+        }
+    }
+
+    /// Returns the condition register field a set record bit writes.
+    ///
+    /// Every form but the vector comparison records into field zero. That one
+    /// records into field six, which is why a caller that needs to know what a
+    /// record bit does has to ask the form rather than assume.
+    #[must_use]
+    pub const fn record_field(self) -> u8 {
+        match self {
+            Self::VC => 6,
+            _ => 0,
+        }
     }
 
     /// Returns whether this form has a link bit at the bottom of the word.
@@ -261,6 +288,17 @@ mod tests {
         Form::XS,
         Form::MD,
         Form::MDS,
+        Form::VX,
+        Form::VC,
+        Form::VA,
+        Form::Vx128Ls,
+        Form::Vx128Cv,
+        Form::Vx128,
+        Form::Vx128Ri,
+        Form::Vx128Cmp,
+        Form::Vx128Pwi,
+        Form::Vx128Perm,
+        Form::Vx128Sd,
     ];
 
     #[test]
@@ -279,10 +317,16 @@ mod tests {
     #[test]
     fn no_mask_covers_a_variant_bit_the_form_actually_has() {
         for form in ALL {
-            if !form.has_record_bit() && !form.has_link_bit() {
-                continue;
+            if form.has_record_bit() {
+                assert_eq!(
+                    form.mask() & (1 << form.record_bit_position()),
+                    0,
+                    "{form:?} covers its record bit"
+                );
             }
-            assert_eq!(form.mask() & 1, 0, "{form:?} covers its variant bit");
+            if form.has_link_bit() {
+                assert_eq!(form.mask() & 1, 0, "{form:?} covers its link bit");
+            }
         }
     }
 
@@ -323,7 +367,6 @@ mod tests {
             Form::SC,
             Form::XL,
             Form::VX,
-            Form::VC,
             Form::VA,
         ] {
             assert!(!form.has_record_bit(), "{form:?} should have no record bit");

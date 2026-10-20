@@ -883,6 +883,15 @@ mod tests {
         assert_eq!(render(0xfc00_001e, 0), "fctiwz f0, f0");
     }
 
+    /// The vector comparison spends its record bit where its extended opcode
+    /// starts, so reading the bottom of the word misses it.
+    #[test]
+    fn renders_the_vector_comparison_record_bit() {
+        assert_eq!(render(0x1000_00c6, 0), "vcmpeqfp v0, v0, v0");
+        assert_eq!(render(0x1000_04c6, 0), "vcmpeqfp. v0, v0, v0");
+        assert_eq!(render(0x1105_0406, 0), "vcmpequb. v8, v5, v0");
+    }
+
     /// The two cache touches name a hint in the field the other operations of
     /// the form leave unused, and a hint of zero is the one the mnemonic states.
     #[test]

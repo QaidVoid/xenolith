@@ -260,9 +260,13 @@ impl Instruction {
     /// spends that bit on something else, so a caller that does not check
     /// [`Form::has_record_bit`] will read the low bit of an immediate and
     /// conclude that loading a constant updates a condition field.
+    ///
+    /// The position comes from the form, because the vector comparison keeps
+    /// the bit above its extended opcode rather than at the bottom of the word.
     #[must_use]
-    pub const fn record_bit(self) -> bool {
-        self.word & 1 != 0
+    pub fn record_bit(self) -> bool {
+        let position = self.form().map_or(0, Form::record_bit_position);
+        self.word & (1 << position) != 0
     }
 
     /// Returns the destination vector register of an extension instruction.

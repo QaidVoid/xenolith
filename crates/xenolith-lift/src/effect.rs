@@ -1108,8 +1108,13 @@ pub fn effect_of(instruction: Instruction) -> Option<Effect> {
     //
     // Recording a result copies the summary overflow bit into the field, the
     // same way a compare does, so it reads the exception register too.
+    //
+    // A vector comparison has a record bit of its own, writes field six, and
+    // does so from the comparison itself.
     let form = instruction.form();
-    let records = (form.is_some_and(Form::has_record_bit) && instruction.record_bit())
+    let records = form
+        .is_some_and(|form| form.has_record_bit() && form.record_field() == RECORD_FIELD)
+        && instruction.record_bit()
         || always_records(instruction.opcode());
     if records {
         effect.read(Location::Exception);
