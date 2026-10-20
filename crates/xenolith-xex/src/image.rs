@@ -30,7 +30,13 @@ pub(crate) fn reconstruct_uncompressed(body: &[u8], image_size: u32) -> Result<V
     image
         .try_reserve(size)
         .map_err(|_| Error::ImageTooLarge { size: image_size })?;
-    image.extend_from_slice(body.get(..size.min(body.len())).unwrap_or_default());
+    if body.len() > size {
+        return Err(Error::BodyExceedsImage {
+            available: body.len(),
+            image_size,
+        });
+    }
+    image.extend_from_slice(body);
     image.resize(size, 0);
 
     Ok(image)
@@ -123,6 +129,26 @@ mod tests {
         let image = reconstruct_uncompressed(&body, 8).unwrap();
 
         assert_eq!(image, vec![0xaa, 0xaa, 0xaa, 0xaa, 0, 0, 0, 0]);
+    }
+
+    /// An uncompressed body is the image, so a body longer than the declared
+    /// image is a file disagreeing with itself rather than one with spare room.
+    #[test]
+    fn uncompressed_rejects_a_body_longer_than_the_image() {
+        let body = vec![0xaa; 16];
+
+        let error = reconstruct_uncompressed(&body, 8).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                Error::BodyExceedsImage {
+                    available: 16,
+                    image_size: 8
+                }
+            ),
+            "expected a body length error, got {error:?}"
+        );
     }
 
     #[test]

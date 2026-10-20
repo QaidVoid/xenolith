@@ -93,12 +93,14 @@ impl SecurityInfo {
     /// # Errors
     ///
     /// Returns an error when the offset lies outside the input, when the block
-    /// is truncated, or when the declared page descriptor count does not fit in
-    /// the remaining bytes.
+    /// is truncated, when the declared page descriptor count does not fit in
+    /// the remaining bytes, or when the declared length is not what the block's
+    /// contents account for.
     pub(crate) fn parse(reader: &Reader<'_>, offset: u32) -> Result<Self> {
         let mut block = reader.at(u64::from(offset), "security_info_offset")?;
+        let start = block.offset();
 
-        let _header_size = block.u32("security_info.header_size")?;
+        let header_size = block.u32("security_info.header_size")?;
         let image_size = block.u32("security_info.image_size")?;
         block.skip(256, "security_info.rsa_signature")?;
         block.skip(4, "security_info.reserved")?;
@@ -116,6 +118,19 @@ impl SecurityInfo {
 
         let descriptor_count = block.u32("security_info.page_descriptor_count")?;
         let page_descriptors = parse_page_descriptors(&mut block, descriptor_count)?;
+
+        // The block states its own length, and every byte of it is accounted
+        // for: the fixed fields, then one descriptor each. A declared length
+        // that disagrees means the file says something about itself that its
+        // contents do not support.
+        let accounted = block.offset().saturating_sub(start);
+        let declared = usize::try_from(header_size).unwrap_or(usize::MAX);
+        if declared != accounted {
+            return Err(Error::SecurityInfoInvalidSize {
+                declared: header_size,
+                actual: u32::try_from(accounted).unwrap_or(u32::MAX),
+            });
+        }
 
         Ok(Self {
             image_size,

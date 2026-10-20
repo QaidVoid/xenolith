@@ -127,6 +127,19 @@ pub enum Error {
         size: u32,
     },
 
+    /// The body holds more bytes than the image it describes.
+    ///
+    /// An uncompressed body is the image, so a body longer than the declared
+    /// image is a file whose two statements about itself disagree. Truncating
+    /// would silently drop the difference.
+    #[error("the body holds {available} bytes for an image of {image_size}")]
+    BodyExceedsImage {
+        /// Bytes present in the body.
+        available: usize,
+        /// The declared image size.
+        image_size: u32,
+    },
+
     /// The basic scheme blocks describe more bytes than the image can hold.
     #[error("basic blocks describe {described} bytes for an image of {image_size}")]
     BasicBlocksExceedImage {
@@ -145,11 +158,46 @@ pub enum Error {
         available: usize,
     },
 
-    /// The file format info declared a size that does not describe whole blocks.
+    /// The security info block declared a length its contents do not fill.
+    ///
+    /// The block is a fixed set of fields followed by one descriptor per page,
+    /// so its length is fully determined. A declared length that disagrees means
+    /// the block was misread, and everything offset from it would be too.
+    #[error("security info declares {declared} bytes but its contents fill {actual}")]
+    SecurityInfoInvalidSize {
+        /// The length the block declared.
+        declared: u32,
+        /// The length its contents actually account for.
+        actual: u32,
+    },
+
+    /// The file format info declared a size its fields do not fill.
     #[error("file format info declares an invalid size of {size} bytes")]
     FileFormatInfoInvalidSize {
         /// The size value that was rejected.
         size: u32,
+    },
+
+    /// The optional header directory declares more entries than could fit.
+    ///
+    /// Each entry costs more parsed than it does on disk, so a count that fits
+    /// the directory at its on-disk width can still ask for several times the
+    /// memory the file holds.
+    #[error("optional header directory declares {count} entries in {available} bytes")]
+    OptionalHeaderCountTooLarge {
+        /// The count the directory declared.
+        count: u32,
+        /// Bytes remaining in the file when the directory was reached.
+        available: usize,
+    },
+
+    /// The import libraries payload declared a length its records do not fill.
+    #[error("import libraries declare {declared} bytes but their records fill {actual}")]
+    ImportLibrariesInvalidSize {
+        /// The length the payload declared.
+        declared: u32,
+        /// The length its records actually account for.
+        actual: u32,
     },
 
     /// An import library record's declared size disagrees with its contents.

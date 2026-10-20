@@ -60,6 +60,19 @@ trusted.
   that each yields an error and never a panic.
 - Fuzz targets cover the parser.
 
+## What is rejected
+
+Every structure that states its own length is held to it. The security info
+block, the file format info and the import libraries each declare a size, and a
+declared size its contents do not fill is an error naming the field rather than
+trailing bytes nobody sees. An uncompressed body longer than the image it
+describes is an error too.
+
+The optional header directory is bounded by what its remaining bytes could hold
+at the parsed entry size rather than at the eight bytes each entry takes on
+disk, so a crafted count cannot ask for three times the memory the file could
+hold.
+
 ## What is not implemented
 
 - **LZX decompression**, for want of a title that uses it.

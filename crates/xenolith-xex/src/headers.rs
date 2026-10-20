@@ -152,8 +152,8 @@ impl FileFormatInfo {
     ///
     /// # Errors
     ///
-    /// Returns an error when the payload is truncated or declares a size
-    /// smaller than its own fixed fields.
+    /// Returns an error when the payload is truncated, or when the declared
+    /// size is not what the fields and the payload's own length account for.
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
         let mut reader = Reader::new(bytes);
 
@@ -200,6 +200,15 @@ impl FileFormatInfo {
                 });
             }
             _ => {}
+        }
+
+        // The declared length covers the fields after it, and the payload holds
+        // nothing else. A length that disagrees means trailing bytes nobody
+        // would see, or fields read past the end of what the file said was
+        // there.
+        let declared = usize::try_from(info_size).unwrap_or(usize::MAX);
+        if declared != bytes.len() {
+            return Err(Error::FileFormatInfoInvalidSize { size: info_size });
         }
 
         Ok(info)
@@ -305,15 +314,16 @@ pub struct ImportLibrary<'a> {
 /// # Errors
 ///
 /// Returns an error when the payload is truncated, when the string table does
-/// not hold the names the records index, or when a record's declared size does
-/// not match the imports it claims.
+/// not hold the names the records index, when a record's declared size does not
+/// match the imports it claims, or when the declared total is not what the
+/// records account for.
 pub(crate) fn parse_import_libraries(bytes: &[u8]) -> Result<Vec<ImportLibrary<'_>>> {
     /// Bytes of a library record before its import addresses.
     const RECORD_HEADER_SIZE: u32 = 40;
 
     let mut reader = Reader::new(bytes);
 
-    let _total_size = reader.u32("import_libraries.total_size")?;
+    let total_size = reader.u32("import_libraries.total_size")?;
     let string_table_size = reader.u32("import_libraries.string_table_size")?;
     let library_count = reader.u32("import_libraries.library_count")?;
 
@@ -368,6 +378,18 @@ pub(crate) fn parse_import_libraries(bytes: &[u8]) -> Result<Vec<ImportLibrary<'
         });
     }
 
+    // The payload states its own length, and the records just walked account
+    // for the whole of it. A length the payload does not fill leaves bytes the
+    // caller would never see, and one the payload overruns means a record was
+    // read past where the file said the table ended.
+    let declared = usize::try_from(total_size).unwrap_or(usize::MAX);
+    if declared != bytes.len() {
+        return Err(Error::ImportLibrariesInvalidSize {
+            declared: total_size,
+            actual: u32::try_from(reader.offset()).unwrap_or(u32::MAX),
+        });
+    }
+
     Ok(libraries)
 }
 
@@ -418,6 +440,38 @@ mod tests {
         bytes.extend_from_slice(&table);
         bytes.extend_from_slice(&records);
         bytes
+    }
+
+    /// The payload states its own length, and a length its records do not fill
+    /// means trailing bytes nobody would see.
+    #[test]
+    fn rejects_an_import_libraries_length_that_disagrees_with_its_records() {
+        let mut bytes = import_payload(&["xboxkrnl.exe"], &[(0, &[0x8200_0000])]);
+        // Four bytes longer than the records and the table actually fill.
+        let declared = u32::try_from(bytes.len() + 4).unwrap();
+        bytes[..4].copy_from_slice(&declared.to_be_bytes());
+
+        let error = parse_import_libraries(&bytes).unwrap_err();
+
+        assert!(
+            matches!(error, Error::ImportLibrariesInvalidSize { .. }),
+            "expected a size error, got {error:?}"
+        );
+    }
+
+    /// The file format info states its own length too, and the fields after it
+    /// have to account for the whole of what it claims.
+    #[test]
+    fn rejects_a_file_format_info_length_that_disagrees_with_its_fields() {
+        let mut bytes = format_payload(0, 0, &[]);
+        bytes[..4].copy_from_slice(&12u32.to_be_bytes());
+
+        let error = FileFormatInfo::parse(&bytes).unwrap_err();
+
+        assert!(
+            matches!(error, Error::FileFormatInfoInvalidSize { size: 12 }),
+            "expected a size error, got {error:?}"
+        );
     }
 
     #[test]

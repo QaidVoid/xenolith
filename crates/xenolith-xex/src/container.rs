@@ -11,6 +11,7 @@
 //! nothing and is preserved for callers rather than discarded.
 
 use alloc::borrow::Cow;
+use core::mem::size_of;
 
 use crate::crypto::{KeyMaterial, decrypt_image, unwrap_session_key};
 use crate::error::{Error, Result};
@@ -425,6 +426,11 @@ fn parse_optional_headers<'a>(
     reader: &mut Reader<'a>,
     count: u32,
 ) -> Result<Vec<OptionalHeader<'a>>> {
+    // Two 32-bit fields on disk, and the parsed entry is larger than that
+    // because it borrows a resolved value. Checking the count against the
+    // on-disk width would let a file of N bytes drive an allocation of three
+    // times N, so the count is bounded by what the remaining bytes could hold
+    // at the parsed size.
     const ENTRY_SIZE: usize = 8;
 
     let declared = usize::try_from(count).unwrap_or(usize::MAX);
@@ -434,6 +440,14 @@ fn parse_optional_headers<'a>(
             field: "optional_header_directory",
             offset: reader.offset(),
             needed,
+            available: reader.remaining(),
+        });
+    }
+
+    let room = reader.remaining() / size_of::<OptionalHeader>();
+    if declared > room {
+        return Err(Error::OptionalHeaderCountTooLarge {
+            count,
             available: reader.remaining(),
         });
     }
@@ -529,6 +543,7 @@ pub(crate) mod build {
         export_table: u32,
         descriptors: Vec<(u32, u8)>,
         override_descriptor_count: Option<u32>,
+        override_security_size: Option<u32>,
         session_key: [u8; 16],
         body: Vec<u8>,
         entries: Vec<(u32, Payload)>,
@@ -549,6 +564,7 @@ pub(crate) mod build {
                 export_table: 0,
                 descriptors: vec![(1, 1)],
                 override_descriptor_count: None,
+                override_security_size: None,
                 session_key: [0; 16],
                 body: Vec::new(),
                 entries: Vec::new(),
@@ -616,6 +632,12 @@ pub(crate) mod build {
             self
         }
 
+        /// Writes a security info length that disagrees with its contents.
+        pub(crate) fn declared_security_size(mut self, size: u32) -> Self {
+            self.override_security_size = Some(size);
+            self
+        }
+
         /// Sets the wrapped session key recorded in the security info.
         pub(crate) fn session_key(mut self, key: [u8; 16]) -> Self {
             self.session_key = key;
@@ -680,8 +702,9 @@ pub(crate) mod build {
             let count = self
                 .override_descriptor_count
                 .unwrap_or_else(|| u32::try_from(self.descriptors.len()).unwrap_or(u32::MAX));
-            let header_size = u32::try_from(SECURITY_FIXED_SIZE + self.descriptors.len() * 24)
-                .unwrap_or(u32::MAX);
+            let header_size = self.override_security_size.unwrap_or_else(|| {
+                u32::try_from(SECURITY_FIXED_SIZE + self.descriptors.len() * 24).unwrap_or(u32::MAX)
+            });
 
             let mut bytes = Vec::with_capacity(SECURITY_FIXED_SIZE + self.descriptors.len() * 24);
             bytes.extend_from_slice(&header_size.to_be_bytes());
@@ -1039,6 +1062,67 @@ mod tests {
         );
     }
 
+    /// The block states its own length, and a length its contents do not fill
+    /// means the block was misread rather than merely padded.
+    #[test]
+    fn rejects_a_security_info_length_that_disagrees_with_its_contents() {
+        let bytes = ContainerBuilder::new()
+            .declared_security_size(0x200)
+            .build();
+
+        let error = Container::parse(&bytes).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                Error::SecurityInfoInvalidSize {
+                    declared: 0x200,
+                    ..
+                }
+            ),
+            "expected a size error, got {error:?}"
+        );
+    }
+
+    /// A count the directory cannot hold at the parsed entry size is refused
+    /// even when it fits at the eight bytes each entry takes on disk.
+    #[test]
+    fn rejects_an_optional_header_count_that_cannot_fit() {
+        // One entry present, so the directory is eight bytes long. A count of
+        // forty fits the rest of the file at eight bytes an entry and not at
+        // the size each parsed entry becomes.
+        let bytes = ContainerBuilder::new()
+            .inline(0x0004, 0)
+            .declared_count(40)
+            .build();
+
+        let error = Container::parse(&bytes).unwrap_err();
+
+        assert!(
+            matches!(error, Error::OptionalHeaderCountTooLarge { count: 40, .. }),
+            "expected a count error, got {error:?}"
+        );
+    }
+
+    /// A count larger than the directory is caught before any of it is read.
+    #[test]
+    fn rejects_an_optional_header_directory_that_does_not_fit() {
+        let bytes = ContainerBuilder::new().declared_count(0xffff_ffff).build();
+
+        let error = Container::parse(&bytes).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                Error::Truncated {
+                    field: "optional_header_directory",
+                    ..
+                }
+            ),
+            "expected a truncation error, got {error:?}"
+        );
+    }
+
     #[test]
     fn accepts_the_earlier_format() {
         let bytes = ContainerBuilder::new().magic(*b"XEX1").build();
@@ -1108,11 +1192,12 @@ mod tests {
     #[test]
     fn resolves_a_variable_size_entry() {
         let payload = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
-        let bytes = ContainerBuilder::new().variable(0x0003, &payload).build();
+        // Not the file format info key, whose payload has a shape of its own.
+        let bytes = ContainerBuilder::new().variable(0x0004, &payload).build();
 
         let container = Container::parse(&bytes).unwrap();
         let data = container
-            .optional_header(OptionalHeaderKey((0x0003 << 8) | 0xff))
+            .optional_header(OptionalHeaderKey((0x0004 << 8) | 0xff))
             .and_then(OptionalHeaderValue::data)
             .unwrap();
 
