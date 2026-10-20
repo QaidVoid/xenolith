@@ -1199,6 +1199,7 @@ xenolith_function xenolith_lookup(uint32_t address) {
 
 static uint8_t *where;
 static uint32_t slot;
+
 static uint32_t wrong;
 
 /* What each thread puts in the slot and what it read back. */
@@ -1592,6 +1593,15 @@ xenolith_function xenolith_lookup(uint32_t address) {
 static uint8_t *where;
 static uint32_t slot;
 
+/* Asks the one question whose answer is said once, so that several threads
+ * asking at once all race for that one report. */
+static void *say_it_once(void *given) {
+    (void)given;
+    xenolith_context ctx = {0};
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 102, "PsGetCurrentProcessType");
+    return NULL;
+}
+
 /* Two threads putting something in one thread-local slot and reading it back,
  * which is where a shared set shows up. */
 static void *use_the_slot(void *given) {
@@ -1644,6 +1654,20 @@ int main(void) {
     xenolith_import(&ctx, where, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
     ctx.r[3] = 0x400;
     xenolith_import(&ctx, where, "xboxkrnl.exe", 304, "RtlLeaveCriticalSection");
+
+    /* The reporter, from two threads at once. Both ask the kernel what kind of
+     * process this is, which is answered once and said once, so both race for
+     * the one line it writes and for the bookkeeping that decides whether to
+     * write it at all. */
+    pthread_t saying[8];
+    for (int at = 0; at < 8; at++) {
+        if (pthread_create(&saying[at], NULL, say_it_once, NULL) != 0) {
+            return 5;
+        }
+    }
+    for (int at = 0; at < 8; at++) {
+        pthread_join(saying[at], NULL);
+    }
 
     /* The thread-local slots, from two threads at once. */
     xenolith_import(&ctx, where, "xboxkrnl.exe", 338, "KeTlsAlloc");
