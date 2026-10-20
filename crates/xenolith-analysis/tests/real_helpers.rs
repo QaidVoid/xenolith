@@ -58,10 +58,7 @@ macro_rules! supplied_image {
                     let bytes = std::fs::read(&path).expect("reading the analysis image");
                     image_of(bytes, base)
                 }
-                None => {
-                    eprintln!("skipping: no analysis image was supplied");
-                    return;
-                }
+                None => panic!("XENOLITH_ANALYSIS_XEX is not set, so this check could not run"),
             },
         }
     };
@@ -91,6 +88,7 @@ fn expected_addresses() -> Option<Vec<(u32, Option<u8>)>> {
 }
 
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn detection_finds_the_hand_recorded_helper_addresses() {
     let image = supplied_image!();
     let helpers = detect(&image);
@@ -146,6 +144,7 @@ fn detection_finds_the_hand_recorded_helper_addresses() {
 }
 
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn every_helper_kind_and_direction_is_present() {
     let image = supplied_image!();
     let helpers = detect(&image);

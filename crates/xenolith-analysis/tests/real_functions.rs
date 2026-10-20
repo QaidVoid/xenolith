@@ -114,16 +114,14 @@ macro_rules! supplied_image {
                     let words = executable_words(&image);
                     (image, words)
                 }
-                None => {
-                    eprintln!("skipping: no analysis image was supplied");
-                    return;
-                }
+                None => panic!("XENOLITH_ANALYSIS_XEX is not set, so this check could not run"),
             },
         }
     };
 }
 
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn reports_what_direct_calls_reach() {
     let (image, words) = supplied_image!();
 
@@ -165,6 +163,7 @@ fn reports_what_direct_calls_reach() {
 /// Functions may share code, but an instruction claimed by two of them must
 /// still only be counted once, or coverage would read above what exists.
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn claimed_instructions_never_exceed_the_section() {
     let (image, words) = supplied_image!();
 
@@ -176,6 +175,7 @@ fn claimed_instructions_never_exceed_the_section() {
 /// Reports the shape of the graphs discovery produced, so a figure that looks
 /// wrong can be investigated rather than assumed.
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn reports_graph_shape() {
     let (image, _) = supplied_image!();
     let program = analyze(&image, &[]);
@@ -275,6 +275,7 @@ fn expected_table() -> Option<Expected> {
 }
 
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn reports_jump_table_recovery() {
     let (image, _) = supplied_image!();
     let program = analyze(&image, &[]);
@@ -404,6 +405,7 @@ fn reference_tables(text: &str) -> Vec<Reference> {
 /// productive. The comparison is on the targets and the default, because a
 /// table that agrees on those is the same table however it was keyed.
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn recovered_tables_agree_with_the_reference() {
     let (image, _) = supplied_image!();
     let Ok(path) = std::env::var("XENOLITH_ANALYSIS_SWITCHES") else {
@@ -629,6 +631,7 @@ fn pointed_at_but_unclaimed(
 
 /// is what turns a number into a reason.
 #[test]
+#[ignore = "needs XENOLITH_ANALYSIS_XEX"]
 fn reports_the_largest_unclaimed_ranges() {
     let (image, _) = supplied_image!();
     let program = analyze(&image, &[]);

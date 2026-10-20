@@ -12,27 +12,25 @@ use xenolith_xex::{
     OptionalHeaderValue, imports,
 };
 
-/// Returns the path named by `XENOLITH_TEST_XEX`, or `None` when it is unset.
-fn test_xex_path() -> Option<PathBuf> {
-    std::env::var_os("XENOLITH_TEST_XEX").map(PathBuf::from)
+/// Returns the path named by `XENOLITH_TEST_XEX`, or fails naming it.
+// The failure is the point: a check that could not run must not pass.
+#[allow(clippy::expect_used)]
+fn test_xex_path() -> PathBuf {
+    std::env::var_os("XENOLITH_TEST_XEX")
+        .map(PathBuf::from)
+        .expect("XENOLITH_TEST_XEX is not set, so this check could not run")
 }
 
-/// Skips the enclosing test when no real container has been supplied.
+/// Reads the real container, which these tests are ignored without.
 macro_rules! container_bytes {
-    () => {
-        match test_xex_path() {
-            Some(path) => {
-                std::fs::read(&path).expect("reading the container named by the environment")
-            }
-            None => {
-                eprintln!("skipping: XENOLITH_TEST_XEX is not set");
-                return;
-            }
-        }
-    };
+    () => {{
+        let path = test_xex_path();
+        std::fs::read(&path).expect("reading the container named by the environment")
+    }};
 }
 
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn parses_a_real_container() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -51,6 +49,7 @@ fn parses_a_real_container() {
 }
 
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn every_optional_header_resolves_within_the_file() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -75,6 +74,7 @@ fn every_optional_header_resolves_within_the_file() {
 /// the only place that reading can be confirmed, and a wrong reading here would
 /// silently mis-size every structure the loader goes on to parse.
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn fixed_size_entries_match_their_declared_word_count() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -109,6 +109,7 @@ fn fixed_size_entries_match_their_declared_word_count() {
 /// offset, which no synthetic fixture can catch because the builder writes both
 /// from the same value.
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn the_two_recorded_load_addresses_agree() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -123,6 +124,7 @@ fn the_two_recorded_load_addresses_agree() {
 }
 
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn the_descriptors_account_for_the_whole_image() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -146,6 +148,7 @@ fn the_descriptors_account_for_the_whole_image() {
 }
 
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn the_entry_point_falls_inside_the_image() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -164,6 +167,7 @@ fn the_entry_point_falls_inside_the_image() {
 }
 
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn the_import_library_count_matches_the_security_info() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -185,6 +189,7 @@ fn the_import_library_count_matches_the_security_info() {
 /// bytes between the image offset and the end of the file. This is the single
 /// strongest check available without decrypting anything.
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn basic_scheme_blocks_account_for_the_stored_image() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -213,6 +218,7 @@ fn basic_scheme_blocks_account_for_the_stored_image() {
 /// Decoding an encrypted title without key material must fail loudly rather
 /// than handing back a buffer of noise.
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn decoding_an_encrypted_title_without_a_key_is_refused() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
@@ -240,6 +246,7 @@ fn decoding_an_encrypted_title_without_a_key_is_refused() {
 /// descriptors cover that whole range and a section must not claim addresses
 /// the byte buffer cannot serve.
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn the_decoded_image_matches_an_independent_reference() {
     let bytes = container_bytes!();
 
@@ -288,6 +295,7 @@ fn the_decoded_image_matches_an_independent_reference() {
 /// inside each word matches the list it was found under, and slots and thunks
 /// land in the kinds of section each belongs in.
 #[test]
+#[ignore = "needs XENOLITH_TEST_XEX"]
 fn every_import_record_reads() {
     let bytes = container_bytes!();
     let container = Container::parse(&bytes).expect("real container should parse");
