@@ -49,6 +49,14 @@ const fn packing(kind: u32, width: u32, places: u32) -> u32 {
         | (places << 6)
 }
 
+/// Builds one encoding of the instruction that unpacks a vertex format.
+///
+/// The format sits in the field the packer uses for its own, with the low bits
+/// set the way the title's own instructions set them.
+const fn unpacking(kind: u32) -> u32 {
+    0x1800_07f0 | (DESTINATION << 21) | (SOURCE << 11) | (kind << 16)
+}
+
 /// One recorded case: what went in, what the instruction was, what came out.
 struct Case {
     what: &'static str,
@@ -62,6 +70,7 @@ fn cases() -> Vec<Case> {
     let mut all = colour_cases();
     all.extend(halfword_cases());
     all.extend(half_precision_cases());
+    all.extend(unpack_cases());
     all
 }
 
@@ -228,6 +237,176 @@ fn half_precision_cases() -> Vec<Case> {
     ]
 }
 
+/// Unpacking, which is the other direction and the one the harness that runs an
+/// instruction on emulated hardware cannot reach either.
+///
+/// The expected values below are worked out from the reference implementation in
+/// the corpus rather than from a console, and the reference stores a guest
+/// register reversed in its host variable, so its host lane `n` is guest lane
+/// `3 - n`. Every case here is written in guest lanes. The two agree on the lane
+/// order for all five formats, which is worth saying because the reference reads
+/// the four bytes of a colour through an index list, and the order of that list
+/// is the only thing that could have gone the other way.
+fn unpack_cases() -> Vec<Case> {
+    let mut all = unpack_colour_cases();
+    all.extend(unpack_halfword_cases());
+    all.extend(unpack_packed_cases());
+    all.extend(unpack_half_cases());
+    all.extend(unpack_four_half_cases());
+    all
+}
+
+/// Builds the cases for one format, from a list of what it is and what it
+/// leaves behind.
+///
+/// The source is always the two words the format reads out of, which is the
+/// second and third for the four that read a whole word and the third alone for
+/// those that read half of one.
+fn unpacked(kind: u32, cases: &[(&'static str, [u32; 4], [u32; 4])]) -> Vec<Case> {
+    cases
+        .iter()
+        .map(|(what, from, into)| Case {
+            what,
+            word: unpacking(kind),
+            from: *from,
+            into: *into,
+        })
+        .collect()
+}
+
+/// A colour, four bytes out of the last word.
+///
+/// Each byte goes back into the low bits of one, so the result reads as one plus
+/// the byte over eight million. The lanes come out red, green, blue, alpha,
+/// which is the order a colour is stored in rather than the order it is named
+/// in, and it is the reverse of the order the packing format writes them in.
+fn unpack_colour_cases() -> Vec<Case> {
+    unpacked(
+        0,
+        &[
+            (
+                "a colour of four bytes in the last word",
+                [0, 0, 0, 0x0403_0201],
+                [0x3f80_0003, 0x3f80_0002, 0x3f80_0001, 0x3f80_0004],
+            ),
+            (
+                "a colour of the ends of the byte range",
+                [0, 0, 0, 0x00ff_0000],
+                [0x3f80_00ff, 0x3f80_0000, 0x3f80_0000, 0x3f80_0000],
+            ),
+        ],
+    )
+}
+
+/// Two halfwords read as three plus each.
+///
+/// The value rides in the low bits and the two ends of the register are nothing
+/// and one. The first case has each halfword at an end of its range, and the
+/// reading of three plus each turns those into the two nearest floats either
+/// side of three.
+fn unpack_halfword_cases() -> Vec<Case> {
+    unpacked(
+        4,
+        &[
+            (
+                "two halfwords at the ends of the range",
+                [0, 0, 0, 0x8000_7fff],
+                [0x403f_8000, 0x4040_7fff, 0x0000_0000, 0x3f80_0000],
+            ),
+            (
+                "two halfwords of nothing and of less than nothing",
+                [0, 0, 0, 0x0000_8000],
+                [0x4040_0000, 0x403f_8000, 0x0000_0000, 0x3f80_0000],
+            ),
+        ],
+    )
+}
+
+/// Three tens and a two, where the three are three plus each and the two is
+/// one plus it.
+///
+/// The ends of the ten bit field are here because that is where the sign lives,
+/// and both ends of the two bit field because that one carries no sign.
+fn unpack_packed_cases() -> Vec<Case> {
+    unpacked(
+        8,
+        &[
+            (
+                "three tens and a two of the most negative ten",
+                [0, 0, 0, 0x7fff_ffff],
+                [0x403f_ffff, 0x403f_ffff, 0x403f_ffff, 0x3f80_0001],
+            ),
+            (
+                "three tens and a two of the ends of the two bit field",
+                [0, 0, 0, 0xc000_03ff],
+                [0x403f_ffff, 0x4040_0000, 0x4040_0000, 0x3f80_0003],
+            ),
+        ],
+    )
+}
+
+/// Two of the half sized floats, and the three that are not numbers in ordinary
+/// arithmetic: a denormal, which has no bits in its exponent, an infinite one,
+/// and one that is not a number at all.
+///
+/// All three are here because a conversion that has only ever seen ordinary
+/// values says nothing about what it does with the other three, and a title
+/// reaches them. What it does with them is worth saying plainly, because none of
+/// the three answers is the one a reader expects. A denormal comes out as the
+/// sign on its own, so a denormal and a zero both become a zero and the
+/// magnitude between them is lost. An infinite half comes out as a large finite
+/// float, `0x4780_0000` for a positive one, because its exponent is not
+/// special-cased and lands in the ordinary range; it does not come out infinite.
+/// A half that is not a number stays one, because its mantissa does survive the
+/// widening, and `0x7e00` becomes `0x47c0_0000`.
+fn unpack_half_cases() -> Vec<Case> {
+    unpacked(
+        12,
+        &[
+            (
+                "two halves, one the smallest denormal and one less than nothing",
+                [0, 0, 0, 0x0001_8001],
+                [0x0000_0000, 0x8000_0000, 0x0000_0000, 0x3f80_0000],
+            ),
+            (
+                "two halves of the largest denormal either side of nothing",
+                [0, 0, 0, 0x83ff_8003],
+                [0x8000_0000, 0x8000_0000, 0x0000_0000, 0x3f80_0000],
+            ),
+            (
+                "two halves, one infinite and one that is not a number",
+                [0, 0, 0, 0x7c00_7e00],
+                [0x4780_0000, 0x47c0_0000, 0x0000_0000, 0x3f80_0000],
+            ),
+            (
+                "two halves of one and of less than one",
+                [0, 0, 0, 0x3c00_bc00],
+                [0x3f80_0000, 0xbf80_0000, 0x0000_0000, 0x3f80_0000],
+            ),
+        ],
+    )
+}
+
+/// Four of them, filling the whole register, with the same three odd inputs
+/// alongside the ordinary ones.
+fn unpack_four_half_cases() -> Vec<Case> {
+    unpacked(
+        20,
+        &[
+            (
+                "four halves of two and of less than two",
+                [0, 0, 0x4000_c000, 0x4000_c000],
+                [0x4000_0000, 0xc000_0000, 0x4000_0000, 0xc000_0000],
+            ),
+            (
+                "four halves, two denormals, an infinite one and one that is not a number",
+                [0, 0, 0x83ff_8003, 0x7c00_7e00],
+                [0x8000_0000, 0x8000_0000, 0x4780_0000, 0x47c0_0000],
+            ),
+        ],
+    )
+}
+
 /// The encodings the title this was built against actually holds.
 ///
 /// These four are the reason any of this exists. An encoding read wrongly would
@@ -350,6 +529,75 @@ fn a_function_holding_a_pack_lifts_and_compiles() {
     );
 }
 
+/// The halfword store a second title uses.
+///
+/// The address picks which of the eight halfwords goes out, and the store has
+/// to reach guest memory rather than a register, so the check is that the C
+/// names the halfword store at the right lane.
+#[test]
+fn a_halfword_store_lifts() {
+    // stvehx v1, r3, r4
+    let instruction = Instruction::decode(0x7c23_214e);
+    assert_eq!(
+        instruction.opcode(),
+        xenolith_ppc::Opcode::Stvehx,
+        "the encoding under test is not the halfword store"
+    );
+
+    let code = xenolith_lift::code_for(instruction, 0).expect("the halfword store should lift");
+
+    assert!(
+        code.contains("xenolith_store16(base, ea, xenolith_vector_u16("),
+        "the halfword store was not emitted as a halfword store: {code}"
+    );
+    assert!(
+        code.contains("& ~1u"),
+        "the address was not brought to a halfword boundary: {code}"
+    );
+    assert_eq!(compiles("halfword-store", &code), Ok(()));
+}
+
+/// Wraps emitted code in what it needs to compile, and builds it.
+fn compiles(name: &str, emitted: &str) -> Result<(), String> {
+    let Some(compiler) = host_compiler() else {
+        return Ok(());
+    };
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
+    std::fs::write(directory.join("xenolith.h"), RUNTIME_HEADER)
+        .map_err(|error| format!("writing the header: {error}"))?;
+
+    let program = format!(
+        "#include \"xenolith.h\"\n\n\
+         void xenolith_dispatch(xenolith_context *c, uint8_t *b, uint32_t a, uint32_t f) {{ (void)c; (void)b; (void)a; (void)f; }}\n\
+         void xenolith_trap(xenolith_context *c, uint8_t *b, uint32_t a) {{ (void)c; (void)b; (void)a; }}\n\
+         void xenolith_import(xenolith_context *c, uint8_t *b, const char *l, uint32_t o, const char *n) {{ (void)c; (void)b; (void)l; (void)o; (void)n; }}\n\
+         uint32_t xenolith_reserve32(const uint8_t *b, uint32_t a) {{ return xenolith_load32(b, a); }}\n\
+         uint64_t xenolith_reserve64(const uint8_t *b, uint32_t a) {{ return xenolith_load64(b, a); }}\n\
+         uint8_t xenolith_conditional32(uint8_t *b, uint32_t a, uint32_t v) {{ xenolith_store32(b, a, v); return 1; }}\n\
+         uint8_t xenolith_conditional64(uint8_t *b, uint32_t a, uint64_t v) {{ xenolith_store64(b, a, v); return 1; }}\n\
+         uint64_t xenolith_timebase(void) {{ return 0; }}\n\n\
+         void body(xenolith_context *ctx, uint8_t *base) {{\n    uint32_t address;\n    (void)address;\n{emitted}\n}}\n"
+    );
+    std::fs::write(directory.join("lifted.c"), program)
+        .map_err(|error| format!("writing the code: {error}"))?;
+
+    let built = Command::new(compiler)
+        .args(["-std=c17", "-c", "-O1", "-Wall", "-Wextra", "-Werror", "-I"])
+        .arg(&directory)
+        .arg("-o")
+        .arg(directory.join("lifted.o"))
+        .arg(directory.join("lifted.c"))
+        .output()
+        .map_err(|error| format!("running the host compiler: {error}"))?;
+    if built.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&built.stderr).into_owned())
+}
+
 /// Returns a host C compiler, or nothing where none is installed.
 fn host_compiler() -> Option<&'static str> {
     ["clang", "cc", "gcc"].into_iter().find(|candidate| {
@@ -468,7 +716,7 @@ fn the_model_packs_what_the_hardware_packs() {
 
     assert!(
         wrong.is_empty(),
-        "the model packs {} of {} cases differently from the hardware:\n\n  {}",
+        "the model packs or unpacks {} of {} cases differently from the recorded values:\n\n  {}",
         wrong.len(),
         cases.len(),
         wrong.join("\n\n  ")

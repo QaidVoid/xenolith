@@ -167,6 +167,31 @@ static inline void xenolith_vector_set_u16(xenolith_vector *v, unsigned lane, ui
     v->u8[lane * 2 + 1] = (uint8_t)value;
 }
 
+/* Turns one of the console's half sized floats into a whole one.
+ *
+ * It is not quite the one everybody else keeps: there is no value that stands
+ * for infinity and none that stands for not a number, so the largest exponent
+ * is just the largest exponent, and a value too small to be written with an
+ * exponent of its own is nought rather than being written the long way. Both
+ * follow from the shift being done as it stands, which is why this is written
+ * out rather than handed to a host instruction that would round it the other
+ * way.
+ */
+static inline float xenolith_half_to_float(uint16_t half) {
+    uint32_t mantissa = half & 0x3ffu;
+    uint32_t exponent = (half >> 10) & 0x1fu;
+    uint32_t made;
+    float out;
+
+    if (exponent == 0) {
+        mantissa = 0;
+        exponent = (uint32_t)-112;
+    }
+    made = ((uint32_t)(half & 0x8000u) << 16) | ((exponent + 112u) << 23) | (mantissa << 13);
+    __builtin_memcpy(&out, &made, sizeof out);
+    return out;
+}
+
 static inline uint32_t xenolith_vector_u32(const xenolith_vector *v, unsigned lane) {
     return ((uint32_t)v->u8[lane * 4] << 24) | ((uint32_t)v->u8[lane * 4 + 1] << 16) |
            ((uint32_t)v->u8[lane * 4 + 2] << 8) | v->u8[lane * 4 + 3];

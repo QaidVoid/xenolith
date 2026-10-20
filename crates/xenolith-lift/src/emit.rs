@@ -809,6 +809,58 @@ fn vector_vertex_unpack(instruction: Instruction) -> Option<String> {
                 let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
                 return Some(out);
             }
+            // Three signed tens and an unsigned two, all out of the same last
+            // word. The three are made to arrive as three plus the value over
+            // four million and the fourth as one plus its own, which is the
+            // same shape the colour and the halfwords above use, and is why a
+            // vector of threes sits in the constant pools of both titles.
+            8 => {
+                let _ = writeln!(out, "    {{ xenolith_vector t;");
+                let _ = writeln!(
+                    out,
+                    "    uint32_t packed = xenolith_vector_u32(&ctx->v[{b}], 3);"
+                );
+                for (lane, at) in [0u32, 10, 20].into_iter().enumerate() {
+                    let _ = writeln!(
+                        out,
+                        "    xenolith_vector_set_u32(&t, {lane}, (uint32_t)(0x40400000 + (((int32_t)(packed >> {at}) & 0x3ff) << 22 >> 22)));"
+                    );
+                }
+                let _ = writeln!(
+                    out,
+                    "    xenolith_vector_set_u32(&t, 3, (uint32_t)(0x3f800000 + ((packed >> 30) & 3)));"
+                );
+                let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+                return Some(out);
+            }
+            // Two of the console's half sized floats, out of the last word,
+            // with nothing and one after them.
+            12 => {
+                let _ = writeln!(out, "    {{ xenolith_vector t;");
+                for (lane, half) in [6u32, 7].into_iter().enumerate() {
+                    let _ = writeln!(
+                        out,
+                        "    xenolith_vector_set_f32(&t, {lane}, xenolith_half_to_float(xenolith_vector_u16(&ctx->v[{b}], {half})));"
+                    );
+                }
+                let _ = writeln!(out, "    xenolith_vector_set_u32(&t, 2, 0u);");
+                let _ = writeln!(out, "    xenolith_vector_set_u32(&t, 3, 0x3f800000u);");
+                let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+                return Some(out);
+            }
+            // Four of them, out of the last two words, filling the whole
+            // register.
+            20 => {
+                let _ = writeln!(out, "    {{ xenolith_vector t;");
+                for (lane, half) in [4u32, 5, 6, 7].into_iter().enumerate() {
+                    let _ = writeln!(
+                        out,
+                        "    xenolith_vector_set_f32(&t, {lane}, xenolith_half_to_float(xenolith_vector_u16(&ctx->v[{b}], {half})));"
+                    );
+                }
+                let _ = writeln!(out, "    ctx->v[{d}] = t; }}");
+                return Some(out);
+            }
             _ => return None,
         }
     }
@@ -1186,6 +1238,15 @@ fn vector_access(instruction: Instruction) -> Option<String> {
             let _ = writeln!(
                 out,
                 "    xenolith_store32(base, ea, xenolith_vector_u32(&ctx->v[{d}], (ea >> 2) & 3)); }}"
+            );
+        }
+        // The same, a halfword at a time. Which of the eight the address names
+        // is what is left of it once it is brought to a halfword boundary.
+        Opcode::Stvehx => {
+            let _ = writeln!(out, "    {{ uint32_t ea = ({effective}) & ~1u;");
+            let _ = writeln!(
+                out,
+                "    xenolith_store16(base, ea, xenolith_vector_u16(&ctx->v[{d}], (ea >> 1) & 7)); }}"
             );
         }
         // Every byte of the result is chosen by the matching byte of a third

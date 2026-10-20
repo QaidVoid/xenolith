@@ -130,12 +130,21 @@ source. The format selects how each lane is narrowed: a colour and a signed
 halfword are read from the bits of the float rather than converted, while a half
 precision value is converted and rounds.
 
-Five formats are modelled: the colour, a pair of signed halfwords, a pair of half
-precision values, and the two quartets of the same. Two things are refused. The
-format that packs three tens and a two is left out because what its published
-results mean has not been worked out. The third of the three widths is left out
-because it is documented as a special case that behaves like neither of the
-other two. A refused format leaves the whole function unlifted, which a title
+Five formats are modelled for packing: the colour, a pair of signed halfwords, a
+pair of half precision values, and the two quartets of the same. Unpacking covers
+those and three more: three signed tens and an unsigned two, two half precision
+values, and four of them.
+
+The console's half precision format has no infinity and no value that is not a
+number. Its largest exponent is simply the largest exponent, and a value too
+small to carry one of its own is zero. Widening one is a shift rather than a
+rounding, so an infinite half becomes a large finite float and a half that is not
+a number stays one.
+
+Two things are refused. The format that packs three tens and a two is left out
+because what its published results mean has not been worked out. The third of the
+three widths is left out because it is documented as a special case that behaves
+like neither of the other two. A refused format leaves the whole function unlifted, which a title
 reaching one reports, where a guessed packing would draw something wrong and
 nothing would say so.
 

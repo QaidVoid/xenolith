@@ -409,6 +409,7 @@ fn vector_access_shape(opcode: Opcode) -> bool {
             | Opcode::Lvewx
             | Opcode::Lvewx128
             | Opcode::Stvewx
+            | Opcode::Stvehx
             | Opcode::Stewx128
             | Opcode::Vperm
             | Opcode::Vperm128
@@ -859,6 +860,7 @@ fn vector_access_effect(instruction: Instruction, effect: &mut Effect) {
         | Opcode::Stvrxl
         | Opcode::Stvrxl128
         | Opcode::Stvewx
+        | Opcode::Stvehx
         | Opcode::Stewx128 => {
             address_effect(instruction, effect);
             effect.read(Location::Vector(vector_operands(instruction).0));
