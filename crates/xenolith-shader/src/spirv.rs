@@ -27,12 +27,12 @@ const GENERATOR: u32 = 0;
 /// named by one of these, and the header says how many there are so a driver
 /// can make room before it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Name(u32);
+pub(crate) struct Name(u32);
 
 impl Name {
     /// The number a name is written as.
     #[must_use]
-    pub fn number(self) -> u32 {
+    pub(crate) fn number(self) -> u32 {
         self.0
     }
 }
@@ -63,7 +63,7 @@ fn with_text(before: &[u32], text: &str, after: &[u32]) -> Vec<u32> {
 
 /// A module being written.
 #[derive(Debug, Default)]
-pub struct Module {
+pub(crate) struct Module {
     head: Vec<u32>,
     annotations: Vec<u32>,
     words: Vec<u32>,
@@ -73,7 +73,7 @@ pub struct Module {
 impl Module {
     /// A module with nothing in it yet.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             head: Vec::new(),
             annotations: Vec::new(),
@@ -83,7 +83,7 @@ impl Module {
     }
 
     /// A name nothing else has.
-    pub fn name(&mut self) -> Name {
+    pub(crate) fn name(&mut self) -> Name {
         let taken = Name(self.next);
         self.next += 1;
         taken
@@ -94,7 +94,7 @@ impl Module {
     ///
     /// The length goes in the top half of the first word, which is why an
     /// instruction cannot be added a piece at a time.
-    pub fn add(&mut self, operation: u16, operands: &[u32]) {
+    pub(crate) fn add(&mut self, operation: u16, operands: &[u32]) {
         let Ok(length) = u16::try_from(operands.len() + 1) else {
             return;
         };
@@ -110,7 +110,7 @@ impl Module {
     /// first type it names. Written where they were thought of, a driver
     /// refuses the module for being out of order, which is the sort of thing
     /// only the thing that reads it will tell you.
-    pub fn annotate(&mut self, operation: u16, operands: &[u32]) {
+    pub(crate) fn annotate(&mut self, operation: u16, operands: &[u32]) {
         let Ok(length) = u16::try_from(operands.len() + 1) else {
             return;
         };
@@ -121,7 +121,7 @@ impl Module {
 
     /// Adds an instruction that comes before anything a module names: what it
     /// can do, how it reads memory, where it starts, and how it is run.
-    pub fn add_early(&mut self, operation: u16, operands: &[u32]) {
+    pub(crate) fn add_early(&mut self, operation: u16, operands: &[u32]) {
         let Ok(length) = u16::try_from(operands.len() + 1) else {
             return;
         };
@@ -131,7 +131,7 @@ impl Module {
     }
 
     /// Adds an instruction carrying text before anything a module names.
-    pub fn add_early_with_text(
+    pub(crate) fn add_early_with_text(
         &mut self,
         operation: u16,
         before: &[u32],
@@ -148,14 +148,21 @@ impl Module {
     /// What comes after the text is taken as well, because the instruction
     /// saying where a shader starts names the text and then everything the
     /// shader talks to the outside with.
-    pub fn add_with_text(&mut self, operation: u16, before: &[u32], text: &str, after: &[u32]) {
+    #[cfg(test)]
+    pub(crate) fn add_with_text(
+        &mut self,
+        operation: u16,
+        before: &[u32],
+        text: &str,
+        after: &[u32],
+    ) {
         let operands = with_text(before, text, after);
         self.add(operation, &operands);
     }
 
     /// The whole module, header and all, as the words a driver reads.
     #[must_use]
-    pub fn finish(&self) -> Vec<u32> {
+    pub(crate) fn finish(&self) -> Vec<u32> {
         let mut all =
             Vec::with_capacity(self.head.len() + self.annotations.len() + self.words.len() + 5);
         all.push(MAGIC);
@@ -167,16 +174,6 @@ impl Module {
         all.extend_from_slice(&self.annotations);
         all.extend_from_slice(&self.words);
         all
-    }
-
-    /// The whole module as the bytes a file holds, which a host reads in its
-    /// own order rather than the console's.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.finish()
-            .into_iter()
-            .flat_map(u32::to_le_bytes)
-            .collect()
     }
 }
 

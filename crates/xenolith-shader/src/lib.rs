@@ -24,6 +24,7 @@ pub use translate::{Refused, Stream, Translated, translate};
 
 mod alu;
 mod arithmetic;
+mod export;
 mod fetch;
 mod fetching;
 mod find;
@@ -33,7 +34,8 @@ pub mod opcodes;
 mod preamble;
 #[allow(unsafe_code)]
 pub mod running;
-pub mod spirv;
+pub mod single_lane;
+mod spirv;
 mod translate;
 
 /// How many words one control flow instruction takes, counted in halves because
