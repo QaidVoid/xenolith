@@ -2246,10 +2246,20 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             )
             .ok()?;
         }
-        Opcode::Fsqrt | Opcode::Fsqrts => {
+        Opcode::Fsqrt => {
             writeln!(
                 out,
                 "    ctx->f[{rt}].f64 = __builtin_sqrt(ctx->f[{rb}].f64);"
+            )
+            .ok()?;
+        }
+        // The single form rounds its result to single precision before it is
+        // widened, so taking the double square root and widening afterwards
+        // gives a different value in the last place.
+        Opcode::Fsqrts => {
+            writeln!(
+                out,
+                "    ctx->f[{rt}].f64 = (double)__builtin_sqrtf((float)ctx->f[{rb}].f64);"
             )
             .ok()?;
         }

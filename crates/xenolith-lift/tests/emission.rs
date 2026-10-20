@@ -532,6 +532,36 @@ fn the_ordering_instructions_are_fences() {
     }
 }
 
+/// The single precision square root rounds to single before it is widened, so
+/// the double square root and a later cast give a different last place.
+#[test]
+fn a_single_square_root_rounds_to_single() {
+    // fsqrts f1, f2
+    let words = [0xec20_102c, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("a single square root should lift");
+
+    assert!(
+        emitted.contains("(double)__builtin_sqrtf((float)ctx->f[2].f64)"),
+        "the result was not rounded to single precision: {emitted}"
+    );
+    assert_eq!(compiles("sqrt-single", &emitted), Ok(()));
+}
+
+/// The double form keeps the double square root.
+#[test]
+fn a_double_square_root_stays_double() {
+    // fsqrt f1, f2
+    let words = [0xfc20_102c, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("a double square root should lift");
+
+    assert!(
+        emitted.contains("ctx->f[1].f64 = __builtin_sqrt(ctx->f[2].f64);"),
+        "the double form was not the double square root: {emitted}"
+    );
+}
+
 /// Packing eight condition fields into a word and back is where a bit order
 /// mistake would live, and a mistake made in both directions would cancel out.
 #[test]
