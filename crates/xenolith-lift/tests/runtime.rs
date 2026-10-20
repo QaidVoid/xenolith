@@ -1174,3 +1174,101 @@ int main(void) {
         "a missing file was named {mentions} times, and it should be named once:\n{complaint}"
     );
 }
+
+/// Two threads see their own thread-local values.
+///
+/// A title puts something in a slot on one thread and expects to read it back on
+/// that thread and nowhere else. One set shared between threads gives every
+/// thread the last value written by any of them, which shows up as one worker
+/// reading another's work.
+#[test]
+fn two_threads_see_their_own_thread_local_values() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static uint8_t *where;
+static uint32_t slot;
+static uint32_t wrong;
+
+/* What each thread puts in the slot and what it read back. */
+struct kept {
+    uint32_t wrote;
+    uint32_t read;
+};
+
+static void *use_the_slot(void *given) {
+    struct kept *mine = given;
+    xenolith_context ctx = {0};
+
+    ctx.r[3] = slot;
+    ctx.r[4] = mine->wrote;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 341, "KeTlsSetValue");
+
+    /* Long enough that the other thread has certainly written by now. */
+    for (volatile int spin = 0; spin < 2000000; spin++) {
+    }
+
+    ctx.r[3] = slot;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 340, "KeTlsGetValue");
+    mine->read = (uint32_t)ctx.r[3];
+    if (mine->read != mine->wrote) {
+        __atomic_add_fetch(&wrong, 1, __ATOMIC_RELAXED);
+    }
+    return NULL;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    where = xenolith_boot(path, 0);
+    if (where == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 338, "KeTlsAlloc");
+    slot = (uint32_t)ctx.r[3];
+    if (slot == 0xFFFFFFFFu) {
+        return 3;
+    }
+
+    struct kept one = {0x11111111u, 0};
+    struct kept two = {0x22222222u, 0};
+    pthread_t first, second;
+    if (pthread_create(&first, NULL, use_the_slot, &one) != 0) {
+        return 4;
+    }
+    if (pthread_create(&second, NULL, use_the_slot, &two) != 0) {
+        return 5;
+    }
+    pthread_join(first, NULL);
+    pthread_join(second, NULL);
+
+    if (wrong != 0) {
+        fprintf(stderr, "%u threads read a value another thread wrote\n",
+                (unsigned)wrong);
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("thread_local", program) {
+        panic!("two threads did not see their own values:\n{complaint}");
+    }
+}

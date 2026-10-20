@@ -467,21 +467,34 @@ static void initialize_critical_section(xenolith_context *ctx, uint8_t *base) {
 
 /* Slots a title keeps its per thread state in.
  *
- * One thread, so one set of them. A slot is handed out in order and never
- * given back, which is what a title expects of the ones it takes at startup.
+ * The values are the thread's own, and that is the whole point of them: a title
+ * puts something in a slot on one thread and expects to read it back on that
+ * thread and nowhere else. One set shared between threads gives every thread
+ * the last value written by any of them, which is the kind of wrongness that
+ * shows up as one worker reading another's work.
+ *
+ * The slots are numbered across all threads, since a title allocates one on one
+ * thread and uses the same number on the others. What is per thread is what is
+ * in them.
  */
 #define XENOLITH_TLS_SLOTS 64
 
-static uint32_t tls_values[XENOLITH_TLS_SLOTS];
+static _Thread_local uint32_t tls_values[XENOLITH_TLS_SLOTS];
 static uint32_t tls_taken = 0;
+static pthread_mutex_t taking_a_slot = PTHREAD_MUTEX_INITIALIZER;
 
 static void tls_alloc(xenolith_context *ctx) {
+    /* Under the lock, because two threads starting at once would otherwise be
+     * given the same slot and write over each other's work. */
+    pthread_mutex_lock(&taking_a_slot);
     if (tls_taken >= XENOLITH_TLS_SLOTS) {
+        pthread_mutex_unlock(&taking_a_slot);
         ctx->r[3] = 0xFFFFFFFFu;
         return;
     }
     ctx->r[3] = tls_taken;
     tls_taken++;
+    pthread_mutex_unlock(&taking_a_slot);
 }
 
 static void tls_set_value(xenolith_context *ctx) {
