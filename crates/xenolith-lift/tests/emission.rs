@@ -495,6 +495,43 @@ fn a_recorded_result_is_compared_at_the_titles_width() {
     assert_eq!(compiles("record-width", &emitted), Ok(()));
 }
 
+/// A console cache line is 128 bytes, and clearing 32 leaves three quarters of
+/// the block holding what was there before.
+#[test]
+fn a_block_is_cleared_to_the_console_cache_line() {
+    // dcbz r0, r3, which is the short form
+    let words = [0x7c03_07ec, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("a block clear should lift");
+
+    assert!(
+        emitted.contains("xenolith_zero_block(base, address, 128);"),
+        "the block was not cleared to 128 bytes: {emitted}"
+    );
+    assert_eq!(compiles("block-clear", &emitted), Ok(()));
+}
+
+/// The ordering instructions say what may not move across them, and a compiler
+/// moves a load or a store across a statement that says nothing.
+#[test]
+fn the_ordering_instructions_are_fences() {
+    for (word, expected, name) in [
+        (0x7c00_04ac, "__ATOMIC_SEQ_CST", "sync"),
+        (0x7c00_06ac, "__ATOMIC_SEQ_CST", "eieio"),
+        (0x4c00_012c, "__ATOMIC_ACQUIRE", "isync"),
+    ] {
+        let words = [word, 0x4e80_0020];
+
+        let emitted = lift_entry(&words).expect("an ordering instruction should lift");
+
+        assert!(
+            emitted.contains(&format!("__atomic_thread_fence({expected});")),
+            "the {name} fence was not emitted with {expected}: {emitted}"
+        );
+        assert_eq!(compiles(name, &emitted), Ok(()));
+    }
+}
+
 /// Packing eight condition fields into a word and back is where a bit order
 /// mistake would live, and a mistake made in both directions would cancel out.
 #[test]

@@ -62,6 +62,12 @@ and an emitter that could not express that would have to guess which was meant.
 Memory is reached through accessors that assemble bytes explicitly, so the
 emitted code holds the guest's byte order rather than the host's.
 
+A block clear zeroes the console's cache line, which is 128 bytes. The ordering
+instructions become fences: `sync` and `eieio` a sequentially consistent one,
+and `isync` an acquire. A compiler moves a load or a store across a statement
+that says nothing, and a title puts these where one thread hands something to
+another.
+
 An instruction whose record bit is set also writes condition field zero, and
 that comparison is made at 32 bits. The console's general purpose registers are
 64 bits wide but the arithmetic that sets the field is 32 bit arithmetic, so a

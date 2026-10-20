@@ -1418,7 +1418,21 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
 
     match instruction.opcode() {
         Opcode::Ori if rt == 0 && ra == 0 && immediate == 0 => {}
-        Opcode::Sync | Opcode::Isync | Opcode::Eieio => {}
+        // These say what may be reordered around them, and a compiler is free
+        // to move a load or a store across a statement that says nothing. A
+        // title puts them where one thread hands something to another, so
+        // leaving them out lets the second thread see the handing over before
+        // the thing handed.
+        Opcode::Sync | Opcode::Eieio => {
+            out.push_str("    __atomic_thread_fence(__ATOMIC_SEQ_CST);\n");
+        }
+
+        // This one says that nothing after it is done until everything before
+        // it has been, and what must not move across it is the reading of
+        // whatever it has just taken hold of.
+        Opcode::Isync => {
+            out.push_str("    __atomic_thread_fence(__ATOMIC_ACQUIRE);\n");
+        }
 
         Opcode::Addi if ra == 0 => {
             let _ = writeln!(
@@ -2353,15 +2367,12 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         }
 
         // Zeroing a block is the one cache instruction with an effect a
-        // program can see, so it is the one that is not nothing.
-        //
-        // The long form shares this opcode and is told apart by the field the
-        // other forms spend on a register. It clears four times as much, and
-        // reading it as the short form would leave most of a block untouched.
+        // program can see, so it is the one that is not nothing. The block is
+        // the console's cache line, which is 128 bytes; clearing 32 leaves
+        // three quarters of it holding what was there before.
         Opcode::Dcbz => {
-            let size = if rt == 1 { 128 } else { 32 };
             let _ = writeln!(out, "    address = {};", indexed_address(ra, rb));
-            let _ = writeln!(out, "    xenolith_zero_block(base, address, {size});");
+            let _ = writeln!(out, "    xenolith_zero_block(base, address, 128);");
         }
 
         // Cache hints change no register this model describes, and control
