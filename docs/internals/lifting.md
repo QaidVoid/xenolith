@@ -62,6 +62,12 @@ and an emitter that could not express that would have to guess which was meant.
 Memory is reached through accessors that assemble bytes explicitly, so the
 emitted code holds the guest's byte order rather than the host's.
 
+An instruction whose record bit is set also writes condition field zero, and
+that comparison is made at 32 bits. The console's general purpose registers are
+64 bits wide but the arithmetic that sets the field is 32 bit arithmetic, so a
+value whose top half is not a sign extension of the bottom would otherwise read
+as positive when the title sees a negative number.
+
 These entry points are declared for the environment to provide:
 
 ```c

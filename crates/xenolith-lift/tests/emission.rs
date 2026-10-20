@@ -470,6 +470,31 @@ fn a_reservation_retry_lifts() {
     assert_eq!(compiles("reservation", &emitted), Ok(()));
 }
 
+/// A recorded result is compared at the width the title runs in. Casting to
+/// 64 bits first makes a value whose top half is not a sign extension read as
+/// positive, so the field says a negative result was positive.
+#[test]
+fn a_recorded_result_is_compared_at_the_titles_width() {
+    // add. r3, r4, r5
+    let words = [0x7c64_2a15, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("a recording add should lift");
+
+    assert!(
+        emitted.contains("ctx->cr[0].lt = (int32_t)(uint32_t)ctx->r[3] < 0;"),
+        "the sign was taken from the whole 64 bit register: {emitted}"
+    );
+    assert!(
+        emitted.contains("ctx->cr[0].eq = (uint32_t)ctx->r[3] == 0;"),
+        "the equality compared the whole 64 bit register: {emitted}"
+    );
+    assert!(
+        !emitted.contains("(int64_t)ctx->r[3] < 0"),
+        "the comparison was widened again: {emitted}"
+    );
+    assert_eq!(compiles("record-width", &emitted), Ok(()));
+}
+
 /// Packing eight condition fields into a word and back is where a bit order
 /// mistake would live, and a mistake made in both directions would cancel out.
 #[test]
