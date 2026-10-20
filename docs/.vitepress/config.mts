@@ -24,6 +24,7 @@ const sections = [
       { text: 'Finding functions', link: '/internals/analysis' },
       { text: 'Emitting C', link: '/internals/lifting' },
       { text: 'Imports', link: '/internals/imports' },
+      { text: 'Reading a shader', link: '/internals/shader' },
     ],
   },
   {

@@ -1002,6 +1002,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenolith-shader"
+version = "0.1.0"
+
+[[package]]
 name = "xenolith-xex"
 version = "0.1.0"
 dependencies = [
