@@ -1482,12 +1482,6 @@ fn dot_three(
     );
 }
 
-/// Does one instruction, giving the name of what it produced, or nothing where
-/// the instruction produces no value.
-///
-/// # Errors
-///
-/// Reports the operation where this has no reading of it.
 /// Throws the pixel away where any lane of two values is the same.
 ///
 /// The one operation here that produces nothing and changes where the shader
@@ -1529,6 +1523,8 @@ fn throw_the_pixel_away(
     Ok(())
 }
 
+/// Writes out the four lane half of an instruction: the operations that read
+/// two sources and produce one value, and the fused forms that read three.
 #[allow(clippy::too_many_lines)]
 fn arithmetic(
     module: &mut Module,
@@ -1889,13 +1885,6 @@ fn the_way_a_fetch_says(
     parts
 }
 
-/// Goes and gets a vertex, putting it in the register the fetch names.
-///
-/// Where it sits is worked out the way the hardware works it out: the number the
-/// draw handed the shader, times how far apart two vertices are, plus how far
-/// into one this part sits, from wherever the title said that fetch reads from.
-/// That last is the only piece this cannot get from the instruction, so it is
-/// read out of the first words of the window, where the runtime put it.
 /// Returns the numbers a fetch brings back, out of the words it read.
 ///
 /// A format may give each number a word to itself, in which case the word is
@@ -2097,6 +2086,17 @@ fn taken_apart(
     Ok(made.number())
 }
 
+/// Goes and gets a vertex, putting it in the register the fetch names.
+///
+/// Where it sits is worked out the way the hardware works it out: the number the
+/// draw handed the shader, times how far apart two vertices are, plus how far
+/// into one this part sits, from wherever the title said that fetch reads from.
+/// That last is the only piece this cannot get from the instruction, so it is
+/// read out of the first words of the window, where the runtime put it.
+///
+/// # Errors
+///
+/// Reports [`Refused`] where the shader names a number this has no reading of.
 fn go_and_get(
     module: &mut Module,
     named: &Named,
@@ -2204,12 +2204,6 @@ fn go_and_get(
 
 /// Every number the fetches in a shader work their addresses out of.
 ///
-/// Gathered before anything is written, because a number cannot be named inside
-/// the function that uses it, and these are not small enough to be among the
-/// ones already there.
-///
-/// # Errors
-///
 /// Reads a picture at the place a register names.
 ///
 /// Where in the picture to read is a pair of numbers running from nothing to one
@@ -2223,6 +2217,7 @@ fn go_and_get(
 ///
 /// Reports [`Refused`] where the shader names a picture or a register this has
 /// no reading of.
+#[allow(clippy::too_many_arguments)]
 fn look_at_a_picture(module: &mut Module, named: &Named, fetch: Fetch) -> Result<(), Refused> {
     let (looked_at, to_one, read_one) = named.looked_at.ok_or(Refused::Fetch)?;
 
@@ -3386,12 +3381,6 @@ fn whether_it_runs(
     Some(other_way.number())
 }
 
-/// Turns a shader into a module a host driver takes, or says why it did not.
-///
-/// # Errors
-///
-/// Reports [`Refused`] where the words do not read as a shader, or where they
-/// use an operation this has no reading of.
 /// What carries from one instruction to the next while a shader is written out.
 struct Carrying {
     previous: Option<u32>,
