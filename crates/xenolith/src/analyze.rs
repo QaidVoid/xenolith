@@ -81,6 +81,14 @@ fn report_discovery(program: &Program, words: u64) {
         "  found by shape   {:>10}",
         program.count_from(Origin::Scanned)
     );
+    println!(
+        "  in the record    {:>10}",
+        program.count_from(Origin::Recorded)
+    );
+    println!(
+        "  named by a table {:>10}",
+        program.count_from(Origin::Tabled)
+    );
     println!("blocks             {blocks:>10}");
     println!("edges              {edges:>10}");
     println!("tail calls         {tail_calls:>10}");

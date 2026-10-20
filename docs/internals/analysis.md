@@ -11,7 +11,7 @@ the entry point, and every address a call instruction names. Each function
 discovered adds its own call targets, until nothing new appears.
 
 That finds everything reachable from the entry point by a direct call, which is
-most of a program and not all of it. The rest is found two other ways.
+most of a program and not all of it. The rest is found four other ways.
 
 **Prologue scanning.** A function that is only ever reached indirectly still
 begins the way every other function does, saving the link register and moving
@@ -19,6 +19,20 @@ the stack pointer. Scanning executable memory for that shape finds functions
 nothing points at. A seed has to be four byte aligned to be considered at all,
 since a byte pattern found at an odd offset is a coincidence rather than a
 function.
+
+**The image's own record.** An image built for this console carries a list of
+where its functions are, kept for unwinding a stack. It is the one place a
+function's address is written down whether or not anything calls it, which is
+how a function handed over as a pointer and never called is found. The list is
+pairs of an address and a word of flags, and it is recognized by that shape
+rather than by name: addresses that only ever climb, each landing on something
+that decodes, each followed by a word that is not an address.
+
+**Tables of addresses.** A title walks a table of function pointers at startup
+and calls through it, so the addresses appear in the data and nowhere in the
+code. A run of addresses in a row, each four byte aligned and each landing on
+something that decodes, is not a thing data does by accident. Four in a row is
+enough; one is not.
 
 **Recovered jump table targets.** Covered below.
 

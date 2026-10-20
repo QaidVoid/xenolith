@@ -39,6 +39,19 @@ pub enum Origin {
     /// A function reached by a call is known to be one. This one is believed to
     /// be one, which is why the two are counted apart.
     Scanned,
+    /// The image's own record of its functions names it.
+    ///
+    /// This is the strongest of the passes that go looking, because it is not a
+    /// reading of what the words are: the list was written by whatever built
+    /// the image, for its own purposes, and it says where a function is
+    /// outright.
+    Recorded,
+    /// Something wrote down where it is: its address sits in a run of others
+    /// like it, which a title walks and calls through.
+    ///
+    /// Nothing calls one of these, so discovery cannot reach it, but a table of
+    /// addresses is a stronger thing to have found it by than any shape.
+    Tabled,
 }
 
 impl Origin {
@@ -50,6 +63,8 @@ impl Origin {
             Self::Root => "root",
             Self::Called => "called",
             Self::Scanned => "scanned",
+            Self::Recorded => "recorded",
+            Self::Tabled => "tabled",
         }
     }
 }
@@ -615,6 +630,124 @@ fn scan_for_prologues(
     found
 }
 
+/// How many addresses in a row make a table of them.
+///
+/// One word that happens to fall inside the code is nothing. A run of them, each
+/// four byte aligned and each landing on something that decodes, is a table a
+/// compiler wrote: the list a title walks at startup to run what has to be run
+/// before main, or the methods of a class. Four is short enough to catch the
+/// small ones and long enough that data does not reach it by chance.
+const TABLE_RUN: usize = 4;
+
+/// Returns the addresses a table of function pointers names.
+///
+/// Nothing calls what one of these holds. A title walks the table and calls
+/// through it, so the address appears nowhere in the code, only in the data, and
+/// the functions it names are written without prologues as often as not. What
+/// makes them safe to claim is not what they look like but that something wrote
+/// down where they are: a run of addresses in a row, all landing on code, is not
+/// a thing data does by accident.
+fn scan_for_tables(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32> {
+    let starts: BTreeSet<u32> = walked.keys().copied().collect();
+    let mut found = Vec::new();
+
+    for section in image.sections() {
+        let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+        let mut run: Vec<u32> = Vec::new();
+        let mut at = section.start;
+
+        while at < end {
+            let target = image.u32(at).ok().filter(|word| names_code(image, *word));
+
+            match target {
+                Some(target) => run.push(target),
+                None => {
+                    claim_run(&mut found, &mut run, &starts, TABLE_RUN);
+                }
+            }
+
+            let Some(next) = at.checked_add(INSTRUCTION_SIZE) else {
+                break;
+            };
+            at = next;
+        }
+
+        claim_run(&mut found, &mut run, &starts, TABLE_RUN);
+    }
+
+    found
+}
+
+/// Moves a finished run into the found list when it is long enough.
+fn claim_run(found: &mut Vec<u32>, run: &mut Vec<u32>, starts: &BTreeSet<u32>, least: usize) {
+    if run.len() >= least {
+        found.extend(run.iter().copied().filter(|one| !starts.contains(one)));
+    }
+    run.clear();
+}
+
+/// How many pairs in a row make the record an image keeps of its own functions.
+const RECORD_RUN: usize = 8;
+
+/// Returns the addresses an image's own record of its functions names.
+///
+/// An image built for this console carries a list of where its functions are,
+/// kept for unwinding a stack rather than for anything here, and it is the one
+/// place a function's address is written down whether or not anything calls it.
+/// The list is pairs: an address, and a word of flags that is not one.
+///
+/// It is found by that shape rather than by name, because the shape is what says
+/// it is the list. Addresses that only ever climb, each landing on something
+/// that decodes, each followed by a word that is not an address, is not a thing
+/// data arrives at by chance. What the list leaves out is the functions that
+/// never touch the stack, which have nothing to unwind and so need no entry, and
+/// those are what the other passes here are for.
+fn scan_for_recorded(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32> {
+    let starts: BTreeSet<u32> = walked.keys().copied().collect();
+    let mut found = Vec::new();
+
+    for section in image.sections() {
+        let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+        let mut run: Vec<u32> = Vec::new();
+        let mut at = section.start;
+        let mut last = 0;
+
+        while at < end {
+            let flags_at = at.checked_add(INSTRUCTION_SIZE).filter(|next| *next < end);
+            let pair = image
+                .u32(at)
+                .ok()
+                .zip(flags_at.and_then(|next| image.u32(next).ok()))
+                .filter(|&(begin, flags)| {
+                    names_code(image, begin) && !names_code(image, flags) && begin > last
+                });
+
+            if let Some((begin, _)) = pair {
+                last = begin;
+                run.push(begin);
+                at = at.saturating_add(INSTRUCTION_SIZE * 2);
+            } else {
+                claim_run(&mut found, &mut run, &starts, RECORD_RUN);
+                last = 0;
+                at = at.saturating_add(INSTRUCTION_SIZE);
+            }
+        }
+
+        claim_run(&mut found, &mut run, &starts, RECORD_RUN);
+    }
+
+    found
+}
+
+/// Returns whether a word is an address of something that decodes.
+fn names_code(image: &Image, word: u32) -> bool {
+    word % INSTRUCTION_SIZE == 0
+        && is_executable(image, word)
+        && image
+            .u32(word)
+            .is_ok_and(|first| !Instruction::decode(first).is_unknown())
+}
+
 /// Returns whether an address is in an executable section.
 fn is_executable(image: &Image, address: u32) -> bool {
     image
@@ -689,6 +822,20 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
         for address in scan_for_trampolines(image, &walked) {
             if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
                 slot.insert(Origin::Scanned);
+                added = true;
+            }
+        }
+
+        for address in scan_for_recorded(image, &walked) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+                slot.insert(Origin::Recorded);
+                added = true;
+            }
+        }
+
+        for address in scan_for_tables(image, &walked) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+                slot.insert(Origin::Tabled);
                 added = true;
             }
         }
@@ -870,6 +1017,92 @@ mod tests {
             .entry(0x8200_0000)
             .code(words)
             .build()
+    }
+
+    /// A word of flags, which is what the second of each pair holds. It is not
+    /// an address of anything that decodes.
+    const FLAGS: u32 = 0x4000_1204;
+
+    /// Builds the pairs an image's record of its functions is made of.
+    fn record_of(addresses: &[u32]) -> Vec<u32> {
+        let mut words = Vec::new();
+        for &address in addresses {
+            words.push(address);
+            words.push(FLAGS);
+        }
+        words
+    }
+
+    /// The image's own record names its functions whether or not anything
+    /// calls them, which is what finds the ones handed over as a pointer.
+    #[test]
+    fn the_record_an_image_keeps_names_its_functions() {
+        let mut words = vec![encode::blr(); 8];
+        let named: Vec<u32> = (0..8).map(|which| 0x8200_0000 + which * 4).collect();
+        words.extend(record_of(&named));
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0010).map(|one| one.origin),
+            Some(Origin::Recorded)
+        );
+    }
+
+    /// A few pairs are not the record, and reading them as one would put a
+    /// function wherever data held a number beside another.
+    #[test]
+    fn too_short_a_run_of_pairs_is_not_the_record() {
+        let mut words = vec![encode::blr(); 8];
+        let named: Vec<u32> = (0..7).map(|which| 0x8200_0000 + which * 4).collect();
+        words.extend(record_of(&named));
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Recorded), 0);
+    }
+
+    /// A run of addresses in a row is a table, and what it names are functions
+    /// however little they look like one.
+    #[test]
+    fn a_table_of_addresses_names_functions() {
+        let words = vec![
+            encode::blr(),
+            0,
+            encode::addi(3, 4, 1),
+            encode::blr(),
+            0x8200_0008,
+            0x8200_0008,
+            0x8200_0008,
+            0x8200_0008,
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0008).map(|one| one.origin),
+            Some(Origin::Tabled)
+        );
+    }
+
+    /// One address that happens to fall inside the code is not a table, and
+    /// treating it as one would put a function wherever data held a number.
+    #[test]
+    fn too_few_addresses_in_a_row_are_not_a_table() {
+        let words = vec![
+            encode::blr(),
+            0,
+            encode::addi(3, 4, 1),
+            encode::blr(),
+            0x8200_0008,
+            0x8200_0008,
+            0x8200_0008,
+            0,
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Tabled), 0);
     }
 
     #[test]
