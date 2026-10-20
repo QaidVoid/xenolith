@@ -23,6 +23,16 @@ small program and runs the two together, so what it checks is what the code does
 rather than what it says. It needs a C compiler and nothing else, so it runs in
 `scripts/check` rather than in `scripts/check-oracles`.
 
+It is also built twice more, under AddressSanitizer with UndefinedBehaviorSanitizer
+and under ThreadSanitizer, and both runs have to come back clean. Address finds
+what reads or writes outside what it owns, which is the whole class a test cannot
+catch here because the runtime indexes a base pointer with a guest address and
+has no check anywhere. Thread finds what two threads did to one thing at once,
+which is what the wait queue and the thread-local slots are made of. A compiler
+without them is not a failure and is not a pass either: the test reports itself
+ignored and names what is missing, and `scripts/check-oracles` runs it so that an
+ignore there is a failure.
+
 Each scenario is written to fail when its service is broken. That was checked by
 breaking them: a shared thread-local array makes the thread-local scenario fail,
 removing the `r13` assignment makes the processor-block one fail, and the wait

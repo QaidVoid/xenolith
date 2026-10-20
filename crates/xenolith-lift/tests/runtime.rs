@@ -1558,3 +1558,179 @@ int main(void) {
         panic!("a directory was not read one thing at a time:\n{complaint}");
     }
 }
+
+/// The runtime, run under the sanitizers that find what a test cannot.
+///
+/// Address finds what reads or writes outside what it owns, and the runtime
+/// indexes a base pointer with a guest address and has no check anywhere, so the
+/// whole class is one no test can catch. Undefined finds what the compiler was
+/// entitled to assume and was not. Thread finds what two threads did to one thing
+/// at once, and the wait queue, the object table and the thread-local slots are
+/// all shared.
+///
+/// A compiler without these is not a failure: `gcc` on this host has none. What
+/// would be a failure is reporting a pass from a run that never happened, so a
+/// host with no such compiler reports the test as ignored, naming what is
+/// missing.
+#[test]
+#[ignore = "needs a compiler with sanitizers"]
+fn the_runtime_is_clean_under_the_sanitizers() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static uint8_t *where;
+static uint32_t slot;
+
+/* Two threads putting something in one thread-local slot and reading it back,
+ * which is where a shared set shows up. */
+static void *use_the_slot(void *given) {
+    xenolith_context ctx = {0};
+    ctx.r[3] = slot;
+    ctx.r[4] = (uint32_t)(uintptr_t)given;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 341, "KeTlsSetValue");
+    ctx.r[3] = slot;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 340, "KeTlsGetValue");
+    return NULL;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    where = xenolith_boot(path, 0);
+    if (where == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+
+    /* Guest memory, which indexes the base pointer by a guest address. */
+    xenolith_store32(where, 0x100, 0);
+    xenolith_store32(where, 0x104, 0x3000);
+    ctx.r[3] = 0x100;
+    ctx.r[4] = 0x104;
+    ctx.r[8] = 0x20000;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
+
+    /* An object set, waited on with a timeout, and entered as a critical
+     * section, which is the queue and the section table. */
+    ctx.r[3] = 0x200;
+    ctx.r[5] = 1;
+    ctx.r[6] = 0;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 209, "NtCreateEvent");
+    uint32_t handle = xenolith_load32(where, 0x200);
+    ctx.r[3] = handle;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 246, "NtSetEvent");
+    xenolith_store64(where, 0x300, (uint64_t)(int64_t)-100000);
+    ctx.r[3] = handle;
+    ctx.r[5] = 0x300;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    ctx.r[3] = 0x400;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
+    ctx.r[3] = 0x400;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 304, "RtlLeaveCriticalSection");
+
+    /* The thread-local slots, from two threads at once. */
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 338, "KeTlsAlloc");
+    slot = (uint32_t)ctx.r[3];
+    pthread_t first, second;
+    if (pthread_create(&first, NULL, use_the_slot, (void *)1) != 0) {
+        return 3;
+    }
+    if (pthread_create(&second, NULL, use_the_slot, (void *)2) != 0) {
+        return 4;
+    }
+    pthread_join(first, NULL);
+    pthread_join(second, NULL);
+    return 0;
+}
+"#;
+
+    for sanitizer in ["address,undefined", "thread"] {
+        if let Err(complaint) = runs_sanitized(sanitizer, program) {
+            panic!("the runtime under {sanitizer}:\n{complaint}");
+        }
+    }
+}
+
+/// Builds and runs the program with one sanitizer, or says the host cannot.
+fn runs_sanitized(sanitizer: &str, program: &str) -> Result<(), String> {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "sanitized_{}",
+        sanitizer.replace(['-', '+', ','], "_")
+    ));
+    std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text)
+            .map_err(|error| format!("writing {file}: {error}"))?;
+    }
+
+    /* A compiler that has the sanitizer. The host's own may not: `gcc` on this
+     * machine has neither of them. */
+    let flag = format!("-fsanitize={sanitizer}");
+    /* A whole program, because the flag alone says nothing: linking is where a
+     * sanitizer's runtime is found or not found. */
+    let probe = directory.join("probe.c");
+    std::fs::write(&probe, "int main(void) { return 0; }")
+        .map_err(|error| format!("writing the probe: {error}"))?;
+    let compiler = ["clang", "cc", "gcc"].into_iter().find(|candidate| {
+        Command::new(candidate)
+            .args(["-std=c17", &flag])
+            .arg("-o")
+            .arg(directory.join("probe"))
+            .arg(&probe)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    });
+    let Some(compiler) = compiler else {
+        return Err(format!(
+            "no compiler on this host can build with {flag}, so this check could not run"
+        ));
+    };
+
+    let program_path = directory.join("program");
+    let output = Command::new(compiler)
+        .args(["-std=c17", "-g", &flag, "-fno-omit-frame-pointer"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .args(["-lm", "-lpthread"])
+        .output()
+        .map_err(|error| format!("running the compiler: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .output()
+        .map_err(|error| format!("running the check: {error}"))?;
+    let complaint = String::from_utf8_lossy(&ran.stderr).into_owned();
+    if ran.status.success() && !complaint.contains("ERROR: ") {
+        return Ok(());
+    }
+    Err(format!(
+        "check {} failed:\n{complaint}",
+        ran.status.code().unwrap_or(-1)
+    ))
+}
