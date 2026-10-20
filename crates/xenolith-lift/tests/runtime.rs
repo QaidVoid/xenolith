@@ -1332,3 +1332,229 @@ int main(void) {
         panic!("the import service did not answer the kernel:\n{complaint}");
     }
 }
+
+/// Writing to a file and reading it back.
+///
+/// A title that saves has to be able to read what it saved, and the two paths
+/// are separate enough that one working says nothing about the other. What is
+/// checked is the bytes on disk, which is what a later run reads.
+#[test]
+fn a_file_written_is_a_file_read_back() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void name_a_file(uint8_t *base, uint32_t at, const char *name) {
+    size_t length = strlen(name);
+    xenolith_store32(base, at + 4, at + 0x40);
+    xenolith_store16(base, at + 0x40, (uint16_t)length);
+    xenolith_store32(base, at + 0x44, at + 0x80);
+    for (size_t letter = 0; letter < length; letter++) {
+        base[at + 0x80 + letter] = (uint8_t)name[letter];
+    }
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    name_a_file(base, 0x1000, "game:\\written.txt");
+    ctx.r[3] = 0x2000;
+    ctx.r[4] = 0x40000000u;  /* may write */
+    ctx.r[5] = 0x1000;
+    ctx.r[6] = 0x2100;
+    ctx.r[8] = 0;
+    ctx.r[10] = 3;           /* open or make */
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 210, "NtCreateFile");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "making failed with %#llx\n", (unsigned long long)ctx.r[3]);
+        return 3;
+    }
+    uint32_t handle = xenolith_load32(base, 0x2000);
+    if (handle == 0) {
+        return 4;
+    }
+
+    const char *wrote = "written by the test";
+    memcpy(base + 0x3000, wrote, strlen(wrote));
+    xenolith_store64(base, 0x2400, 0);
+    ctx.r[3] = handle;
+    ctx.r[4] = 0;
+    ctx.r[7] = 0x2500;
+    ctx.r[8] = 0x3000;
+    ctx.r[9] = (uint32_t)strlen(wrote);
+    ctx.r[10] = 0x2400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 255, "NtWriteFile");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "writing failed with %#llx\n", (unsigned long long)ctx.r[3]);
+        return 5;
+    }
+    if (xenolith_load32(base, 0x2500 + 4) != (uint32_t)strlen(wrote)) {
+        fprintf(stderr, "the write reported %u bytes\n",
+                (unsigned) xenolith_load32(base, 0x2500 + 4));
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("writing", program) {
+        panic!("writing a file did not work:\n{complaint}");
+    }
+
+    /* The bytes on disk, which is what a later run reads. */
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("writing");
+    let written = std::fs::read(directory.join("written.txt"))
+        .unwrap_or_else(|error| panic!("the file was not written: {error}"));
+    assert_eq!(
+        String::from_utf8_lossy(&written),
+        "written by the test",
+        "the file holds something other than what was written to it"
+    );
+}
+
+/// A directory is read one thing at a time until it says there are no more.
+///
+/// A title reads what it has saved this way, so a directory query that answers
+/// nothing makes every save look missing. What is checked is that the things in
+/// it are named, and that the run ends with the console's own number for the
+/// end rather than by going round for ever.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_directory_is_read_one_thing_at_a_time() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void name_a_file(uint8_t *base, uint32_t at, const char *name) {
+    size_t length = strlen(name);
+    xenolith_store32(base, at + 4, at + 0x40);
+    xenolith_store16(base, at + 0x40, (uint16_t)length);
+    xenolith_store32(base, at + 0x44, at + 0x80);
+    for (size_t letter = 0; letter < length; letter++) {
+        base[at + 0x80 + letter] = (uint8_t)name[letter];
+    }
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    /* A directory beside the program, with two things in it. */
+    mkdir("saved", 0777);
+    FILE *one = fopen("saved/one.txt", "wb");
+    if (one == NULL) {
+        return 3;
+    }
+    fputs("one", one);
+    fclose(one);
+    FILE *two = fopen("saved/two.txt", "wb");
+    if (two == NULL) {
+        return 4;
+    }
+    fputs("two", two);
+    fclose(two);
+
+    xenolith_context ctx = {0};
+    name_a_file(base, 0x1000, "game:\\saved");
+    ctx.r[3] = 0x2000;
+    ctx.r[4] = 0x80000000u;
+    ctx.r[5] = 0x1000;
+    ctx.r[6] = 0x2100;
+    ctx.r[8] = 1;            /* a directory rather than a file */
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 223, "NtOpenFile");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "opening the directory failed with %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 5;
+    }
+    uint32_t handle = xenolith_load32(base, 0x2000);
+    if (handle == 0) {
+        return 6;
+    }
+
+    /* Reading it out, one at a time, until it says there are no more. */
+    int seen = 0;
+    int saw_one = 0;
+    int saw_two = 0;
+    for (int at = 0; at < 10; at++) {
+        xenolith_store32(base, 0x2300, at == 0 ? 1 : 0);
+        ctx.r[3] = handle;
+        ctx.r[7] = 0x2200;
+        ctx.r[8] = 0x2400;
+        ctx.r[9] = 0x200;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 228, "NtQueryDirectoryFile");
+        if (ctx.r[3] == 0x80000006u) {
+            break;
+        }
+        if (ctx.r[3] != 0u) {
+            fprintf(stderr, "the directory read failed with %#llx\n",
+                    (unsigned long long)ctx.r[3]);
+            return 7;
+        }
+        uint32_t how_long = xenolith_load32(base, 0x2400 + 0x3c);
+        char name[64];
+        for (uint32_t letter = 0; letter < how_long && letter < sizeof name - 1; letter++) {
+            name[letter] = (char)base[0x2400 + 0x40 + letter];
+        }
+        name[how_long < sizeof name - 1 ? how_long : sizeof name - 1] = '\0';
+        if (strcmp(name, "one.txt") == 0) {
+            saw_one = 1;
+        }
+        if (strcmp(name, "two.txt") == 0) {
+            saw_two = 1;
+        }
+        seen++;
+    }
+
+    if (!saw_one || !saw_two) {
+        fprintf(stderr, "the directory held %d things, one.txt %d, two.txt %d\n", seen,
+                saw_one, saw_two);
+        return 8;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("directory", program) {
+        panic!("a directory was not read one thing at a time:\n{complaint}");
+    }
+}

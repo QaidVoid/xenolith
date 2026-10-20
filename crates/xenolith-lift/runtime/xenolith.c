@@ -20,6 +20,7 @@
 
 #include "xenolith.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -38,6 +39,7 @@
 static void read_file(xenolith_context *ctx, uint8_t *base);
 static void write_file(xenolith_context *ctx, uint8_t *base);
 static void query_file(xenolith_context *ctx, uint8_t *base);
+static void query_directory(xenolith_context *ctx, uint8_t *base);
 static void open_file(xenolith_context *ctx, uint8_t *base, int may_make);
 static void remember_where_the_image_was(const char *image);
 
@@ -257,6 +259,13 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 
 /* A title asking for a directory rather than a file says so here. */
 #define XENOLITH_WANTS_A_DIRECTORY 0x00000001u
+
+/* What one thing in a directory takes before its name, and what a title is told
+ * a thing is. The console's own numbers. */
+#define XENOLITH_WHAT_ONE_THING_TAKES 0x40u
+#define XENOLITH_IT_IS_A_FILE 0x00000080u
+#define XENOLITH_IT_IS_A_DIRECTORY 0x00000010u
+#define XENOLITH_NO_MORE_THINGS 0x80000006u
 
 /* How many turns a waiter that gave up can be remembered for.
  *
@@ -1902,6 +1911,96 @@ static void query_file(xenolith_context *ctx, uint8_t *base) {
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
 
+/* Reading what is in a directory, one at a time.
+ *
+ * A title asks with a handle it opened the directory with, somewhere to put the
+ * answer and how much room there is, and says whether to start over. What goes
+ * back is the console's own shape: a run of numbers about the thing, then its
+ * name in plain bytes. Nought in the first word says this is the last.
+ *
+ * A title reads what it has saved this way, so without it a save it made cannot
+ * be read back.
+ */
+static void query_directory(xenolith_context *ctx, uint8_t *base) {
+    struct object *found = object_of((uint32_t)ctx->r[3]);
+    uint32_t status_at = (uint32_t)ctx->r[7];
+    uint32_t into = (uint32_t)ctx->r[8];
+    uint32_t room = (uint32_t)ctx->r[9];
+    uint32_t over_again =
+        xenolith_load32(base, (uint32_t)ctx->r[1] + XENOLITH_NINTH_ARGUMENT);
+
+    if (found == NULL || found->directory == NULL || into == 0 ||
+        room < XENOLITH_WHAT_ONE_THING_TAKES) {
+        report_io(base, status_at, XENOLITH_STATUS_NO_SUCH_FILE, 0);
+        ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
+        return;
+    }
+    if (over_again != 0) {
+        found->gone_past = 0;
+    }
+
+    DIR *held = opendir(found->directory);
+    if (held == NULL) {
+        report_io(base, status_at, XENOLITH_STATUS_NO_SUCH_FILE, 0);
+        ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
+        return;
+    }
+
+    char name[256];
+    int found_one = 0;
+    uint32_t past = 0;
+    for (struct dirent *one = readdir(held); one != NULL; one = readdir(held)) {
+        if (strcmp(one->d_name, ".") == 0 || strcmp(one->d_name, "..") == 0) {
+            continue;
+        }
+        if (strlen(one->d_name) >= sizeof name) {
+            continue;
+        }
+        if (past++ < found->gone_past) {
+            continue;
+        }
+        memcpy(name, one->d_name, strlen(one->d_name) + 1u);
+        found_one = 1;
+        break;
+    }
+    closedir(held);
+
+    if (!found_one) {
+        report_io(base, status_at, XENOLITH_NO_MORE_THINGS, 0);
+        ctx->r[3] = XENOLITH_NO_MORE_THINGS;
+        return;
+    }
+
+    char at[4608];
+    struct stat about;
+    int knows = snprintf(at, sizeof at, "%s/%s", found->directory, name) < (int)sizeof at &&
+                stat(at, &about) == 0;
+    uint32_t how_long = (uint32_t)strlen(name);
+    if (XENOLITH_WHAT_ONE_THING_TAKES + how_long > room) {
+        how_long = room - XENOLITH_WHAT_ONE_THING_TAKES;
+    }
+
+    for (uint32_t word = 0; word < XENOLITH_WHAT_ONE_THING_TAKES; word += 4u) {
+        xenolith_store32(base, into + word, 0);
+    }
+    xenolith_store32(base, into + 0x28u, 0);
+    xenolith_store32(base, into + 0x2cu,
+                     knows && !S_ISDIR(about.st_mode) ? (uint32_t)about.st_size : 0u);
+    xenolith_store32(base, into + 0x38u,
+                     knows && S_ISDIR(about.st_mode) ? XENOLITH_IT_IS_A_DIRECTORY
+                                                     : XENOLITH_IT_IS_A_FILE);
+    xenolith_store32(base, into + 0x3cu, how_long);
+    for (uint32_t letter = 0; letter < how_long; letter++) {
+        xenolith_store8(base, into + XENOLITH_WHAT_ONE_THING_TAKES + letter,
+                        (uint8_t)name[letter]);
+    }
+
+    found->gone_past++;
+    report_io(base, status_at, XENOLITH_STATUS_SUCCESS,
+              XENOLITH_WHAT_ONE_THING_TAKES + how_long);
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
 static int serviced_by_the_kernel(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
 
 static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
@@ -2353,6 +2452,9 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
     }
     case 232:
         query_file(ctx, base);
+        return 1;
+    case 228:
+        query_directory(ctx, base);
         return 1;
     case 617:
     case 618:
