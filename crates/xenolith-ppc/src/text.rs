@@ -498,16 +498,19 @@ fn general_operands(
         // fields to write, and takes the value from the floating bank. The mask
         // saying which fields, and the two bits either side of it, sit where
         // this form otherwise names registers, so printing three general ones
-        // names none of the four things actually there.
+        // names none of the four things actually there. The two trailing values
+        // are optional operands: each is left out when it and every later one
+        // are zero, which is why a zero field still appears when the window
+        // after it is set.
         Form::X if mnemonic == "mtfsf" => {
             let word = instruction.word();
-            write!(
-                f,
-                " {}, f{rb}, {}, {}",
-                (word >> 17) & 0xff,
-                (word >> 25) & 1,
-                (word >> 16) & 1
-            )
+            let (field, window) = ((word >> 25) & 1, (word >> 16) & 1);
+            let trailing = match (field != 0 || window != 0, window != 0) {
+                (false, _) => String::new(),
+                (true, false) => format!(", {field}"),
+                (true, true) => format!(", {field}, {window}"),
+            };
+            write!(f, " {}, f{rb}{trailing}", instruction.status_mask())
         }
         _ => return None,
     })
@@ -995,6 +998,11 @@ mod tests {
     #[test]
     fn writing_the_floating_control_register_names_its_mask() {
         assert_eq!(render(0xfc21_c58f, 0), "mtfsf. 16, f24, 0, 1");
+        assert_eq!(render(0xfc00_058e, 0), "mtfsf 0, f0");
+        assert_eq!(render(0xfc20_058e, 0), "mtfsf 16, f0");
+        assert_eq!(render(0xfe06_bd8e, 0), "mtfsf 3, f23, 1");
+        assert_eq!(render(0xfc01_058e, 0), "mtfsf 0, f0, 0, 1");
+        assert_eq!(render(0xfe00_058e, 0), "mtfsf 0, f0, 1");
     }
 
     /// A spelling that replaces the mnemonic still has to say that the
