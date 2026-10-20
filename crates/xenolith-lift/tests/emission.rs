@@ -495,6 +495,57 @@ fn a_recorded_result_is_compared_at_the_register_width() {
     assert_eq!(compiles("record-width", &emitted), Ok(()));
 }
 
+/// The single precision forms compute from the double operands and round the
+/// result. Rounding the operands first moves the answer, and the value below is
+/// what the hardware gives for the pair.
+#[test]
+// The narrowing is the subject of the test, not an accident in it.
+#[allow(clippy::cast_possible_truncation)]
+fn a_single_form_rounds_its_result_not_its_operands() {
+    // fmuls f1, f2, f3
+    let words = [0xec22_00f2, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("a single multiply should lift");
+
+    assert!(
+        emitted.contains("ctx->f[1].f64 = (double)(float)(ctx->f[2].f64 * ctx->f[3].f64);"),
+        "the operands were rounded before the multiply: {emitted}"
+    );
+
+    let first = f64::from_bits(0x3ff6_a09e_667f_3bcd);
+    let second = f64::from_bits(0x3ffb_b67a_e858_4caa);
+    let hardware = 0x4003_988e_2000_0000_u64;
+
+    assert_eq!(
+        f64::from((first * second) as f32).to_bits(),
+        hardware,
+        "rounding the result did not give what the console gives"
+    );
+    assert_eq!(compiles("single-multiply", &emitted), Ok(()));
+}
+
+/// A floating point operation with a record bit writes the floating status
+/// register's exception bits into condition field one. It does not compare a
+/// general register, and reading one the instruction never wrote is a defect
+/// the emitted code cannot express.
+#[test]
+fn a_recorded_float_does_not_compare_a_general_register() {
+    // fadd. f1, f2, f3
+    let words = [0xfc22_182b, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("a recording add should lift");
+
+    assert!(
+        emitted.contains("ctx->f[1].f64 = ctx->f[2].f64 + ctx->f[3].f64;"),
+        "the sum was not emitted: {emitted}"
+    );
+    assert!(
+        !emitted.contains("ctx->cr[0]."),
+        "the float recorded into a condition field from a general register: {emitted}"
+    );
+    assert_eq!(compiles("record-float", &emitted), Ok(()));
+}
+
 /// A console cache line is 128 bytes, and both spellings of the block clear
 /// must clear a whole one.
 #[test]

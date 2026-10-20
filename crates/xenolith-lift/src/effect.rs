@@ -331,6 +331,15 @@ fn integer_shape(opcode: Opcode) -> Option<Shape> {
     })
 }
 
+/// Returns whether an operation works on the floating point register bank.
+///
+/// A floating point operation with a record bit copies the status register's
+/// exception bits into a condition field rather than comparing a general
+/// register, so the emitter has to tell the two apart.
+pub(crate) fn is_floating(opcode: Opcode) -> bool {
+    floating_shape(opcode).is_some()
+}
+
 /// Returns how a floating point operation's fields map onto what it touches.
 fn floating_shape(opcode: Opcode) -> Option<Shape> {
     Some(match opcode {

@@ -19,7 +19,7 @@ use xenolith_analysis::{Function, Terminator};
 use xenolith_ppc::{FlowKind, Instruction, Opcode};
 use xenolith_xex::Image;
 
-use crate::effect::effect_of;
+use crate::effect::{effect_of, is_floating};
 
 /// Bytes one instruction occupies.
 const INSTRUCTION_SIZE: u32 = 4;
@@ -1381,6 +1381,11 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
     // overwrite that with a test of the value stored.
     //
     // A vector comparison has a record bit of its own and writes field six.
+    //
+    // A floating point operation with a record bit does not compare a general
+    // register. It copies the exception and summary bits of the floating point
+    // status register into condition field one, so letting the comparison below
+    // run would read a general register the instruction never wrote.
     let records = (instruction
         .form()
         .is_some_and(|form| form.has_record_bit() && form.record_field() == 0)
@@ -1389,7 +1394,8 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             instruction.opcode(),
             Opcode::Andi | Opcode::Andis | Opcode::AddicRc
         ))
-        && !matches!(instruction.opcode(), Opcode::Stwcx | Opcode::Stdcx);
+        && !matches!(instruction.opcode(), Opcode::Stwcx | Opcode::Stdcx)
+        && !is_floating(instruction.opcode());
 
     let recorded = match instruction.opcode() {
         Opcode::And
@@ -2090,7 +2096,7 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             };
             writeln!(
                 out,
-                "    ctx->f[{rt}].f64 = (double)((float)ctx->f[{ra}].f64 {operator} (float)ctx->f[{rb}].f64);"
+                "    ctx->f[{rt}].f64 = (double)(float)(ctx->f[{ra}].f64 {operator} ctx->f[{rb}].f64);"
             )
             .ok()?;
         }
@@ -2106,7 +2112,7 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             let frc = (instruction.word() >> 6) & 0x1f;
             writeln!(
                 out,
-                "    ctx->f[{rt}].f64 = (double)((float)ctx->f[{ra}].f64 * (float)ctx->f[{frc}].f64);"
+                "    ctx->f[{rt}].f64 = (double)(float)(ctx->f[{ra}].f64 * ctx->f[{frc}].f64);"
             )
             .ok()?;
         }
