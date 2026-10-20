@@ -11,6 +11,7 @@ use std::process::Command;
 
 use xenolith_analysis::analyze;
 use xenolith_lift::{Imported, Imports, RUNTIME_HEADER, lift};
+use xenolith_ppc::Instruction;
 use xenolith_xex::{Image, PageKind, Section};
 
 /// The address images are placed at, matching where a title loads.
@@ -694,6 +695,37 @@ fn the_conversions_to_a_whole_number_round_or_cut_as_they_are_told_to() {
             );
         }
     }
+}
+
+/// The halfword store a second title uses.
+///
+/// The address picks which of the eight halfwords goes out, and the store has
+/// to reach guest memory rather than a register, so the check is that the C
+/// names the halfword store at the right lane.
+#[test]
+fn a_halfword_store_lifts() {
+    // stvehx v1, r3, r4
+    let instruction = Instruction::decode(0x7c23_214e);
+    assert_eq!(
+        instruction.opcode(),
+        xenolith_ppc::Opcode::Stvehx,
+        "the encoding under test is not the halfword store"
+    );
+
+    let code = xenolith_lift::code_for(instruction, 0).expect("the halfword store should lift");
+
+    assert!(
+        code.contains("xenolith_store16(base, ea, xenolith_vector_u16("),
+        "the halfword store was not emitted as a halfword store: {code}"
+    );
+    assert!(
+        code.contains("& ~1u"),
+        "the address was not brought to a halfword boundary: {code}"
+    );
+    let wrapped = format!(
+        "void body(xenolith_context *ctx, uint8_t *base) {{\n    uint32_t address;\n    (void)address;\n{code}}}\n"
+    );
+    assert_eq!(compiles("halfword-store", &wrapped), Ok(()));
 }
 
 /// A floating point operation with a record bit writes the floating status
