@@ -982,3 +982,195 @@ fn cases_of(runtime: &str, name: &str) -> BTreeSet<u32> {
     }
     found
 }
+
+/// A file beside the program opens, reads, and reports how long it is.
+///
+/// A title names its files with a prefix of its own and never with a path a
+/// host would recognise, so what is being checked is the mapping from the one
+/// to the other as much as the reading. A title that cannot open its data looks
+/// exactly like one that opened it and read nothing.
+#[test]
+fn a_file_beside_the_program_opens_and_reads() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* The structure a title names a file with: what it may do, and the counted name
+ * a little further in. Written into guest memory the way a title writes it. */
+static void name_a_file(uint8_t *base, uint32_t at, const char *name) {
+    size_t length = strlen(name);
+    xenolith_store32(base, at + 4, at + 0x40);
+    xenolith_store16(base, at + 0x40, (uint16_t)length);
+    xenolith_store32(base, at + 0x44, at + 0x80);
+    for (size_t letter = 0; letter < length; letter++) {
+        base[at + 0x80 + letter] = (uint8_t)name[letter];
+    }
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    /* The file the test wrote, named the way a title names one. */
+    const char *wrote = "beside.txt";
+    FILE *data = fopen(wrote, "wb");
+    if (data == NULL) {
+        return 3;
+    }
+    fputs("abcdef", data);
+    fclose(data);
+
+    xenolith_context ctx = {0};
+    name_a_file(base, 0x1000, "game:\\beside.txt");
+    ctx.r[3] = 0x2000;      /* where the handle goes */
+    ctx.r[4] = 0x80000000u; /* may read */
+    ctx.r[5] = 0x1000;      /* the name */
+    ctx.r[6] = 0x2100;      /* where what happened is reported */
+    ctx.r[8] = 0;           /* a file rather than a directory */
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 223, "NtOpenFile");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "opening failed with %#llx\n", (unsigned long long)ctx.r[3]);
+        return 4;
+    }
+    uint32_t handle = xenolith_load32(base, 0x2000);
+    if (handle == 0) {
+        return 5;
+    }
+
+    /* How long it is, which a title asks before making room to read it. */
+    ctx.r[3] = handle;
+    ctx.r[4] = 0x2200;
+    ctx.r[5] = 0x2300;
+    ctx.r[7] = 1;           /* how long the file is */
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 232, "NtQueryInformationFile");
+    uint64_t length = xenolith_load64(base, 0x2300);
+    if (length != 6u) {
+        fprintf(stderr, "the file was reported as %llu bytes long\n",
+                (unsigned long long)length);
+        return 6;
+    }
+
+    /* Reading it, from the front. */
+    xenolith_store64(base, 0x2400, 0);
+    ctx.r[3] = handle;
+    ctx.r[4] = 0;
+    ctx.r[7] = 0x2500;
+    ctx.r[8] = 0x3000;      /* where the bytes go */
+    ctx.r[9] = 6;
+    ctx.r[10] = 0x2400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 240, "NtReadFile");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "reading failed with %#llx\n", (unsigned long long)ctx.r[3]);
+        return 7;
+    }
+    if (memcmp(base + 0x3000, "abcdef", 6) != 0) {
+        fprintf(stderr, "the bytes read were not the ones in the file\n");
+        return 8;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("files", program) {
+        panic!("a file beside the program did not open and read:\n{complaint}");
+    }
+}
+
+/// A file that is not there reports its name once and returns the status.
+///
+/// A title that cannot find its data goes on and does something else, so the
+/// report is the only thing that says the data was missing. Reporting it on
+/// every attempt would fill the output with one name, which is why it is said
+/// once.
+#[test]
+fn a_missing_file_is_reported_once() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void name_a_file(uint8_t *base, uint32_t at, const char *name) {
+    size_t length = strlen(name);
+    xenolith_store32(base, at + 4, at + 0x40);
+    xenolith_store16(base, at + 0x40, (uint16_t)length);
+    xenolith_store32(base, at + 0x44, at + 0x80);
+    for (size_t letter = 0; letter < length; letter++) {
+        base[at + 0x80 + letter] = (uint8_t)name[letter];
+    }
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    name_a_file(base, 0x1000, "game:\\not_there.txt");
+    for (int at = 0; at < 3; at++) {
+        ctx.r[3] = 0x2000;
+        ctx.r[4] = 0x80000000u;
+        ctx.r[5] = 0x1000;
+        ctx.r[6] = 0x2100;
+        ctx.r[8] = 0;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 223, "NtOpenFile");
+        if (ctx.r[3] != 0xC0000034u) {
+            fprintf(stderr, "a missing file came back as %#llx\n",
+                    (unsigned long long)ctx.r[3]);
+            return 3;
+        }
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("missing_file", program) {
+        panic!("a missing file was not reported as missing:\n{complaint}");
+    }
+
+    /* Said once, not once per attempt: the program asks three times. */
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("missing_file");
+    let said = Command::new(directory.join("program"))
+        .current_dir(&directory)
+        .output()
+        .unwrap_or_else(|error| panic!("running the check: {error}"));
+    let complaint = String::from_utf8_lossy(&said.stderr);
+    let mentions = complaint.matches("not_there.txt").count();
+    assert_eq!(
+        mentions, 1,
+        "a missing file was named {mentions} times, and it should be named once:\n{complaint}"
+    );
+}

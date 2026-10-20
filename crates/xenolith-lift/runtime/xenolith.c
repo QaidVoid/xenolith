@@ -26,12 +26,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 
 /* How many calls a trace reports before giving up.
  *
  * A title told that every import returned zero goes wrong quickly, and once it
  * has, the calls it makes say more about the lie than about the title. */
+static void read_file(xenolith_context *ctx, uint8_t *base);
+static void write_file(xenolith_context *ctx, uint8_t *base);
+static void query_file(xenolith_context *ctx, uint8_t *base);
+static void open_file(xenolith_context *ctx, uint8_t *base, int may_make);
+static void remember_where_the_image_was(const char *image);
+
 #define XENOLITH_TRACE_LIMIT 20000
 
 /* The guest addresses a 32-bit pointer can form.
@@ -54,6 +62,7 @@
 #define XENOLITH_A_LITTLE_PAST_THE_END ((size_t)4096)
 
 uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
+    remember_where_the_image_was(image);
     void *base = mmap(NULL, XENOLITH_GUEST_SPAN + XENOLITH_A_LITTLE_PAST_THE_END,
                       PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -210,6 +219,43 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 
 /* What a wait reports when the length of time it was given ran out. */
 #define XENOLITH_STATUS_TIMEOUT 0x00000102u
+
+/* What opening a file that is not there reports. */
+#define XENOLITH_STATUS_NO_SUCH_FILE 0xC0000034u
+
+/* What reading past the end of a file reports. */
+#define XENOLITH_STATUS_END_OF_FILE 0xC0000011u
+
+/* The place a title names when it means the end of a file rather than a number
+ * of bytes into it. The number is the console's. */
+#define XENOLITH_AT_THE_END 0xfffffffffffffffeull
+
+/* What a title says to do with a file that is or is not already there, and what
+ * it is told was done. Both numbers are the console's. */
+#define XENOLITH_REPLACE_IT 0u
+#define XENOLITH_OPEN_IT 1u
+#define XENOLITH_MAKE_IT 2u
+#define XENOLITH_OPEN_OR_MAKE_IT 3u
+#define XENOLITH_EMPTY_IT 4u
+#define XENOLITH_EMPTY_OR_MAKE_IT 5u
+
+#define XENOLITH_WAS_REPLACED 0u
+#define XENOLITH_WAS_OPENED 1u
+#define XENOLITH_WAS_MADE 2u
+#define XENOLITH_WAS_EMPTIED 3u
+
+/* Which parts of a file a title asked to be able to reach. The two whole kinds
+ * sit at the top and the particular ones at the bottom. */
+#define XENOLITH_MAY_WRITE_ANY 0x40000000u
+#define XENOLITH_MAY_WRITE_DATA 0x00000002u
+#define XENOLITH_MAY_ADD_TO_IT 0x00000004u
+
+/* Where a call's ninth argument sits above the stack pointer, the eight
+ * registers reaching only as far as the eighth. */
+#define XENOLITH_NINTH_ARGUMENT 0x54u
+
+/* A title asking for a directory rather than a file says so here. */
+#define XENOLITH_WANTS_A_DIRECTORY 0x00000001u
 
 /* How many turns a waiter that gave up can be remembered for.
  *
@@ -464,6 +510,7 @@ enum object_kind {
     OBJECT_MUTANT,
     OBJECT_SEMAPHORE,
     OBJECT_THREAD,
+    OBJECT_FILE,
 };
 
 struct object {
@@ -499,6 +546,16 @@ struct object {
      * everything else waiting for it waits for ever. */
     pthread_t holder;
     long held;
+    /* A file a title has open, and a directory it has asked about. A title
+     * names its files with a prefix of its own and never with a path a host
+     * would recognise, so what a handle stands for is worked out once here and
+     * kept rather than worked out again on every read. */
+    FILE *file;
+    char *directory;
+    uint32_t gone_past;
+    /* How far into a file reading or writing is up to, which a title sets
+     * before each read rather than relying on the host's own position. */
+    long long at;
     pthread_t thread;
     int running;
     int suspended;
@@ -1422,6 +1479,388 @@ static void report_the_display(uint8_t *base, uint32_t at) {
 static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
 static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
 static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
+/* Where a title's own files are.
+ *
+ * A title names them with a prefix of its own and never with a path a host
+ * would recognise. What that prefix stands for is the directory its image was
+ * loaded from, because on a console the image and its files were on the same
+ * disc and a title has no way of saying anything else. So this is taken from
+ * where the image was found rather than configured, and nothing here is per
+ * title.
+ */
+static char title_directory[4096] = ".";
+
+static void remember_where_the_image_was(const char *image) {
+    size_t cut = 0;
+    for (size_t at = 0; image[at] != '\0'; at++) {
+        if (image[at] == '/') {
+            cut = at;
+        }
+    }
+    if (cut == 0 || cut >= sizeof title_directory) {
+        return;
+    }
+    memcpy(title_directory, image, cut);
+    title_directory[cut] = '\0';
+}
+
+/* Turns what a title calls a file into a path a host can open.
+ *
+ * The name arrives as a counted run of bytes inside a structure, with the
+ * device and the path separated by a colon. The device is dropped: a console
+ * keeps its own files and a title's saved ones on different devices, and what
+ * that comes to here is one directory rather than two.
+ */
+static int host_path_of(uint8_t *base, uint32_t attributes, char *out, size_t room) {
+    if (attributes == 0) {
+        return 0;
+    }
+
+    uint32_t name_at = xenolith_load32(base, attributes + 4);
+    if (name_at == 0) {
+        return 0;
+    }
+    uint16_t length = xenolith_load16(base, name_at);
+    uint32_t text = xenolith_load32(base, name_at + 4);
+    if (text == 0) {
+        return 0;
+    }
+
+    uint16_t from = 0;
+    for (uint16_t at = 0; at < length; at++) {
+        if (xenolith_load8(base, text + at) == ':') {
+            from = (uint16_t)(at + 1);
+        }
+    }
+
+    size_t used = strlen(title_directory);
+    if (used + 2 >= room) {
+        return 0;
+    }
+    memcpy(out, title_directory, used);
+
+    char first = from < length ? (char)xenolith_load8(base, text + from) : '/';
+    if (first != '/' && first != '\\') {
+        out[used++] = '/';
+    }
+
+    for (uint16_t at = from; at < length; at++) {
+        char letter = (char)xenolith_load8(base, text + at);
+        if (letter == '\\') {
+            letter = '/';
+        }
+        if (used + 1 >= room) {
+            return 0;
+        }
+        out[used++] = letter;
+    }
+    out[used] = '\0';
+    return 1;
+}
+
+/* Writes what an operation did into the block a title handed over for it. */
+static void report_io(uint8_t *base, uint32_t block, uint32_t status, uint32_t did) {
+    if (block != 0) {
+        xenolith_store32(base, block, status);
+        xenolith_store32(base, block + 4, did);
+    }
+}
+
+/* Makes every directory above a path, so that a file a title names inside a
+ * place it has just made for itself can be put there. A directory already there
+ * is not a failure. */
+static void make_the_way_to(const char *path) {
+    char along[4096];
+    size_t used = strlen(path);
+    if (used >= sizeof along) {
+        return;
+    }
+    memcpy(along, path, used + 1);
+    for (size_t at = 1; at < used; at++) {
+        if (along[at] != '/') {
+            continue;
+        }
+        along[at] = '\0';
+        mkdir(along, 0777);
+        along[at] = '/';
+    }
+}
+
+/* Opening a file a title names, or making one where it says to. */
+static void open_file(xenolith_context *ctx, uint8_t *base, int may_make) {
+    char path[4096];
+    uint32_t handle_at = (uint32_t)ctx->r[3];
+    uint32_t may = (uint32_t)ctx->r[4];
+    uint32_t status_at = (uint32_t)ctx->r[6];
+    uint32_t say_to = may_make ? (uint32_t)ctx->r[10] : XENOLITH_OPEN_IT;
+    uint32_t options = may_make
+                           ? (uint32_t)xenolith_load32(base,
+                                                       (uint32_t)ctx->r[1] +
+                                                           XENOLITH_NINTH_ARGUMENT)
+                           : (uint32_t)ctx->r[8];
+
+    if (!host_path_of(base, (uint32_t)ctx->r[5], path, sizeof path)) {
+        report_io(base, status_at, XENOLITH_STATUS_NO_SUCH_FILE, 0);
+        ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
+        return;
+    }
+
+    int writing = (may & (XENOLITH_MAY_WRITE_ANY | XENOLITH_MAY_WRITE_DATA |
+                          XENOLITH_MAY_ADD_TO_IT)) != 0;
+    int already = access(path, F_OK) == 0;
+
+    /* A directory rather than a file. What is kept is the path, so that what is
+     * in it can be read out later. */
+    if ((options & XENOLITH_WANTS_A_DIRECTORY) != 0) {
+        if (!already && may_make && say_to != XENOLITH_OPEN_IT) {
+            make_the_way_to(path);
+            mkdir(path, 0777);
+            already = access(path, F_OK) == 0;
+        }
+        if (!already) {
+            report_io(base, status_at, XENOLITH_STATUS_NO_SUCH_FILE, 0);
+            ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
+            return;
+        }
+        uint32_t held = take_object(OBJECT_FILE);
+        struct object *made = object_of(held);
+        if (made == NULL) {
+            report_io(base, status_at, XENOLITH_STATUS_NO_MEMORY, 0);
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return;
+        }
+        free(made->directory);
+        made->directory = strdup(path);
+        made->gone_past = 0;
+        if (handle_at != 0) {
+            xenolith_store32(base, handle_at, held);
+        }
+        report_io(base, status_at, XENOLITH_STATUS_SUCCESS, XENOLITH_WAS_OPENED);
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return;
+    }
+
+    /* What a title said to do about the file being there or not. A refusal here
+     * is the title's own instruction and not a gap. */
+    const char *how = "rb";
+    uint32_t did = XENOLITH_WAS_OPENED;
+    if (writing) {
+        switch (say_to) {
+        case XENOLITH_OPEN_IT:
+            how = already ? "r+b" : NULL;
+            break;
+        case XENOLITH_MAKE_IT:
+            how = already ? NULL : "w+b";
+            did = XENOLITH_WAS_MADE;
+            break;
+        case XENOLITH_OPEN_OR_MAKE_IT:
+            how = already ? "r+b" : "w+b";
+            did = already ? XENOLITH_WAS_OPENED : XENOLITH_WAS_MADE;
+            break;
+        case XENOLITH_EMPTY_IT:
+            how = already ? "w+b" : NULL;
+            did = XENOLITH_WAS_EMPTIED;
+            break;
+        case XENOLITH_REPLACE_IT:
+        case XENOLITH_EMPTY_OR_MAKE_IT:
+            how = "w+b";
+            did = already ? XENOLITH_WAS_EMPTIED : XENOLITH_WAS_MADE;
+            break;
+        default:
+            how = NULL;
+            break;
+        }
+        if (how != NULL && !already) {
+            make_the_way_to(path);
+        }
+    } else if (!already) {
+        how = NULL;
+    }
+
+    FILE *opened = how != NULL ? fopen(path, how) : NULL;
+    if (opened == NULL) {
+        /* Said once, with the name, because a title that cannot find its data
+         * looks exactly like one that found it and read nothing. */
+        static const char *said[16];
+        static unsigned told;
+        int before = 0;
+        for (unsigned at = 0; at < told; at++) {
+            if (strcmp(said[at], path) == 0) {
+                before = 1;
+            }
+        }
+        if (!before) {
+            if (told < sizeof said / sizeof *said) {
+                said[told++] = strdup(path);
+            }
+            fprintf(stderr, "xenolith: %s is not there\n", path);
+        }
+        report_io(base, status_at, XENOLITH_STATUS_NO_SUCH_FILE, 0);
+        ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
+        return;
+    }
+
+    uint32_t handle = take_object(OBJECT_FILE);
+    struct object *made = object_of(handle);
+    if (made == NULL) {
+        fclose(opened);
+        report_io(base, status_at, XENOLITH_STATUS_NO_MEMORY, 0);
+        ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+        return;
+    }
+    made->file = opened;
+    if (handle_at != 0) {
+        xenolith_store32(base, handle_at, handle);
+    }
+    report_io(base, status_at, XENOLITH_STATUS_SUCCESS, did);
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
+/* Reading from a file a title has open.
+ *
+ * What a title handed over to be told when the work was done is signalled
+ * before this returns, because reading here is done by the time it returns.
+ * Leaving it alone because the reading was not really asynchronous would leave
+ * whoever waits on it waiting for a read that already happened.
+ */
+static void read_file(xenolith_context *ctx, uint8_t *base) {
+    struct object *found = object_of((uint32_t)ctx->r[3]);
+    struct object *done = object_of((uint32_t)ctx->r[4]);
+    uint32_t status_at = (uint32_t)ctx->r[7];
+    uint32_t into = (uint32_t)ctx->r[8];
+    uint32_t wanted = (uint32_t)ctx->r[9];
+    uint32_t offset_at = (uint32_t)ctx->r[10];
+
+    if (found == NULL || found->file == NULL) {
+        report_io(base, status_at, XENOLITH_STATUS_NOT_FOUND, 0);
+        if (done != NULL) {
+            signal_object(done, 1);
+        }
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return;
+    }
+
+    if (offset_at != 0) {
+        found->at = (long long)xenolith_load64(base, offset_at);
+    }
+    if (fseek(found->file, (long)found->at, SEEK_SET) != 0) {
+        report_io(base, status_at, XENOLITH_STATUS_END_OF_FILE, 0);
+        if (done != NULL) {
+            signal_object(done, 1);
+        }
+        ctx->r[3] = XENOLITH_STATUS_END_OF_FILE;
+        return;
+    }
+
+    /* Read into the guest's memory directly. Every byte of it is mapped and a
+     * file holds bytes rather than words, so there is no order to correct. */
+    size_t got = fread(base + into, 1, wanted, found->file);
+    found->at += (long long)got;
+
+    uint32_t status =
+        got == 0 && wanted != 0 ? XENOLITH_STATUS_END_OF_FILE : XENOLITH_STATUS_SUCCESS;
+    report_io(base, status_at, status, (uint32_t)got);
+    if (done != NULL) {
+        signal_object(done, 1);
+    }
+    ctx->r[3] = status;
+}
+
+/* Writing to one, at where it is up to or at a place a title names.
+ *
+ * The same shape as reading, and the same reason for signalling what a title
+ * handed over the moment it returns: the writing is finished by then.
+ */
+static void write_file(xenolith_context *ctx, uint8_t *base) {
+    struct object *found = object_of((uint32_t)ctx->r[3]);
+    struct object *done = object_of((uint32_t)ctx->r[4]);
+    uint32_t status_at = (uint32_t)ctx->r[7];
+    uint32_t from = (uint32_t)ctx->r[8];
+    uint32_t wanted = (uint32_t)ctx->r[9];
+    uint32_t offset_at = (uint32_t)ctx->r[10];
+
+    if (found == NULL || found->file == NULL) {
+        report_io(base, status_at, XENOLITH_STATUS_NOT_FOUND, 0);
+        if (done != NULL) {
+            signal_object(done, 1);
+        }
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return;
+    }
+
+    /* A title asking to write where it left off names the end of the file by a
+     * number the console keeps for it rather than by a place. */
+    if (offset_at != 0) {
+        uint64_t said = xenolith_load64(base, offset_at);
+        if (said == XENOLITH_AT_THE_END) {
+            fseek(found->file, 0, SEEK_END);
+            found->at = ftell(found->file);
+        } else {
+            found->at = (long long)said;
+        }
+    }
+    if (fseek(found->file, (long)found->at, SEEK_SET) != 0) {
+        report_io(base, status_at, XENOLITH_STATUS_NO_SUCH_FILE, 0);
+        if (done != NULL) {
+            signal_object(done, 1);
+        }
+        ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
+        return;
+    }
+
+    size_t put = fwrite(base + from, 1, wanted, found->file);
+    found->at += (long long)put;
+
+    uint32_t status = put == wanted ? XENOLITH_STATUS_SUCCESS : XENOLITH_STATUS_NO_MEMORY;
+    report_io(base, status_at, status, (uint32_t)put);
+    if (done != NULL) {
+        signal_object(done, 1);
+    }
+    ctx->r[3] = status;
+}
+
+/* How long a file is, and how far into it reading is up to.
+ *
+ * A title asks before it reads, to know how much room to make. Answering with
+ * nothing makes every file look empty.
+ */
+static void query_file(xenolith_context *ctx, uint8_t *base) {
+    struct object *found = object_of((uint32_t)ctx->r[3]);
+    uint32_t status_at = (uint32_t)ctx->r[4];
+    uint32_t into = (uint32_t)ctx->r[5];
+    uint32_t kind = (uint32_t)ctx->r[7];
+
+    if (found == NULL || found->file == NULL) {
+        report_io(base, status_at, XENOLITH_STATUS_NOT_FOUND, 0);
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return;
+    }
+
+    /* The two things a title asks for are answered: how long the file is, and
+     * where reading it is up to. Anything else says nothing rather than a
+     * number that would be invented. */
+    if (kind == 1) {
+        long here = ftell(found->file);
+        fseek(found->file, 0, SEEK_END);
+        long length = ftell(found->file);
+        fseek(found->file, here, SEEK_SET);
+        if (into != 0) {
+            xenolith_store64(base, into, (uint64_t)(length < 0 ? 0 : length));
+        }
+    } else if (kind == 2) {
+        if (into != 0) {
+            xenolith_store64(base, into, (uint64_t)found->at);
+        }
+    } else {
+        report_io(base, status_at, XENOLITH_STATUS_SUCCESS, 0);
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return;
+    }
+
+    report_io(base, status_at, XENOLITH_STATUS_SUCCESS, 8);
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
 static int serviced_by_the_kernel(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
 
 static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
@@ -1848,6 +2287,32 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
  * rather than pretending they did. */
 static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uint32_t ordinal) {
     switch (ordinal) {
+    case 210:
+        open_file(ctx, base, 1);
+        return 1;
+    case 223:
+        open_file(ctx, base, 0);
+        return 1;
+    case 240:
+        read_file(ctx, base);
+        return 1;
+    case 255:
+        write_file(ctx, base);
+        return 1;
+    case 219: {
+        /* Making sure what was written has gone. Every write here goes the
+         * moment it is asked for, so there is nothing waiting. */
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        if (found != NULL && found->file != NULL) {
+            fflush(found->file);
+        }
+        report_io(base, (uint32_t)ctx->r[4], XENOLITH_STATUS_SUCCESS, 0);
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 232:
+        query_file(ctx, base);
+        return 1;
     case 617:
     case 618:
         /* Retraining the memory the graphics hardware draws into. There is
