@@ -308,6 +308,20 @@ pub(crate) fn mnemonic_of(text: &str) -> &str {
     text.split_whitespace().next().unwrap_or("")
 }
 
+/// Returns every distinct instruction word in a code section, in the order it
+/// first appears.
+///
+/// One distinct word is worth as much as a thousand copies of it, and a real
+/// title repeats itself heavily.
+fn distinct_words(bytes: &[u8]) -> Vec<u32> {
+    let mut seen = std::collections::BTreeSet::new();
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .filter(|word| seen.insert(*word))
+        .collect()
+}
+
 /// Returns whether two mnemonics differ only in the letters a variant bit adds.
 ///
 /// The record and overflow bits are not operands, so the oracle spells them into
@@ -347,17 +361,28 @@ mod tests {
     use super::*;
     use crate::Instruction;
 
-    /// Skips the enclosing test when no cross binutils was named.
+    /// Fails the enclosing test when no cross binutils was named.
+    ///
+    /// These tests are ignored by default, so reaching this at all means the
+    /// caller asked for them and expects the input to be there. A skip line
+    /// followed by a pass is the failure this removes.
     macro_rules! require_oracle {
         () => {
             match oracle() {
                 Some(objdump) => objdump,
-                None => {
-                    eprintln!("skipping: {PREFIX} does not name a working objdump");
-                    return;
-                }
+                None => panic!("{PREFIX} does not name a working objdump"),
             }
         };
+    }
+
+    /// Returns the code section to compare over.
+    ///
+    /// These tests are ignored by default, so reaching this at all means the
+    /// caller expects the input to be there and a missing one fails.
+    fn code_section() -> Vec<u8> {
+        let path = std::env::var("XENOLITH_PPC_CODE")
+            .expect("XENOLITH_PPC_CODE names no code to compare over");
+        std::fs::read(&path).unwrap_or_else(|error| panic!("{path} could not be read: {error}"))
     }
 
     /// Spellings where the oracle folds an operand into the instruction's name.
@@ -407,27 +432,13 @@ mod tests {
     /// are the ones real compilers use, and a uniform sample over the encoding
     /// space spends almost all of itself on encodings nothing emits.
     #[test]
+    #[ignore = "needs XENOLITH_PPC_BINUTILS and XENOLITH_PPC_CODE"]
     fn operand_values_agree_with_the_oracle() {
         let objdump = require_oracle!();
 
-        let Ok(path) = std::env::var("XENOLITH_PPC_CODE") else {
-            eprintln!("skipping: XENOLITH_PPC_CODE names no code to compare over");
-            return;
-        };
-        let Ok(bytes) = std::fs::read(&path) else {
-            eprintln!("skipping: {path} could not be read");
-            return;
-        };
+        let bytes = code_section();
 
-        // One distinct word is worth as much as a thousand copies of it, and a
-        // real title repeats itself heavily.
-        let mut seen = std::collections::BTreeSet::new();
-        let words: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .filter(|word| seen.insert(*word))
-            .take(20_000)
-            .collect();
+        let words = distinct_words(&bytes);
 
         let decoded = decode(&objdump, &words);
         assert!(!decoded.is_empty(), "the oracle decoded nothing");
@@ -505,25 +516,13 @@ mod tests {
     /// only in the letters a variant bit adds is the exception: that is this
     /// crate failing to print the bit, and it is compared.
     #[test]
+    #[ignore = "needs XENOLITH_PPC_BINUTILS and XENOLITH_PPC_CODE"]
     fn operand_order_agrees_with_the_oracle() {
         let objdump = require_oracle!();
 
-        let Ok(path) = std::env::var("XENOLITH_PPC_CODE") else {
-            eprintln!("skipping: XENOLITH_PPC_CODE names no code to compare over");
-            return;
-        };
-        let Ok(bytes) = std::fs::read(&path) else {
-            eprintln!("skipping: {path} could not be read");
-            return;
-        };
+        let bytes = code_section();
 
-        let mut seen = std::collections::BTreeSet::new();
-        let words: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .filter(|word| seen.insert(*word))
-            .take(20_000)
-            .collect();
+        let words = distinct_words(&bytes);
 
         let decoded = decode(&objdump, &words);
         assert!(!decoded.is_empty(), "the oracle decoded nothing");
@@ -617,6 +616,23 @@ mod tests {
         assert!(!varies_only_in_suffix("vsr", "vsro"));
         // An empty name is not a match against another empty name.
         assert!(!varies_only_in_suffix("", ""));
+    }
+
+    /// A repeated word is compared once, and the order is the order of first
+    /// appearance rather than the order the set happens to hold.
+    #[test]
+    fn a_repeated_word_is_counted_once() {
+        let words: Vec<u8> = [0x7c62_1a14u32, 0x7c00_0000, 0x7c62_1a14, 0x4800_0020]
+            .iter()
+            .flat_map(|word| word.to_be_bytes())
+            .collect();
+
+        assert_eq!(
+            distinct_words(&words),
+            [0x7c62_1a14, 0x7c00_0000, 0x4800_0020]
+        );
+        // A trailing partial word is not an instruction.
+        assert_eq!(distinct_words(&words[..words.len() - 1]).len(), 2);
     }
 
     #[test]

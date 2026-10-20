@@ -80,10 +80,10 @@ distinct encoding in both titles.
 That comparison found eight rendering bugs. It has a documented blind spot: a
 field printed as the wrong kind of thing, where the number happens to coincide,
 is invisible to it. `srawi r4, r3, r4`, which printed a shift amount as a
-register, was found by reading rather than by the comparison. The condition
-register moves were a different case: `mcrf` printed `16, 0` where the encoding
-holds field numbers `4, 0`, which the value comparison would have caught, but
-that encoding is not in the sample it reads. Those were found by reading the
-form dispatch and were then checked against `objdump` one encoding at a time.
+register, was found by reading rather than by the comparison.
+
+The objdump comparison reads every distinct encoding in the section, with
+nothing sampled out. A cap decides which encodings matter, and the one that is
+wrong is the one past the cap.
 
 Fuzz targets cover the decoder, so no word can panic it.

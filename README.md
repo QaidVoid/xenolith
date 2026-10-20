@@ -296,9 +296,8 @@ something produced independently:
 - **The decoder** is checked against `llvm-mc` for the instruction it names,
   over every instruction the table declares with generated operands, and against
   GNU `objdump` for the values it extracts and the order it prints them in. The
-  objdump comparison reads the first twenty thousand distinct encodings of each
-  title and compares about thirteen thousand of them each way, with no
-  disagreement in either. That is a sample and not the whole of either title.
+  objdump comparison reads every distinct encoding in the code section, with
+  nothing sampled out, and reports no disagreement.
 - **The analysis** is checked against jump tables and helper addresses worked out
   by hand elsewhere, and asserts that no block is ever claimed without an edge
   reaching it.
