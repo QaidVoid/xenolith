@@ -15,6 +15,18 @@ something only it can see.
 | instruction model | 4.2 million instructions another project emitted, over both titles | an instruction touching the wrong register |
 | semantics | PowerPC executed under emulation | an instruction computing the wrong value |
 | whole functions | functions out of a shipped title, executed under emulation | control flow this project would never have written |
+| the runtime | `tests/runtime.rs`, which compiles the runtime beside a program that drives it | a service that answers wrongly while the emitted code still links: guest memory, the heap, the processor block, waits and timeouts, critical sections, thread-local slots, and a title's files |
+
+The runtime oracle is the only one that runs the runtime rather than reading it.
+It builds `runtime/xenolith.c` with `-Wall -Wextra -Werror -pedantic` beside a
+small program and runs the two together, so what it checks is what the code does
+rather than what it says. It needs a C compiler and nothing else, so it runs in
+`scripts/check` rather than in `scripts/check-oracles`.
+
+Each scenario is written to fail when its service is broken. That was checked by
+breaking them: a shared thread-local array makes the thread-local scenario fail,
+removing the `r13` assignment makes the processor-block one fail, and the wait
+with a timeout hangs the suite rather than passing when there is no timed wait.
 
 ## What a run with no data says
 

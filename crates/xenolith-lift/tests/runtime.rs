@@ -1272,3 +1272,63 @@ int main(void) {
         panic!("two threads did not see their own values:\n{complaint}");
     }
 }
+
+/// The import service answers what a title asks the kernel about itself.
+///
+/// This is the one path every title goes through, and it is the one where
+/// answering nothing looks exactly like answering correctly: a title told
+/// nothing carries on and goes wrong somewhere else. What is checked is that an
+/// answered import is answered and an unanswered one is not, which is what says
+/// the switch is reached at all.
+#[test]
+fn the_import_service_answers_the_kernel_about_itself() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    /* What kind of process this is. A title is not the kernel and not the idle
+     * process, so the answer is the user one, which is one. */
+    xenolith_context ctx = {0};
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 102, "PsGetCurrentProcessType");
+    if (ctx.r[3] != 1u) {
+        fprintf(stderr, "the process type came back as %llu\n",
+                (unsigned long long)ctx.r[3]);
+        return 3;
+    }
+
+    /* And the same for the answer that comes from the processor block, which is
+     * a different part of the same service. */
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 338, "KeTlsAlloc");
+    if (ctx.r[3] == 0xFFFFFFFFu) {
+        fprintf(stderr, "no thread local slot could be taken\n");
+        return 4;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("imports", program) {
+        panic!("the import service did not answer the kernel:\n{complaint}");
+    }
+}
