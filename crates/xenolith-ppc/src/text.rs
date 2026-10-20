@@ -533,7 +533,9 @@ fn floating_operands(
         | "fsel" => {
             write!(f, " f{rt}, f{ra}, f{third}, f{rb}")
         }
-        "fsqrt" | "fsqrts" | "fres" | "frsqrte" => write!(f, " f{rt}, f{rb}"),
+        "fsqrt" | "fsqrts" | "fres" | "fre" | "frsqrte" | "frsqrtes" => {
+            write!(f, " f{rt}, f{rb}")
+        }
         _ => write!(f, " f{rt}, f{ra}, f{rb}"),
     }
 }
@@ -836,6 +838,23 @@ mod tests {
         assert_eq!(render(0xfc00_f10c, 0), "mtfsfi 0, 15");
         assert_eq!(render(0xff00_f10c, 0), "mtfsfi 6, 15");
         assert_eq!(render(0xfc00_010d, 0), "mtfsfi. 0, 0");
+    }
+
+    /// These read one floating register and write another. The field the other
+    /// instructions of the form use for a second source is not one, so printing
+    /// it named the source twice.
+    #[test]
+    fn renders_the_floating_instructions_with_one_source() {
+        assert_eq!(render(0xfc00_0030, 0), "fre f0, f0");
+        assert_eq!(render(0xfc00_0031, 0), "fre. f0, f0");
+        assert_eq!(render(0xfc00_0034, 0), "frsqrte f0, f0");
+        // The two-operand instructions of the same form keep both sources.
+        assert_eq!(render(0xfc00_0024, 0), "fdiv f0, f0, f0");
+        // The unary operations on the general form take one source too, through
+        // an arm of their own.
+        assert_eq!(render(0xfc00_0018, 0), "frsp f0, f0");
+        assert_eq!(render(0xfc00_001c, 0), "fctiw f0, f0");
+        assert_eq!(render(0xfc00_001e, 0), "fctiwz f0, f0");
     }
 
     /// The system call names a level, and the ordinary one names nothing.
