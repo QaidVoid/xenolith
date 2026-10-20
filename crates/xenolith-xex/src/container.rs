@@ -28,8 +28,6 @@ use crate::security::SecurityInfo;
 pub enum Format {
     /// The format used by retail Xbox 360 titles.
     Xex2,
-    /// An earlier revision sharing the same overall shape.
-    Xex1,
 }
 
 impl Format {
@@ -38,15 +36,18 @@ impl Format {
     pub const fn magic(self) -> [u8; 4] {
         match self {
             Self::Xex2 => *b"XEX2",
-            Self::Xex1 => *b"XEX1",
         }
     }
 
     /// Identifies a format from the first four bytes of a file.
+    ///
+    /// The earlier `XEX1` revision shares the overall shape and is not
+    /// accepted. No such file was available to check the parser against, and a
+    /// format accepted on the strength of its magic alone is a claim nobody
+    /// has tested.
     fn from_magic(magic: [u8; 4]) -> Result<Self> {
         match &magic {
             b"XEX2" => Ok(Self::Xex2),
-            b"XEX1" => Ok(Self::Xex1),
             _ => Err(Error::UnsupportedMagic { magic }),
         }
     }
@@ -1123,11 +1124,15 @@ mod tests {
         );
     }
 
+    /// The earlier revision shares the overall shape, and is refused rather
+    /// than parsed as though it were the later one.
     #[test]
-    fn accepts_the_earlier_format() {
+    fn rejects_the_earlier_format() {
         let bytes = ContainerBuilder::new().magic(*b"XEX1").build();
 
-        assert_eq!(Container::parse(&bytes).unwrap().format(), Format::Xex1);
+        let error = Container::parse(&bytes).unwrap_err();
+
+        assert_eq!(error, Error::UnsupportedMagic { magic: *b"XEX1" });
     }
 
     #[test]

@@ -6,6 +6,10 @@ virtual address, which is the form every later stage consumes.
 
 ## What the file holds
 
+Only the `XEX2` magic is accepted. The earlier `XEX1` revision shares the
+overall shape, but no such file was available to check a parser against, so it
+is refused rather than parsed as though it were the later one.
+
 A fixed header, then a directory of optional headers keyed by a 32-bit value
 whose low byte says whether the entry is a value stored inline or an offset to
 data elsewhere in the file. The entries that matter here are the security info,
