@@ -9,5 +9,13 @@ repository.workspace = true
 
 [dependencies]
 
+# A static library as well as a Rust one, because the emitted runtime reaches
+# this crate through C. Nothing in the workspace depends on this crate, so a
+# plain build of another package does not produce the archive: it is built when
+# this package is a target, which is what `scripts/check-oracles` and the lift
+# output both rely on.
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [lints]
 workspace = true
