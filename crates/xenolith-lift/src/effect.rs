@@ -834,7 +834,11 @@ fn vector_access_effect(instruction: Instruction, effect: &mut Effect) {
         | Opcode::Lvewx
         | Opcode::Lvewx128 => {
             address_effect(instruction, effect);
-            effect.write(Location::Vector(vector_operands(instruction).0));
+            // One lane is written and the rest of the register is left alone, so
+            // the destination is read as well as written.
+            let destination = Location::Vector(vector_operands(instruction).0);
+            effect.read(destination);
+            effect.write(destination);
         }
         Opcode::Stvlx
         | Opcode::Stvlx128
@@ -1242,6 +1246,24 @@ mod tests {
             [Location::General(0), Location::General(12)]
         );
         assert_eq!(effect.writes(), [Location::General(12)]);
+    }
+
+    /// A single element load writes one lane and leaves the rest of the
+    /// register alone, so what it writes into is read as well.
+    #[test]
+    fn a_single_element_load_reads_the_register_it_writes() {
+        // lvewx v3, r4, r5
+        let effect = touches(0x7c64_288e);
+
+        assert_eq!(
+            effect.reads(),
+            [
+                Location::General(4),
+                Location::General(5),
+                Location::Vector(3)
+            ]
+        );
+        assert_eq!(effect.writes(), [Location::Vector(3)]);
     }
 
     /// The logical operations name their destination in the field every other
