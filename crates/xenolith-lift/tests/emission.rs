@@ -546,6 +546,32 @@ fn a_recorded_float_does_not_compare_a_general_register() {
     assert_eq!(compiles("record-float", &emitted), Ok(()));
 }
 
+/// The wide shifts and rotates name their destination in the field the
+/// arithmetic uses for its first source, so a record of one has to compare the
+/// register it wrote. Comparing the source reports the value the instruction
+/// read rather than the value it produced.
+#[test]
+fn a_wide_shift_records_the_register_it_wrote() {
+    // rldicl. r3, r4, 8, 0
+    let words = [0x7883_4001, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("a recording rotate should lift");
+
+    assert!(
+        emitted.contains("ctx->r[3] = "),
+        "the rotate did not write r3: {emitted}"
+    );
+    assert!(
+        emitted.contains("ctx->cr[0].lt = (int64_t)ctx->r[3] < 0;"),
+        "the record compared the source rather than the destination: {emitted}"
+    );
+    assert!(
+        !emitted.contains("ctx->cr[0].lt = (int64_t)ctx->r[4] < 0;"),
+        "the record compared the source register: {emitted}"
+    );
+    assert_eq!(compiles("wide-record", &emitted), Ok(()));
+}
+
 /// A console cache line is 128 bytes, and both spellings of the block clear
 /// must clear a whole one.
 #[test]

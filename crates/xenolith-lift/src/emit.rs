@@ -1418,7 +1418,16 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         | Opcode::Extsw
         | Opcode::Cntlzw
         | Opcode::Andi
-        | Opcode::Andis => ra,
+        | Opcode::Andis
+        | Opcode::Cntlzd
+        | Opcode::Sld
+        | Opcode::Srd
+        | Opcode::Srad
+        | Opcode::Sradi
+        | Opcode::Rldicl
+        | Opcode::Rldicr
+        | Opcode::Rldic
+        | Opcode::Rldimi => ra,
         _ => rt,
     };
 
