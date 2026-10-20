@@ -1,0 +1,94 @@
+#!/bin/sh
+# Runs every oracle that needs something a machine may not have, and fails if
+# any of them is dark.
+#
+# The ordinary gate runs the tests that need nothing. This runs the others, with
+# the variables the documented corpus lives at, and it treats an ignored test as
+# a failure rather than as a pass. That is the whole point: a suite where the
+# strongest checks silently skipped is a suite that says nothing about them, and
+# the one place it can mislead hardest is here.
+#
+# Nothing this script prints carries the key. The key is read from the file the
+# documentation names and passed through the environment, and no path it prints
+# is a key.
+#
+# It does not copy game data. The variables point at the corpus where it already
+# is.
+set -eu
+
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+# Absolute, because cargo runs each test binary in its own directory and a
+# relative path would name a different place there.
+corpus=$(CDPATH='' cd "${XENOLITH_CORPUS-../xen/corpus}" 2>/dev/null && pwd) || true
+corpus=${corpus:-${XENOLITH_CORPUS-../xen/corpus}}
+key_file=${XENOLITH_KEY_FILE:-$HOME/.config/xenolith/xex.key}
+
+fail() {
+    printf 'check-oracles: %s\n' "$1" >&2
+    exit 1
+}
+
+[ -f "$key_file" ] || fail "no key at $key_file, so nothing here can decode a title"
+[ -d "$corpus" ] || fail "no corpus at $corpus, so nothing here has data to run over"
+
+# The variables are exported here rather than being required of the caller, so
+# that one command runs everything and a missing piece is reported by the run
+# that needed it.
+XENOLITH_XEX_KEY=$(tr -d '[:space:]' <"$key_file")
+export XENOLITH_XEX_KEY
+export XENOLITH_ANALYSIS_XEX=${XENOLITH_ANALYSIS_XEX-$corpus/ac6_extract/default.xex}
+export XENOLITH_TEST_XEX=${XENOLITH_TEST_XEX-$corpus/ac6_extract/default.xex}
+export XENOLITH_LIFT_IMAGE=${XENOLITH_LIFT_IMAGE-$corpus/pes6-recomp/pes6_extract/default.xex}
+export XENOLITH_LIFT_CORPUS=${XENOLITH_LIFT_CORPUS-$corpus/pes6-recomp/pes6_ppc}
+export XENOLITH_PPC_BINUTILS=${XENOLITH_PPC_BINUTILS-powerpc64-linux-gnu-}
+export XENOLITH_PPC_TOOLCHAIN=${XENOLITH_PPC_TOOLCHAIN-powerpc64-linux-gnu-}
+
+# The operand comparison reads a raw image rather than a container. The corpus
+# already keeps one beside the code it was built from, so nothing is copied and
+# nothing is written into the tree.
+raw=${XENOLITH_PPC_CODE-$corpus/pes6-recomp/xex_image.raw}
+[ -f "$raw" ] || fail "no raw image at $raw for the operand comparison"
+export XENOLITH_PPC_CODE=$raw
+
+# One package per line, because a failure in one must not stop the report from
+# saying which others were fine.
+run() {
+    name=$1
+    shift
+    printf 'oracle: %s\n' "$name"
+    out=$("$@" 2>&1) || {
+        printf '%s\n' "$out" | sed 's/^/    /' >&2
+        fail "$name did not pass"
+    }
+    # A test that ran nothing is not a pass. Cargo says how many it ignored and
+    # how many it filtered out, and either means the oracle above was dark.
+    printf '%s\n' "$out" | grep -E 'test result:' | sed 's/^/    /'
+    if printf '%s\n' "$out" | grep -E 'test result:.*[1-9][0-9]* ignored'; then
+        fail "$name reported a test as ignored, so that check did not run"
+    fi
+    # A test target with no tests in it is not a dark oracle, so only the ones
+    # that must run something are held to it.
+    case $name in
+        analysis | corpus | execution | title | operands)
+            # Summed over the package's targets, since a package may hold an
+            # empty target beside the ones that matter.
+            passed=$(printf '%s\n' "$out" \
+                | sed -n 's/.*test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' \
+                | awk '{total += $1} END {print total + 0}')
+            [ "$passed" -gt 0 ] || fail "$name ran no test at all"
+            ;;
+    esac
+    printf '%s\n' "$out" | grep -E 'corpus instructions|runs compared|instructions compared|agreed|disagreed' | sed 's/^/    /'
+}
+
+run container cargo test --release -p xenolith-xex --test real_container -- --include-ignored
+run analysis cargo test --release -p xenolith-analysis -- --include-ignored
+run corpus cargo test --release -p xenolith-lift --test corpus -- --include-ignored
+run emission cargo test --release -p xenolith-lift --test emission -- --include-ignored
+run execution cargo test --release -p xenolith-lift --test execution -- --include-ignored
+run title cargo test --release -p xenolith-lift --test title -- --include-ignored
+run operands cargo test --release -p xenolith-ppc --lib operands -- --include-ignored
+
+printf 'check-oracles: every oracle ran\n'

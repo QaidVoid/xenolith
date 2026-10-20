@@ -27,6 +27,11 @@ Including them without their input fails, and names the variable that would have
 run it. An ignored test is its own guard; there is no second test that checks
 whether the first was skipped.
 
+`scripts/check-oracles` runs all of them in one command and fails if any is
+ignored rather than run. It reads the corpus where it already is and does not
+copy it, and it reads the key from the file the documentation names without
+printing it.
+
 A host C compiler is different, and is required. Most of this suite checks the
 emitted C by compiling it, and a suite that skipped those would be comparing
 strings. A machine without a compiler fails rather than passing quietly.
