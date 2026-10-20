@@ -23,7 +23,9 @@ pub use flow::{Flow, FlowOperation};
 pub use translate::{Refused, Stream, Translated, translate};
 
 mod alu;
+mod arithmetic;
 mod fetch;
+mod fetching;
 mod find;
 mod flow;
 mod layout;
