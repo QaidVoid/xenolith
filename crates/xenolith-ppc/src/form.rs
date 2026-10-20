@@ -63,22 +63,21 @@ pub enum Form {
     /// opcode is four bits.
     MDS,
 
-    /// mask `0xfc1f_07f0`, 10 instructions
     /// mask `0xfc00_07f3`, 16 instructions
     Vx128Ls,
-    /// mask `0xfc00_07f0`, 7 instructions
+    /// mask `0xfc00_07f0`, 15 instructions
     Vx128Cv,
-    /// mask `0xfc00_03d0`, 32 instructions
+    /// mask `0xfc00_03d0`, 30 instructions
     Vx128,
     /// mask `0xfc00_0730`, 2 instructions
     Vx128Ri,
     /// mask `0xfc00_0390`, 5 instructions
     Vx128Cmp,
-    /// mask `0xfc00_0630`, 1 instructions
+    /// mask `0xfc00_0630`, 1 instruction
     Vx128Pwi,
-    /// mask `0xfc00_0210`, 1 instructions
+    /// mask `0xfc00_0210`, 1 instruction
     Vx128Perm,
-    /// mask `0xfc00_0010`, 1 instructions
+    /// mask `0xfc00_0010`, 1 instruction
     Vx128Sd,
 }
 
@@ -245,6 +244,7 @@ impl Form {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table::TABLE;
 
     /// Every form this crate models.
     const ALL: &[Form] = &[
@@ -414,5 +414,65 @@ mod tests {
         assert_eq!(Form::XS.mask(), 0xfc00_07fc);
         assert_eq!(Form::MD.mask(), 0xfc00_001c);
         assert_eq!(Form::MDS.mask(), 0xfc00_001e);
+    }
+
+    /// The counts in the doc comments on the console extension forms, checked
+    /// against the table itself.
+    ///
+    /// A comment that counts the table goes stale the first time an instruction
+    /// is added, and a wrong count reads as a fact. Each of these forms states
+    /// its count outright, so each is compared against the number of table
+    /// entries carrying that form.
+    #[test]
+    fn form_counts_match_the_doc_comments() {
+        const EXTENSION: &[Form] = &[
+            Form::Vx128Ls,
+            Form::Vx128Cv,
+            Form::Vx128,
+            Form::Vx128Ri,
+            Form::Vx128Cmp,
+            Form::Vx128Pwi,
+            Form::Vx128Perm,
+            Form::Vx128Sd,
+        ];
+
+        let source = include_str!("form.rs");
+        // The variants are declared before the list of all of them, so cutting
+        // at the list keeps the markers pointing at the declarations.
+        let declarations = source
+            .split_once("/// Forms belonging to the console")
+            .map_or(source, |(before, _)| before);
+
+        let mut wrong = Vec::new();
+        for form in EXTENSION {
+            let held = TABLE.iter().filter(|entry| entry.form == *form).count();
+
+            let marker = format!("\n    {form:?},");
+            let Some(before) = declarations.split_once(&marker).map(|(before, _)| before) else {
+                wrong.push(format!("{form:?}: no variant by that name"));
+                continue;
+            };
+
+            // A doc comment is not reachable from the type, so the number a
+            // reader sees is read out of the source above the variant.
+            let documented = before
+                .lines()
+                .rev()
+                .take_while(|line| line.trim_start().starts_with("///"))
+                .find_map(|line| {
+                    line.split_whitespace()
+                        .find_map(|word| word.parse::<usize>().ok())
+                });
+
+            match documented {
+                Some(stated) if stated == held => {}
+                Some(stated) => wrong.push(format!(
+                    "{form:?}: comment says {stated}, table holds {held}"
+                )),
+                None => wrong.push(format!("{form:?}: no count in the doc comment")),
+            }
+        }
+
+        assert!(wrong.is_empty(), "stale counts:\n  {}", wrong.join("\n  "));
     }
 }
