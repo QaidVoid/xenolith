@@ -841,12 +841,14 @@ fn vector_access_effect(instruction: Instruction, effect: &mut Effect) {
         | Opcode::Lvrx
         | Opcode::Lvrx128
         | Opcode::Lvrxl
-        | Opcode::Lvrxl128
-        | Opcode::Lvewx
-        | Opcode::Lvewx128 => {
+        | Opcode::Lvrxl128 => {
             address_effect(instruction, effect);
-            // One lane is written and the rest of the register is left alone, so
-            // the destination is read as well as written.
+            effect.write(Location::Vector(vector_operands(instruction).0));
+        }
+        // One lane is written and the rest of the register is left alone, so
+        // the destination is read as well as written.
+        Opcode::Lvewx | Opcode::Lvewx128 => {
+            address_effect(instruction, effect);
             let destination = Location::Vector(vector_operands(instruction).0);
             effect.read(destination);
             effect.write(destination);
