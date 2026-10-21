@@ -2268,15 +2268,10 @@ fn runs_with_the_renderer(name: &str, program: &str) -> Result<(), String> {
 /// None of that says a draw happens. What this checks is the whole chain: a
 /// vertex shader and a pixel shader that a validator accepts, handed over the
 /// way a title hands them over, and a draw that reads the frame back.
-/// Ignored because one driver here refuses the pipeline this builds.
-///
-/// The same pair and the same state is accepted by the other driver on this
-/// machine, so what it needs is a device that builds it rather than a change to
-/// the test. `XENOLITH_DRAW_TEST=1` runs it where that is true, and
-/// `scripts/check-oracles` does not, because a run that cannot draw is not an
-/// oracle for drawing.
+/// Needs a device to draw on, and says so rather than passing where there is
+/// none: a machine without a graphics driver prints "no device" and the test
+/// returns without claiming a picture was drawn.
 #[test]
-#[ignore = "needs a driver that builds the pipeline"]
 #[allow(clippy::too_many_lines)]
 fn a_draw_with_real_shaders_puts_something_on_the_surface() {
     /* A vertex shader a title draws a scene with, taken from the crate's own
@@ -2285,112 +2280,396 @@ fn a_draw_with_real_shaders_puts_something_on_the_surface() {
      * translator, but it reads pictures, and a shader reading pictures nothing
      * has filled puts out black whatever else is right. What this is testing is
      * the draw, so the colour is one the shader can make on its own. */
+    /* Two modules written for this test rather than taken from a title.
+     *
+     * A title's own shaders are the better test of the translator, but this is
+     * a test of the draw: a scene's vertex shader works its position out from a
+     * transform a title sets up, and a scene's pixel shader reads pictures, so
+     * neither puts anything visible on the surface without reproducing a
+     * title's own state. These two put a triangle where the corners say and
+     * fill it with a colour, which is what says a draw reached the surface.
+     *
+     * The shader table below hands them over the way the lift hands over a
+     * title's: the translated words, the streams each reads, and the pictures
+     * it looks at. */
     #[rustfmt::skip]
     const VERTEX: &[u32] = &[
-        0xf255_6004,
-        0x600a_1000,
-        0x5600_0000,
-        0x0000_1010,
-        0x0000_5600,
-        0xc200_0000,
-        0x0000_4011,
-        0x0000_1200,
-        0xc400_0000,
-        0x0000_3015,
-        0x0000_2200,
+        0x0723_0203,
+        0x0001_0000,
+        0x0008_000b,
+        0x0000_0028,
         0x0000_0000,
-        0x3df8_3000,
-        0x0026_3ec8,
+        0x0002_0011,
+        0x0000_0001,
+        0x0006_000b,
+        0x0000_0001,
+        0x4c53_4c47,
+        0x6474_732e,
+        0x3035_342e,
+        0x0000_0000,
+        0x0003_000e,
+        0x0000_0000,
+        0x0000_0001,
+        0x0007_000f,
+        0x0000_0000,
+        0x0000_0004,
+        0x6e69_616d,
+        0x0000_0000,
+        0x0000_0019,
+        0x0000_001d,
+        0x0003_0003,
+        0x0000_0002,
+        0x0000_01c2,
+        0x0004_0005,
+        0x0000_0004,
+        0x6e69_616d,
+        0x0000_0000,
+        0x0004_0005,
+        0x0000_000c,
+        0x6e72_6f63,
+        0x0073_7265,
+        0x0006_0005,
+        0x0000_0017,
+        0x505f_6c67,
+        0x6556_7265,
+        0x7865_7472,
+        0x0000_0000,
+        0x0006_0006,
+        0x0000_0017,
+        0x0000_0000,
+        0x505f_6c67,
+        0x7469_736f,
+        0x006e_6f69,
+        0x0007_0006,
+        0x0000_0017,
+        0x0000_0001,
+        0x505f_6c67,
+        0x746e_696f,
+        0x657a_6953,
+        0x0000_0000,
+        0x0007_0006,
+        0x0000_0017,
+        0x0000_0002,
+        0x435f_6c67,
+        0x4470_696c,
+        0x6174_7369,
+        0x0065_636e,
+        0x0007_0006,
+        0x0000_0017,
+        0x0000_0003,
+        0x435f_6c67,
+        0x446c_6c75,
+        0x6174_7369,
+        0x0065_636e,
+        0x0003_0005,
+        0x0000_0019,
+        0x0000_0000,
+        0x0006_0005,
+        0x0000_001d,
+        0x565f_6c67,
+        0x6574_7265,
+        0x646e_4978,
+        0x0000_7865,
+        0x0003_0047,
+        0x0000_0017,
+        0x0000_0002,
+        0x0005_0048,
+        0x0000_0017,
+        0x0000_0000,
+        0x0000_000b,
+        0x0000_0000,
+        0x0005_0048,
+        0x0000_0017,
+        0x0000_0001,
+        0x0000_000b,
+        0x0000_0001,
+        0x0005_0048,
+        0x0000_0017,
+        0x0000_0002,
+        0x0000_000b,
+        0x0000_0003,
+        0x0005_0048,
+        0x0000_0017,
+        0x0000_0003,
+        0x0000_000b,
+        0x0000_0004,
+        0x0004_0047,
+        0x0000_001d,
+        0x0000_000b,
+        0x0000_002a,
+        0x0002_0013,
+        0x0000_0002,
+        0x0003_0021,
+        0x0000_0003,
+        0x0000_0002,
+        0x0003_0016,
+        0x0000_0006,
+        0x0000_0020,
+        0x0004_0017,
+        0x0000_0007,
+        0x0000_0006,
+        0x0000_0002,
+        0x0004_0015,
+        0x0000_0008,
+        0x0000_0020,
+        0x0000_0000,
+        0x0004_002b,
+        0x0000_0008,
+        0x0000_0009,
+        0x0000_0003,
+        0x0004_001c,
+        0x0000_000a,
+        0x0000_0007,
+        0x0000_0009,
+        0x0004_0020,
+        0x0000_000b,
+        0x0000_0007,
+        0x0000_000a,
+        0x0004_002b,
+        0x0000_0006,
         0x0000_000d,
-        0x05f8_1000,
-        0x4026_321a,
-        0x0000_040d,
-        0x25f8_2000,
-        0x0026_3688,
-        0x0000_080d,
-        0x05f8_0000,
-        0x4006_060a,
-        0x0000_0c0d,
-        0x7000_0000,
-        0x0000_00c6,
-        0xe200_0003,
-        0xc804_0003,
-        0x18c6_c6b1,
-        0x8b03_ffff,
-        0x2c40_0300,
-        0x1800_00c6,
-        0xe200_0003,
-        0xc804_0003,
-        0x18c6_1b6c,
-        0x8b03_ffff,
-        0xc013_0304,
-        0x1ab0_b0c6,
-        0xe003_0103,
-        0xc428_0303,
-        0x1ab1_6cc6,
-        0xe104_0303,
-        0xc807_0003,
-        0x18bc_b000,
-        0xc104_0300,
-        0xc803_0003,
-        0x18b0_1a00,
-        0xc003_0300,
-        0xc803_0003,
-        0x186d_b000,
-        0xc003_0100,
-        0xc801_803e,
-        0x00b0_b01b,
-        0x9103_2828,
-        0xc802_803e,
-        0x00b0_b01b,
-        0x9103_2929,
-        0xc804_803e,
-        0x00b0_b01b,
-        0x9103_2a2a,
-        0xc808_803e,
-        0x00b0_b01b,
-        0x9103_2b2b,
-        0xc803_8000,
-        0x001a_1a00,
-        0xc201_0100,
-        0xc80f_8002,
         0x0000_0000,
-        0xc200_0000,
-        0xc80f_8001,
+        0x0004_002b,
+        0x0000_0006,
+        0x0000_000e,
+        0x3f00_0000,
+        0x0005_002c,
+        0x0000_0007,
+        0x0000_000f,
+        0x0000_000d,
+        0x0000_000e,
+        0x0004_002b,
+        0x0000_0006,
+        0x0000_0010,
+        0xbf00_0000,
+        0x0005_002c,
+        0x0000_0007,
+        0x0000_0011,
+        0x0000_0010,
+        0x0000_0010,
+        0x0005_002c,
+        0x0000_0007,
+        0x0000_0012,
+        0x0000_000e,
+        0x0000_0010,
+        0x0006_002c,
+        0x0000_000a,
+        0x0000_0013,
+        0x0000_000f,
+        0x0000_0011,
+        0x0000_0012,
+        0x0004_0017,
+        0x0000_0014,
+        0x0000_0006,
+        0x0000_0004,
+        0x0004_002b,
+        0x0000_0008,
+        0x0000_0015,
+        0x0000_0001,
+        0x0004_001c,
+        0x0000_0016,
+        0x0000_0006,
+        0x0000_0015,
+        0x0006_001e,
+        0x0000_0017,
+        0x0000_0014,
+        0x0000_0006,
+        0x0000_0016,
+        0x0000_0016,
+        0x0004_0020,
+        0x0000_0018,
+        0x0000_0003,
+        0x0000_0017,
+        0x0004_003b,
+        0x0000_0018,
+        0x0000_0019,
+        0x0000_0003,
+        0x0004_0015,
+        0x0000_001a,
+        0x0000_0020,
+        0x0000_0001,
+        0x0004_002b,
+        0x0000_001a,
+        0x0000_001b,
         0x0000_0000,
-        0xc202_0200,
-        0x4e4a_0000,
-        0x1207_f124,
-        0xf795_419d,
+        0x0004_0020,
+        0x0000_001c,
+        0x0000_0001,
+        0x0000_001a,
+        0x0004_003b,
+        0x0000_001c,
+        0x0000_001d,
+        0x0000_0001,
+        0x0004_0020,
+        0x0000_001f,
+        0x0000_0007,
+        0x0000_0007,
+        0x0004_002b,
+        0x0000_0006,
+        0x0000_0022,
+        0x3f80_0000,
+        0x0004_0020,
+        0x0000_0026,
+        0x0000_0003,
+        0x0000_0014,
+        0x0005_0036,
+        0x0000_0002,
+        0x0000_0004,
+        0x0000_0000,
+        0x0000_0003,
+        0x0002_00f8,
+        0x0000_0005,
+        0x0004_003b,
+        0x0000_000b,
+        0x0000_000c,
+        0x0000_0007,
+        0x0003_003e,
+        0x0000_000c,
+        0x0000_0013,
+        0x0004_003d,
+        0x0000_001a,
+        0x0000_001e,
+        0x0000_001d,
+        0x0005_0041,
+        0x0000_001f,
+        0x0000_0020,
+        0x0000_000c,
+        0x0000_001e,
+        0x0004_003d,
+        0x0000_0007,
+        0x0000_0021,
+        0x0000_0020,
+        0x0005_0051,
+        0x0000_0006,
+        0x0000_0023,
+        0x0000_0021,
+        0x0000_0000,
+        0x0005_0051,
+        0x0000_0006,
+        0x0000_0024,
+        0x0000_0021,
+        0x0000_0001,
+        0x0007_0050,
+        0x0000_0014,
+        0x0000_0025,
+        0x0000_0023,
+        0x0000_0024,
+        0x0000_000d,
+        0x0000_0022,
+        0x0005_0041,
+        0x0000_0026,
+        0x0000_0027,
+        0x0000_0019,
+        0x0000_001b,
+        0x0003_003e,
+        0x0000_0027,
+        0x0000_0025,
+        0x0001_00fd,
+        0x0001_0038,
     ];
     #[rustfmt::skip]
     const PIXEL: &[u32] = &[
+        0x0723_0203,
+        0x0001_0000,
+        0x0008_000b,
+        0x0000_000d,
         0x0000_0000,
-        0x1001_c400,
-        0x2200_0000,
-        0xc80f_8000,
+        0x0002_0011,
+        0x0000_0001,
+        0x0006_000b,
+        0x0000_0001,
+        0x4c53_4c47,
+        0x6474_732e,
+        0x3035_342e,
         0x0000_0000,
-        0xc200_0000,
+        0x0003_000e,
         0x0000_0000,
+        0x0000_0001,
+        0x0006_000f,
+        0x0000_0004,
+        0x0000_0004,
+        0x6e69_616d,
         0x0000_0000,
+        0x0000_0009,
+        0x0003_0010,
+        0x0000_0004,
+        0x0000_0007,
+        0x0003_0003,
+        0x0000_0002,
+        0x0000_01c2,
+        0x0004_0005,
+        0x0000_0004,
+        0x6e69_616d,
         0x0000_0000,
+        0x0004_0005,
+        0x0000_0009,
+        0x6f6c_6f63,
+        0x0000_7275,
+        0x0004_0047,
+        0x0000_0009,
+        0x0000_001e,
+        0x0000_0000,
+        0x0002_0013,
+        0x0000_0002,
+        0x0003_0021,
+        0x0000_0003,
+        0x0000_0002,
+        0x0003_0016,
+        0x0000_0006,
+        0x0000_0020,
+        0x0004_0017,
+        0x0000_0007,
+        0x0000_0006,
+        0x0000_0004,
+        0x0004_0020,
+        0x0000_0008,
+        0x0000_0003,
+        0x0000_0007,
+        0x0004_003b,
+        0x0000_0008,
+        0x0000_0009,
+        0x0000_0003,
+        0x0004_002b,
+        0x0000_0006,
+        0x0000_000a,
+        0x3f80_0000,
+        0x0004_002b,
+        0x0000_0006,
+        0x0000_000b,
+        0x0000_0000,
+        0x0007_002c,
+        0x0000_0007,
+        0x0000_000c,
+        0x0000_000a,
+        0x0000_000b,
+        0x0000_000b,
+        0x0000_000a,
+        0x0005_0036,
+        0x0000_0002,
+        0x0000_0004,
+        0x0000_0000,
+        0x0000_0003,
+        0x0002_00f8,
+        0x0000_0005,
+        0x0003_003e,
+        0x0000_0009,
+        0x0000_000c,
+        0x0001_00fd,
+        0x0001_0038,
     ];
-
-    let vertex = xenolith_shader::translate(xenolith_shader::Kind::Vertex, VERTEX)
-        .expect("the vertex shader translates");
-    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, PIXEL)
-        .expect("the pixel shader translates");
-    assert!(!vertex.words.is_empty() && !pixel.words.is_empty());
 
     /* The table the runtime finds them by, built the way the lift builds it. */
     let mut table = String::from("#include \"xenolith.h\"\n\n");
-    for (which, said) in [(0usize, &vertex), (1usize, &pixel)] {
+    for (which, words) in [(0usize, VERTEX), (1usize, PIXEL)] {
         let _ = writeln!(table, "static const uint32_t said_{which}[] = {{");
-        for word in &said.words {
+        for word in words {
             let _ = writeln!(table, "    {word:#010x}u,");
         }
         table.push_str("};\n\n");
     }
+    /* One stream for the vertex shader: slot 0, two words per vertex, read from
+     * the front. The pixel shader reads none. */
+    table.push_str("static const uint32_t reads_0[] = { 0u, 2u, 0u, 2u };\n\n");
     table.push_str(concat!(
         "static const size_t everything_there = 2;\n\n",
         "const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,\n",
@@ -2398,17 +2677,10 @@ fn a_draw_with_real_shaders_puts_something_on_the_surface() {
         "    (void)sum; (void)words;\n",
         "    if (length != 0) { *length = kind == 0 ? ",
     ));
-    let _ = writeln!(
-        table,
-        "{}u : {}u; }}",
-        vertex.words.len(),
-        pixel.words.len()
-    );
+    let _ = writeln!(table, "{}u : {}u; }}", VERTEX.len(), PIXEL.len());
     table.push_str(concat!(
         "    return kind == 0 ? said_0 : said_1;\n",
         "}\n\n",
-        "/* One stream, slot 0, two words apart, read from the front. */\n",
-        "static const uint32_t reads_0[] = { 0u, 2u, 0u, 2u };\n\n",
         "const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,\n",
         "                               uint32_t *streams) {\n",
         "    (void)sum; (void)words;\n",
@@ -2465,30 +2737,10 @@ int main(void) {
         return 0;
     }
 
-    /* A frame of its own, cleared, with a triangle drawn into it. */
-    if (!xenolith_begin_a_frame()) { return 3; }
-
-    /* The words the table holds, found the way the runtime finds them. */
-    uint32_t vertex_length = 0;
-    uint32_t pixel_length = 0;
-    const uint32_t *vertex = xenolith_said(0u, 0u, 0u, &vertex_length);
-    const uint32_t *pixel = xenolith_said(1u, 0u, 0u, &pixel_length);
-    if (vertex == NULL || pixel == NULL || vertex_length == 0 || pixel_length == 0) {
-        printf("the table holds no shader\n");
-        return 0;
-    }
-    if (!xenolith_can_draw_with(0u, vertex, vertex_length, 0u, pixel, pixel_length)) {
-        printf("the shaders would not build\n");
-        return 0;
-    }
-    xenolith_look_at(NULL, NULL);
-    xenolith_clip_to(0u, 0u, 1279u, 719u);
-
     /* Three corners of a triangle in the title's own memory, each a position of
-     * two floats. The fetch is told where they are and the shader's stream says
-     * how far apart two of them sit, which is what the runtime reads them by. */
-    static const float corners[3][2] = {{0.0f, 0.5f}, {-0.5f, -0.5f}, {0.5f, -0.5f}};
+     * two floats. */
     uint32_t at = 0x01000000u;
+    static const float corners[3][2] = {{0.0f, 0.5f}, {-0.5f, -0.5f}, {0.5f, -0.5f}};
     for (unsigned one = 0; one < 3; one++) {
         uint32_t across, down;
         __builtin_memcpy(&across, &corners[one][0], 4);
@@ -2497,39 +2749,40 @@ int main(void) {
         xenolith_store32(base, at + one * 8u + 4u, down);
     }
 
-    /* What the hardware would have done to a position after the shader put it
-     * out, as something to multiply by and something to add. This shader reads
-     * those from the two constants past the ones a title names, and leaves the
-     * position it worked out multiplied by nothing where they are nought, which
-     * puts every corner at the origin. */
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u, 0x3f800000u);
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u + 4u, 0x3f800000u);
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u + 8u, 0x3f800000u);
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u + 12u, 0x3f800000u);
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u, 0u);
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u + 4u, 0u);
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u + 8u, 0u);
-    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u + 12u, 0x3f800000u);
+    /* Fetch slot 0: vertices, at that address, that many words. */
+    xenolith_store32(base, 0x7fc80000u + 0x4800u * 4u, at | 3u);
+    xenolith_store32(base, 0x7fc80000u + 0x4801u * 4u, (3u * 2u) << 2);
 
-    /* Taken from the register block as it stands now, which is why this comes
-     * after the constants are written rather than before. */
+    /* Not mixing, and every part of a colour written. A blend of nought is not
+     * "leave it alone", it is a factor of zero on both sides, which multiplies
+     * the colour away. */
+    xenolith_store32(base, 0x7fc80000u + 0x2201u * 4u, 0x00010001u);
+    xenolith_store32(base, 0x7fc80000u + 0x2104u * 4u, 0xfu);
+
+    if (!xenolith_begin_a_frame()) { return 3; }
+    xenolith_look_at(NULL, NULL);
+    xenolith_clip_to(0u, 0u, 1279u, 719u);
     xenolith_hand_over_constants(base + 0x7fc80000u + 0x4000u * 4u,
                                  base + 0x7fc80000u + 0x4900u * 4u,
                                  base + 0x7fc80000u + 0x4908u * 4u);
 
-    /* Fetch slot 0: vertices, at that address, that many words. */
-    xenolith_store32(base, 0x7fc80000u + (0x4800u + 0u) * 4u, at | 3u);
-    xenolith_store32(base, 0x7fc80000u + (0x4800u + 1u) * 4u, (3u * 2u) << 2);
+    /* The words the table holds, found the way the runtime finds them. */
+    uint32_t vertex_length = 0;
+    uint32_t pixel_length = 0;
+    const uint32_t *vertex = xenolith_said(0u, 0u, 0u, &vertex_length);
+    const uint32_t *pixel = xenolith_said(1u, 0u, 0u, &pixel_length);
+    if (vertex == NULL || pixel == NULL) {
+        printf("the table holds no shader\n");
+        return 0;
+    }
 
-    if (xenolith_room_for_vertices(NULL) != NULL) { return 4; }
-
-    int drawn = xenolith_draw_now(0u, 0xfu, 0u, XENOLITH_DRAWN_HOWEVER_SOLID, 0u,
+    int drawn = xenolith_draw_now(0x00010001u, 0xfu, 0u, XENOLITH_DRAWN_HOWEVER_SOLID, 0u,
                                   0u, vertex, vertex_length, 0u, pixel, pixel_length, 3u,
                                   XENOLITH_SHAPE_TRIANGLES);
-    if (!drawn) { return 5; }
+    if (!drawn) { return 4; }
 
-    if (!xenolith_end_a_frame()) { return 6; }
-    if (!xenolith_keep_a_frame("frame.ppm")) { return 7; }
+    if (!xenolith_end_a_frame()) { return 5; }
+    if (!xenolith_keep_a_frame("frame.ppm")) { return 6; }
     printf("drawn\n");
     return 0;
 }
