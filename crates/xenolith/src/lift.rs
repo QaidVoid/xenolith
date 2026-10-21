@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_analysis::analyze;
-use xenolith_lift::{RUNTIME_HEADER, RUNTIME_SOURCE, Unlifted, declaration_of, lift, name_of};
+use xenolith_lift::{
+    COMMAND_STREAM_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, Unlifted, declaration_of, lift, name_of,
+};
 
 use crate::input::{Source, number};
 
@@ -403,6 +405,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     for (name, text) in [
         ("xenolith.h", RUNTIME_HEADER),
         ("xenolith.c", RUNTIME_SOURCE),
+        ("command_stream.c", COMMAND_STREAM_SOURCE),
     ] {
         let path = args.out.join(name);
         std::fs::write(&path, text)

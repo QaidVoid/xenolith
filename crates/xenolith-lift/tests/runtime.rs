@@ -180,6 +180,10 @@ fn runs(name: &str, program: &str) -> Result<(), String> {
     for (file, text) in [
         ("xenolith.h", HEADER),
         ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
         ("main.c", program),
     ] {
         std::fs::write(directory.join(file), text)
@@ -1702,6 +1706,11 @@ fn runs_sanitized(sanitizer: &str, program: &str) -> Result<(), String> {
     for (file, text) in [
         ("xenolith.h", HEADER),
         ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        /* The runtime includes this, so it has to be beside it. */
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
         ("main.c", program),
     ] {
         std::fs::write(directory.join(file), text)
@@ -1757,4 +1766,171 @@ fn runs_sanitized(sanitizer: &str, program: &str) -> Result<(), String> {
         "check {} failed:\n{complaint}",
         ran.status.code().unwrap_or(-1)
     ))
+}
+
+/// The commands a title writes are read, and a register they set holds what
+/// they set it to.
+///
+/// A title does not call the hardware: it writes packets into a ring buffer and
+/// waits for a pointer to move. A runtime that does not read the buffer draws
+/// nothing and, worse, leaves the registers a title set holding whatever was
+/// there before, so a title reading one back gets an answer nobody gave.
+#[test]
+fn a_packet_in_the_ring_sets_a_register() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+
+    /* A ring buffer with one packet in it: a run of one register, index 0x20,
+     * set to 0xdeadbeef. The header's top two bits are nought for a run of
+     * registers, the next fourteen say how many words follow, and the low
+     * fifteen are the register it starts at. */
+    uint32_t ring = 0x01000000u;
+    uint32_t header = (0u << 30) | (0u << 16) | 0x20u;
+    xenolith_store32(base, ring, header);
+    xenolith_store32(base, ring + 4, 0xdeadbeefu);
+
+    /* The title says where the ring is, and how big, as a power of two. */
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "NtSetCommandBuffer");
+    if (ctx.r[3] != 0u) {
+        return 3;
+    }
+
+    /* Where it reads progress from. The block begins sixty bytes before the
+     * address it names, and the word at its front is how far the hardware has
+     * worked through what it was given. */
+    uint32_t read_back = 0x02000000u + 60u;
+    ctx.r[3] = read_back;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "NtSetProgressAddress");
+    if (ctx.r[3] != 0u) {
+        return 4;
+    }
+
+    /* Publishing the write pointer is what tells the hardware there is
+     * something to read: two words, the header and its one word. */
+    xenolith_store32(base, 0x7fc80714u, 2u);
+
+    /* The register is written by a thread that wakes a hundred times a
+     * millisecond, so it is waited for rather than read once. */
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, 0x7fc80000u + 0x20u * 4u) == 0xdeadbeefu) {
+            printf("read\n");
+            return 0;
+        }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    fprintf(stderr, "the register still holds %#x\n",
+            xenolith_load32(base, 0x7fc80000u + 0x20u * 4u));
+    return 5;
+}
+"#;
+    if let Err(complaint) = runs("ring", program) {
+        panic!("a packet in the ring did not set a register:\n{complaint}");
+    }
+}
+
+/// An import the runtime answers says it succeeded.
+///
+/// The status is `r[3]`, which is also where the first argument arrives. An
+/// import that answers without writing a status therefore leaves the title
+/// looking at whatever it passed in, which for most of these is an address. A
+/// title comparing that against success is told the call failed and does
+/// nothing further, so a title stops without anything having gone wrong.
+#[test]
+fn an_answered_import_says_it_succeeded() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Asks for one import with an argument that is not nought, and reports what
+ * came back. */
+static uint32_t ask(xenolith_context *ctx, uint8_t *base, uint32_t ordinal,
+                    const char *name, uint32_t argument) {
+    ctx->r[3] = argument;
+    xenolith_import(ctx, base, "xboxkrnl.exe", ordinal, name);
+    return (uint32_t)ctx->r[3];
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+
+    /* The command processor, told where the ring buffer is and where progress
+     * goes. Both take an address in the first argument. */
+    if (ask(&ctx, base, 450, "VdStartCommandProcessor", 0) != 0u) {
+        fprintf(stderr, "starting the command processor answered %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 3;
+    }
+    if (ask(&ctx, base, 451, "VdInitializeRingBuffer", 0x01000000u) != 0u) {
+        fprintf(stderr, "setting the ring buffer answered %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 4;
+    }
+    if (ask(&ctx, base, 438, "VdEnableRingBufferRPtrWriteBack", 0x02000000u) != 0u) {
+        fprintf(stderr, "setting the progress address answered %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 5;
+    }
+
+    /* The one that does nothing at all, which is still an answer. */
+    if (ask(&ctx, base, 479, "the one that does nothing", 0x40u) != 0u) {
+        fprintf(stderr, "doing nothing answered %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("answered", program) {
+        panic!("an answered import did not say it succeeded:\n{complaint}");
+    }
 }

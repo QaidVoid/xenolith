@@ -26,6 +26,14 @@ pub const RUNTIME_HEADER: &str = include_str!("../runtime/xenolith.h");
 /// first call into the operating system.
 pub const RUNTIME_SOURCE: &str = include_str!("../runtime/xenolith.c");
 
+/// The part of the runtime that reads a title's commands for the graphics
+/// hardware.
+///
+/// Its own file rather than a piece of the one above, because it is a subject
+/// of its own and it is the piece most likely to grow. The runtime includes it,
+/// so it is written beside the runtime and not compiled separately.
+pub const COMMAND_STREAM_SOURCE: &str = include_str!("../runtime/command_stream.c");
+
 pub use effect::{Effect, Location, effect_of, is_modelled, unmodelled};
 pub use emit::{
     Imported, Imports, Lifted, Unlifted, code_for, declaration_of, is_liftable, lift, name_of,

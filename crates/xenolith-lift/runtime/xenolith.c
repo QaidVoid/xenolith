@@ -1357,78 +1357,63 @@ static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source) {
     body(&state, base);
 }
 
-/* The one packet whose effect a title can see.
+/* Where the block of registers sits, and how many there are.
  *
- * Everything else in the buffer sets hardware state or draws, and there is no
- * hardware here for either. This one carries an address and a value, and the
- * value appearing at the address is how a title learns the work it queued was
- * reached. Nothing it queues afterwards happens until that shows up.
+ * A title names a register by index, and the index for the ring buffer's write
+ * pointer lands on the address the title stores to, so a register's address is
+ * its index four times over from the front of the block.
  */
-#define XENOLITH_PACKET_WRITE 0x3fu
+#define XENOLITH_REGISTERS 0x7fc80000u
+#define XENOLITH_REGISTER_COUNT 0x8000u
+
+/* Where a title's shader constants begin among the registers. */
+#define XENOLITH_CONSTANT_REGISTER 0x4000u
 
 /* How far through the ring buffer this has read, in words. */
 static uint32_t consumed;
 
-/* Reads the packets a title wrote and does the one thing it can see.
+/* Reads a graphics register, or nothing where the index names none.
  *
- * What a header means is read out of what a title actually wrote rather than
- * taken from a description of the hardware. The top two bits say which of four
- * kinds a packet is and the next fourteen say how many words follow, which is
- * checkable against the buffer: the lengths those two fields give land exactly
- * on the next header, four packets running, with nothing left over.
+ * The registers are a block of ordinary memory here rather than hardware, so a
+ * register is its index four times over from the front of that block. A packet
+ * set one and a title read it back, so the two have to be the same place. */
+static uint32_t register_says(const uint8_t *base, uint32_t index) {
+    if (index >= XENOLITH_REGISTER_COUNT) {
+        return 0;
+    }
+    return xenolith_load32(base, XENOLITH_REGISTERS + index * 4);
+}
+
+/* Writes a graphics register, or nothing where the index names none.
  *
- * The packets whose effect is not visible from outside the hardware are read
- * for their length and otherwise passed over. That is not the same as executing
- * them, and a frame reported finished here still had nothing drawn in it.
- */
+ * A packet naming a register past the end is a packet this has no reading of,
+ * and writing it somewhere else would be worse than not writing it. */
+static void set_register(uint8_t *base, uint32_t index, uint32_t value) {
+    if (index < XENOLITH_REGISTER_COUNT) {
+        xenolith_store32(base, XENOLITH_REGISTERS + index * 4, value);
+    }
+}
+
+#include "command_stream.c"
+
+/* Reads the packets a title wrote, and does what this can with them. */
 static void consume_the_ring(uint8_t *base, uint32_t written) {
     if (graphics.ring_at == 0) {
         return;
     }
 
     /* Going backwards is the buffer having wrapped, and everything from where
-     * this had got to up to the end was read before it did.
-     *
-     * Wrapping is worked out this way rather than from the buffer's length,
-     * because the length is given as a power of two whose unit is not
-     * recoverable from what a title passes. Reading it wrongly would put the
-     * walk half way through a packet, which is worse than not knowing it. This
-     * needs only the pointer, which is unambiguous. */
+     * this had got to up to the end was read before it did. */
     if (written < consumed) {
         consumed = 0;
     }
 
-    while (consumed < written) {
-        uint32_t header = xenolith_load32(base, graphics.ring_at + consumed * 4);
-        uint32_t follows;
-
-        switch (header >> 30) {
-        case 2:
-            /* A filler word, carrying nothing. */
-            follows = 0;
-            break;
-        case 1:
-            follows = 2;
-            break;
-        default:
-            follows = ((header >> 16) & 0x3fff) + 1;
-            break;
-        }
-
-        if (consumed + 1 + follows > written) {
-            /* The rest of this packet has not been written yet. */
-            break;
-        }
-
-        if ((header >> 30) == 3 && ((header >> 8) & 0xff) == XENOLITH_PACKET_WRITE
-            && follows >= 2) {
-            uint32_t where = xenolith_load32(base, graphics.ring_at + (consumed + 1) * 4);
-            uint32_t value = xenolith_load32(base, graphics.ring_at + (consumed + 2) * 4);
-            xenolith_store32(base, where, value);
-        }
-
-        consumed += 1 + follows;
+    if (consumed >= written) {
+        return;
     }
+
+    consumed += walk_the_commands(base, graphics.ring_at + consumed * 4,
+                                  written - consumed, 0);
 }
 
 static void *drain_the_ring(void *given) {
@@ -1438,6 +1423,8 @@ static void *drain_the_ring(void *given) {
     assumed("the graphics hardware keeps up with the title",
             "nothing here reads the commands a title writes, so the only "
             "alternative is a title waiting forever");
+
+    unsigned long reported_at = 0;
 
     while (graphics.read_back_at != 0) {
         uint32_t written = xenolith_load32(base, XENOLITH_RING_WRITE_POINTER);
@@ -1461,6 +1448,13 @@ static void *drain_the_ring(void *given) {
          * written here is finished the moment it is written, so the bit is
          * always the truth of this runtime even though it is never the truth of
          * any hardware. */
+        /* What has been read, once a second, so that a run says what it found
+         * rather than only what it did not draw. */
+        if (read_so_far.packets != reported_at && ++ticks % 600 == 0) {
+            reported_at = read_so_far.packets;
+            say_what_was_read();
+        }
+
         if (++ticks % 160 == 0) {
             xenolith_store32(base, XENOLITH_GRAPHICS_COMPLETED, 1);
             raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_RETIRE);
@@ -2338,7 +2332,9 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
         return 1;
     case 479:
         /* A routine the kernel names so that a title has something to point at
-         * where it wants nothing done. Doing nothing is the whole of it. */
+         * where it wants nothing done. Doing nothing is the whole of it, and
+         * saying it succeeded is the rest of it. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 3:
         /* Saying something to a debugger. A retail console with none attached
@@ -2409,6 +2405,7 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
         /* Holding off the kernel's own interruptions around a stretch of work.
          * Nothing here interrupts a thread that way, so there is nothing to
          * hold off and nothing to let back in. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 454:
         /* Whether the link to the display trained. There is no link, and a
@@ -2541,11 +2538,18 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 450:
-        /* Starting the command processor, of which there is none. */
+        /* Starting the command processor, of which there is none.
+         *
+         * Answering an import without saying it succeeded leaves the status
+         * holding whatever the title passed in, which for these is an address.
+         * A title comparing it against success is then told the call failed and
+         * does nothing further, so every one of these says so. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 451:
         graphics.ring_at = (uint32_t)ctx->r[3];
         graphics.ring_size = 1u << ((uint32_t)ctx->r[4] & 0x1f);
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 438: {
         graphics.read_back_at = (uint32_t)ctx->r[3];
@@ -2553,11 +2557,13 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         if (pthread_create(&draining, NULL, drain_the_ring, base) == 0) {
             pthread_detach(draining);
         }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
     case 469:
         graphics.callback = (uint32_t)ctx->r[3];
         graphics.callback_argument = (uint32_t)ctx->r[4];
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 433:
         /* Telling whoever registered an interest that the hardware reached a

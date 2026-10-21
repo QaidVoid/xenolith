@@ -20,7 +20,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xenolith_lift::{Imports, RUNTIME_HEADER, RUNTIME_SOURCE, lift, name_of};
+use xenolith_lift::{
+    COMMAND_STREAM_SOURCE, Imports, RUNTIME_HEADER, RUNTIME_SOURCE, lift, name_of,
+};
 use xenolith_xex::{Container, Image, KeyMaterial};
 
 /// The most instructions an entry may hold, for the few kept past the ordinary
@@ -683,6 +685,8 @@ fn build_model(directory: &Path, image: &Image, pool: &BTreeMap<u32, String>) ->
     let compiler = honest::host_compiler();
     let _ = std::fs::write(directory.join("xenolith.h"), RUNTIME_HEADER);
     let _ = std::fs::write(directory.join("xenolith.c"), RUNTIME_SOURCE);
+    /* The runtime includes this, so it has to be beside it. */
+    let _ = std::fs::write(directory.join("command_stream.c"), COMMAND_STREAM_SOURCE);
 
     let mut lifted = String::from("#include \"xenolith.h\"\n\n");
     for address in pool.keys() {
