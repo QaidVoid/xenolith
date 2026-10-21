@@ -529,6 +529,33 @@ fn what_was_emitted_links_into_a_program() {
         "the link should have produced a program"
     );
 
+    /* And the same directory with no graphics at all. One block decides it:
+     * turning the three capabilities off has to leave everything else building
+     * and linking, which is what says the switches are not load-bearing for a
+     * title that draws nothing. */
+    let plain = Command::new("make")
+        .arg("-C")
+        .arg(&out)
+        .arg("clean")
+        .output()
+        .expect("make should run");
+    assert!(plain.status.success(), "cleaning should work");
+    let without = Command::new("make")
+        .arg("-C")
+        .arg(&out)
+        .args(["DRAWING=no", "SHOWING=no", "TALKING=no"])
+        .output()
+        .expect("make should run");
+    assert!(
+        without.status.success(),
+        "the emitted program did not link without graphics:\n{}",
+        String::from_utf8_lossy(&without.stderr)
+    );
+    assert!(
+        out.join("lifted").is_file(),
+        "a build with no graphics should still produce a program"
+    );
+
     // Entering the one function it holds runs translated code and comes back.
     let ran = Command::new(out.join("lifted"))
         .arg(out.join("image.bin"))
