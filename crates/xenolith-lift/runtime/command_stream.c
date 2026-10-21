@@ -185,12 +185,15 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
              * and the words. Nothing here compiles one, so what is counted is
              * that one was handed over. */
             if (opcode == XENOLITH_PACKET_SHADER && follows >= 2) {
+                uint32_t which_kind = xenolith_load32(base, stream + (at + 1) * 4);
                 uint32_t how_many = xenolith_load32(base, stream + (at + 2) * 4) & 0xffffu;
                 read_so_far.shaders++;
                 if (how_many == 0 || how_many + 2 > follows) {
                     say_a_report("a shader packet at %#010x says %u words and carries %u",
                                  stream + at * 4, how_many, follows - 2);
+                    break;
                 }
+                take_the_shader_in_hand(base, which_kind, stream + (at + 3) * 4, how_many);
                 break;
             }
 
@@ -266,6 +269,7 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
             if (opcode == XENOLITH_PACKET_DRAW || opcode == XENOLITH_PACKET_DRAW_INDEXED) {
                 read_so_far.drew++;
                 read_so_far.passed_over++;
+                draw_what_was_asked_for(base, stream, at, follows, opcode, header);
                 break;
             }
 

@@ -16,8 +16,8 @@ use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_analysis::analyze;
 use xenolith_lift::{
-    COMMAND_STREAM_SOURCE, RENDERER_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, SOUND_SOURCE, Unlifted,
-    declaration_of, lift, name_of,
+    COMMAND_STREAM_SOURCE, DRAWING_SOURCE, RENDERER_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE,
+    SOUND_SOURCE, Unlifted, declaration_of, lift, name_of,
 };
 
 use crate::input::{Source, number};
@@ -450,6 +450,7 @@ fn write_the_runtime(out: &Path) -> Result<()> {
         ("command_stream.c", COMMAND_STREAM_SOURCE),
         ("sound.c", SOUND_SOURCE),
         ("vulkan.c", RENDERER_SOURCE),
+        ("drawing.c", DRAWING_SOURCE),
     ] {
         let path = out.join(name);
         std::fs::write(&path, text)

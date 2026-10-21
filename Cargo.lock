@@ -992,6 +992,7 @@ dependencies = [
  "proptest",
  "xenolith-analysis",
  "xenolith-ppc",
+ "xenolith-shader",
  "xenolith-xex",
 ]
 

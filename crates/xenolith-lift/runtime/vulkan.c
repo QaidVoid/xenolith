@@ -2253,6 +2253,8 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
     settled.pMapEntries = each_part;
     settled.dataSize = sizeof the_test;
     settled.pData = the_test;
+    /* A vertex shader carries no settled constants, so only the fragment stage
+     * is told about them. */
     stages[1].pSpecializationInfo = &settled;
 
     VkPipelineVertexInputStateCreateInfo nothing_fetched = {0};

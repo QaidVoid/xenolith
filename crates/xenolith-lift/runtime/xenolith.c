@@ -1417,6 +1417,8 @@ static void set_register(uint8_t *base, uint32_t index, uint32_t value) {
     }
 }
 
+#include "drawing.c"
+
 #include "command_stream.c"
 
 #include "sound.c"
@@ -2558,11 +2560,13 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
     case 603:
         /* Showing what was drawn.
          *
-         * Nothing was drawn and there is no display to show it on, so what
-         * this does is count that a title asked. A title reaching this has
-         * finished a frame's worth of work, which is worth knowing even when
-         * the frame is empty. */
+         * A title reaching this has finished a frame's worth of work. What was
+         * drawn in it is finished first, which reads it back and is what makes
+         * the next frame start clean, and then it is shown if there is anywhere
+         * to show it. Where there is not, the counting is all this comes to. */
         graphics.frames++;
+        finish_the_frame();
+        xenolith_show_the_frame();
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 442: {

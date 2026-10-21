@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xenolith_lift::{
-    COMMAND_STREAM_SOURCE, Imports, RUNTIME_HEADER, RUNTIME_SOURCE, SOUND_SOURCE, lift, name_of,
+    COMMAND_STREAM_SOURCE, DRAWING_SOURCE, Imports, RENDERER_SOURCE, RUNTIME_HEADER,
+    RUNTIME_SOURCE, SOUND_SOURCE, lift, name_of,
 };
 use xenolith_xex::{Container, Image, KeyMaterial};
 
@@ -688,6 +689,22 @@ fn build_model(directory: &Path, image: &Image, pool: &BTreeMap<u32, String>) ->
     /* The runtime includes this, so it has to be beside it. */
     let _ = std::fs::write(directory.join("command_stream.c"), COMMAND_STREAM_SOURCE);
     let _ = std::fs::write(directory.join("sound.c"), SOUND_SOURCE);
+    let _ = std::fs::write(directory.join("drawing.c"), DRAWING_SOURCE);
+    let _ = std::fs::write(directory.join("vulkan.c"), RENDERER_SOURCE);
+    /* The shader table the lift emits. This model is built from a container
+     * rather than lifted, so it has none of its own and gets an empty one. */
+    let _ = std::fs::write(
+        directory.join("shaders.c"),
+        concat!(
+            "#include \"xenolith.h\"\n\n",
+            "const uint32_t *xenolith_said(uint32_t k, uint32_t s, uint32_t w, uint32_t *l) {\n",
+            "    (void)k; (void)s; (void)w; (void)l;\n    return 0;\n}\n\n",
+            "const uint32_t *xenolith_reads(uint32_t k, uint32_t s, uint32_t w, uint32_t *n) {\n",
+            "    (void)k; (void)s; (void)w; (void)n;\n    return 0;\n}\n\n",
+            "const uint32_t *xenolith_looks_at(uint32_t k, uint32_t s, uint32_t w, uint32_t *p) {\n",
+            "    (void)k; (void)s; (void)w; (void)p;\n    return 0;\n}\n",
+        ),
+    );
 
     let mut lifted = String::from("#include \"xenolith.h\"\n\n");
     for address in pool.keys() {
@@ -725,7 +742,9 @@ fn build_model(directory: &Path, image: &Image, pool: &BTreeMap<u32, String>) ->
         .arg(directory.join("driver.c"))
         .arg(directory.join("lifted.c"))
         .arg(directory.join("xenolith.c"))
-        .args(["-lm", "-lpthread"])
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
         .output()
         .ok()?;
     assert!(

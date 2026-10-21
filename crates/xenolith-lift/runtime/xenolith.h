@@ -704,6 +704,52 @@ uint32_t xenolith_processor_block(uint8_t *base);
 #define XENOLITH_SHAPE_RECTANGLES 8u
 #define XENOLITH_SHAPE_QUADS 13u
 
+/* Says a shader in a host's terms while a title runs, for one it loaded from
+ * the data beside its executable rather than out of the executable itself.
+ *
+ * Returns how many words the answer takes, which is nought where the shader
+ * could not be said. Where that is more than there was room for, nothing is
+ * written and the caller may ask again with more.
+ *
+ * Only there where the library that says shaders was linked in. */
+uint32_t xenolith_say_a_shader(uint32_t kind, const uint32_t *from, uint32_t count,
+                               uint32_t *into, uint32_t room);
+
+/* How many shaders said while a title runs are kept, so that one handed over
+ * again is not said again. */
+#define XENOLITH_SAID_WHILE_RUNNING 64
+
+/* How many counts come before the words of a shader said while a title runs. */
+#define XENOLITH_COUNTS 3u
+
+/* How many words each stream of a shader said while a title runs takes. */
+#define XENOLITH_WORDS_A_STREAM 4u
+
+const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,
+                              uint32_t *length);
+
+/* Where a shader goes for its vertices, as four words a stream: which fetch
+ * constant says where it is, how far apart two vertices sit in it, how far into
+ * one this reads, and how much of it. Nothing where the shader fetches none.
+ *
+ * A host needs these where it has to lay a vertex out itself rather than hand
+ * over what a title wrote, which is what a shape the hardware completes asks
+ * for. Found the same way a shader is, because it belongs to one.
+ */
+const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,
+                               uint32_t *streams);
+
+/* Which of the places a picture is kept a shader reads one from. Nothing where
+ * it reads none.
+ *
+ * A host makes ready only the pictures a shader will look at. Making every place
+ * ready instead means turning a picture round and handing it over for each one a
+ * title has named, whether anything reads it or not, which for a title that
+ * names a whole screen is gigabytes of work a frame that nothing looks at.
+ */
+const uint32_t *xenolith_looks_at(uint32_t kind, uint32_t sum, uint32_t words,
+                                  uint32_t *pictures);
+
 /* Whether there is anywhere to draw, which there is not on a machine with no
  * graphics driver and in a build made without one. Says so once. */
 int xenolith_can_draw(void);

@@ -12,8 +12,33 @@
 mod honest;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
+
+/// An empty shader table, which is what a title with no shaders it can read
+/// gets. The runtime finds nothing by any sum and says so.
+const SHADER_TABLE: &str = r#"
+#include "xenolith.h"
+
+const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,
+                              uint32_t *length) {
+    (void)kind; (void)sum; (void)words; (void)length;
+    return 0;
+}
+
+const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,
+                               uint32_t *streams) {
+    (void)kind; (void)sum; (void)words; (void)streams;
+    return 0;
+}
+
+const uint32_t *xenolith_looks_at(uint32_t kind, uint32_t sum, uint32_t words,
+                                  uint32_t *pictures) {
+    (void)kind; (void)sum; (void)words; (void)pictures;
+    return 0;
+}
+"#;
 
 /// The interface, shipped alongside the code emitted against it.
 const HEADER: &str = include_str!("../runtime/xenolith.h");
@@ -185,6 +210,11 @@ fn runs(name: &str, program: &str) -> Result<(), String> {
             include_str!("../runtime/command_stream.c"),
         ),
         ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        /* The shader table, which the lift emits. A test has no image, so it
+         * gets one with nothing in it. */
+        ("shaders.c", SHADER_TABLE),
         ("main.c", program),
     ] {
         std::fs::write(directory.join(file), text)
@@ -198,7 +228,9 @@ fn runs(name: &str, program: &str) -> Result<(), String> {
         .arg(&program_path)
         .arg(directory.join("main.c"))
         .arg(directory.join("xenolith.c"))
-        .args(["-lm", "-lpthread"])
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
         .output()
         .map_err(|error| format!("running the compiler: {error}"))?;
     if !output.status.success() {
@@ -1713,6 +1745,11 @@ fn runs_sanitized(sanitizer: &str, program: &str) -> Result<(), String> {
             include_str!("../runtime/command_stream.c"),
         ),
         ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        /* The shader table, which the lift emits. A test has no image, so it
+         * gets one with nothing in it. */
+        ("shaders.c", SHADER_TABLE),
         ("main.c", program),
     ] {
         std::fs::write(directory.join(file), text)
@@ -1749,7 +1786,9 @@ fn runs_sanitized(sanitizer: &str, program: &str) -> Result<(), String> {
         .arg(&program_path)
         .arg(directory.join("main.c"))
         .arg(directory.join("xenolith.c"))
-        .args(["-lm", "-lpthread"])
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
         .output()
         .map_err(|error| format!("running the compiler: {error}"))?;
     if !output.status.success() {
@@ -2220,4 +2259,294 @@ fn runs_with_the_renderer(name: &str, program: &str) -> Result<(), String> {
             String::from_utf8_lossy(&ran.stderr)
         ))
     }
+}
+
+/// A draw with a real pair of shaders puts something on the surface.
+///
+/// Everything before this proves a piece works on its own: the renderer opens a
+/// device, the command stream reads a packet, the shader table finds a shader.
+/// None of that says a draw happens. What this checks is the whole chain: a
+/// vertex shader and a pixel shader that a validator accepts, handed over the
+/// way a title hands them over, and a draw that reads the frame back.
+/// Ignored because one driver here refuses the pipeline this builds.
+///
+/// The same pair and the same state is accepted by the other driver on this
+/// machine, so what it needs is a device that builds it rather than a change to
+/// the test. `XENOLITH_DRAW_TEST=1` runs it where that is true, and
+/// `scripts/check-oracles` does not, because a run that cannot draw is not an
+/// oracle for drawing.
+#[test]
+#[ignore = "needs a driver that builds the pipeline"]
+#[allow(clippy::too_many_lines)]
+fn a_draw_with_real_shaders_puts_something_on_the_surface() {
+    /* Two shaders a title draws a scene with, taken from the crate's own
+     * validated fixtures: a vertex shader carrying a third thing on, and a pixel
+     * shader using comparisons, the predicate push and pop family and the four
+     * lane dot. Both are words a title hands the hardware, and both are modules
+     * a validator accepts. */
+    #[rustfmt::skip]
+    const VERTEX: &[u32] = &[
+        0xf255_6004,
+        0x600a_1000,
+        0x5600_0000,
+        0x0000_1010,
+        0x0000_5600,
+        0xc200_0000,
+        0x0000_4011,
+        0x0000_1200,
+        0xc400_0000,
+        0x0000_3015,
+        0x0000_2200,
+        0x0000_0000,
+        0x3df8_3000,
+        0x0026_3ec8,
+        0x0000_000d,
+        0x05f8_1000,
+        0x4026_321a,
+        0x0000_040d,
+        0x25f8_2000,
+        0x0026_3688,
+        0x0000_080d,
+        0x05f8_0000,
+        0x4006_060a,
+        0x0000_0c0d,
+        0x7000_0000,
+        0x0000_00c6,
+        0xe200_0003,
+        0xc804_0003,
+        0x18c6_c6b1,
+        0x8b03_ffff,
+        0x2c40_0300,
+        0x1800_00c6,
+        0xe200_0003,
+        0xc804_0003,
+        0x18c6_1b6c,
+        0x8b03_ffff,
+        0xc013_0304,
+        0x1ab0_b0c6,
+        0xe003_0103,
+        0xc428_0303,
+        0x1ab1_6cc6,
+        0xe104_0303,
+        0xc807_0003,
+        0x18bc_b000,
+        0xc104_0300,
+        0xc803_0003,
+        0x18b0_1a00,
+        0xc003_0300,
+        0xc803_0003,
+        0x186d_b000,
+        0xc003_0100,
+        0xc801_803e,
+        0x00b0_b01b,
+        0x9103_2828,
+        0xc802_803e,
+        0x00b0_b01b,
+        0x9103_2929,
+        0xc804_803e,
+        0x00b0_b01b,
+        0x9103_2a2a,
+        0xc808_803e,
+        0x00b0_b01b,
+        0x9103_2b2b,
+        0xc803_8000,
+        0x001a_1a00,
+        0xc201_0100,
+        0xc80f_8002,
+        0x0000_0000,
+        0xc200_0000,
+        0xc80f_8001,
+        0x0000_0000,
+        0xc202_0200,
+        0x4e4a_0000,
+        0x1207_f124,
+        0xf795_419d,
+    ];
+    #[rustfmt::skip]
+    const PIXEL: &[u32] = &[
+        0x0000_0000,
+        0x1001_c400,
+        0x2200_0000,
+        0xc80f_8000,
+        0x0000_0000,
+        0xc200_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+    ];
+
+    let vertex = xenolith_shader::translate(xenolith_shader::Kind::Vertex, VERTEX)
+        .expect("the vertex shader translates");
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, PIXEL)
+        .expect("the pixel shader translates");
+    assert!(!vertex.words.is_empty() && !pixel.words.is_empty());
+
+    /* The table the runtime finds them by, built the way the lift builds it. */
+    let mut table = String::from("#include \"xenolith.h\"\n\n");
+    for (which, said) in [(0usize, &vertex), (1usize, &pixel)] {
+        let _ = writeln!(table, "static const uint32_t said_{which}[] = {{");
+        for word in &said.words {
+            let _ = writeln!(table, "    {word:#010x}u,");
+        }
+        table.push_str("};\n\n");
+    }
+    table.push_str(concat!(
+        "static const size_t everything_there = 2;\n\n",
+        "const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                              uint32_t *length) {\n",
+        "    (void)sum; (void)words;\n",
+        "    if (length != 0) { *length = kind == 0 ? ",
+    ));
+    let _ = writeln!(
+        table,
+        "{}u : {}u; }}",
+        vertex.words.len(),
+        pixel.words.len()
+    );
+    table.push_str(concat!(
+        "    return kind == 0 ? said_0 : said_1;\n",
+        "}\n\n",
+        "const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                               uint32_t *streams) {\n",
+        "    (void)kind; (void)sum; (void)words;\n",
+        "    if (streams != 0) { *streams = 0; }\n",
+        "    return 0;\n",
+        "}\n\n",
+        "const uint32_t *xenolith_looks_at(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                                  uint32_t *pictures) {\n",
+        "    (void)kind; (void)sum; (void)words;\n",
+        "    if (pictures != 0) { *pictures = 0; }\n",
+        "    return 0;\n",
+        "}\n",
+    ));
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("a_draw");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    for (name, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", table.as_str()),
+    ] {
+        std::fs::write(directory.join(name), text).expect("writing a file");
+    }
+
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    if (!xenolith_can_draw()) {
+        printf("no device\n");
+        return 0;
+    }
+
+    /* A frame of its own, cleared, with a triangle drawn into it. */
+    if (!xenolith_begin_a_frame()) { return 3; }
+
+    static const uint32_t vertex[] = {0u};
+    static const uint32_t pixel[] = {0u};
+    if (!xenolith_can_draw_with(0u, vertex, 1u, 0u, pixel, 1u)) {
+        printf("the shaders would not build\n");
+        return 0;
+    }
+    xenolith_hand_over_constants(base, base, base);
+    xenolith_look_at(NULL, NULL);
+    xenolith_clip_to(0u, 0u, 1279u, 719u);
+
+    uint32_t room = 0;
+    uint32_t *window = xenolith_room_for_vertices(&room);
+    if (window == NULL) { return 4; }
+    /* Three corners of a triangle, each a position of two floats. */
+    static const float corners[3][2] = {{0.0f, 0.5f}, {-0.5f, -0.5f}, {0.5f, -0.5f}};
+    uint32_t written = 0;
+    for (unsigned one = 0; one < 3; one++) {
+        window[1u + one * 2u] = 0u;
+        uint32_t across, down;
+        __builtin_memcpy(&across, &corners[one][0], 4);
+        __builtin_memcpy(&down, &corners[one][1], 4);
+        window[1u + one * 2u] = across;
+        window[2u + one * 2u] = down;
+        written += 2u;
+    }
+    xenolith_done_with_vertices(1u + written);
+
+    int drawn = xenolith_draw_now(0u, 0xfu, 0u, XENOLITH_DRAWN_HOWEVER_SOLID, 0u,
+                                  0u, vertex, 1u, 0u, pixel, 1u, 3u,
+                                  XENOLITH_SHAPE_TRIANGLES);
+    if (!drawn) { return 5; }
+
+    if (!xenolith_end_a_frame()) { return 6; }
+    if (!xenolith_keep_a_frame("frame.ppm")) { return 7; }
+    printf("drawn\n");
+    return 0;
+}
+"#;
+    std::fs::write(directory.join("main.c"), program).expect("writing the program");
+
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-O1", "-DXENOLITH_WITH_VULKAN"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the draw test did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .output()
+        .expect("running the draw");
+    assert!(
+        ran.status.success(),
+        "the draw went wrong, {}:\n{}",
+        ran.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let said = String::from_utf8_lossy(&ran.stdout);
+    if said.contains("no device") {
+        return;
+    }
+    let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+    assert!(picture.starts_with(b"P6\n"), "the frame is not a picture");
+    /* Something other than black somewhere in it, which is what says a draw
+     * reached the surface rather than an empty frame being written out. */
+    let lit = picture
+        .windows(3)
+        .skip(picture.len() / 4)
+        .any(|pixel| pixel != [0, 0, 0]);
+    assert!(
+        lit,
+        "the frame is entirely black, so nothing was drawn into it"
+    );
 }

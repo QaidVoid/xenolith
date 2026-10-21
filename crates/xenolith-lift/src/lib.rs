@@ -47,6 +47,13 @@ pub const SOUND_SOURCE: &str = include_str!("../runtime/sound.c");
 /// else builds without it.
 pub const RENDERER_SOURCE: &str = include_str!("../runtime/vulkan.c");
 
+/// The part of the runtime that turns a draw command into what the renderer is
+/// asked for.
+///
+/// Its own file for the same reason as the others, and included rather than
+/// compiled separately because it needs the register accessors.
+pub const DRAWING_SOURCE: &str = include_str!("../runtime/drawing.c");
+
 pub use effect::{Effect, Location, effect_of, is_modelled, unmodelled};
 pub use emit::{
     Imported, Imports, Lifted, Unlifted, code_for, declaration_of, is_liftable, lift, name_of,
