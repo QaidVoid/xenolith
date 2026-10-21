@@ -40,6 +40,13 @@ pub const COMMAND_STREAM_SOURCE: &str = include_str!("../runtime/command_stream.
 /// includes it rather than compiling it separately.
 pub const SOUND_SOURCE: &str = include_str!("../runtime/sound.c");
 
+/// The renderer, which turns the commands a title writes into host draw calls.
+///
+/// A separate translation unit rather than an include, because it is compiled
+/// only where the machine has a graphics driver to build against and everything
+/// else builds without it.
+pub const RENDERER_SOURCE: &str = include_str!("../runtime/vulkan.c");
+
 pub use effect::{Effect, Location, effect_of, is_modelled, unmodelled};
 pub use emit::{
     Imported, Imports, Lifted, Unlifted, code_for, declaration_of, is_liftable, lift, name_of,

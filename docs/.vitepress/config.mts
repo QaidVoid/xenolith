@@ -38,6 +38,7 @@ const sections = [
     items: [
       { text: 'Commands', link: '/reference/cli' },
       { text: 'Environment', link: '/reference/environment' },
+      { text: 'Output', link: '/reference/output' },
     ],
   },
 ]

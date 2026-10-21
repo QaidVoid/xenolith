@@ -679,15 +679,6 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address);
  */
 uint32_t xenolith_processor_block(uint8_t *base);
 
-/* What kernel build the image was made against, or nothing where the container
- * did not say.
- *
- * A title's device layout depends on it, so a runtime told nothing is a runtime
- * that cannot answer the question. Nought means the container did not carry it,
- * which is said rather than guessed at.
- */
-void xenolith_built_against(uint32_t build);
-
 /* Where the guest's stack pointer starts.
  *
  * A title expects to have been given one. Entered with the register at zero it
@@ -699,6 +690,153 @@ void xenolith_built_against(uint32_t build);
  * Clear of where the image loads, and far enough below the top that the
  * linkage area a caller writes above the pointer is inside the space.
  */
+/* What a title says the shape of what it is drawing is.
+ *
+ * The console's own numbering. Only the ones a title was seen to ask for are
+ * named: points, and the ways it asks for a flat piece of screen.
+ */
+#define XENOLITH_SHAPE_POINTS 1u
+#define XENOLITH_SHAPE_LINES 2u
+#define XENOLITH_SHAPE_LINE_RUN 3u
+#define XENOLITH_SHAPE_TRIANGLES 4u
+#define XENOLITH_SHAPE_TRIANGLE_FAN 5u
+#define XENOLITH_SHAPE_TRIANGLE_RUN 6u
+#define XENOLITH_SHAPE_RECTANGLES 8u
+#define XENOLITH_SHAPE_QUADS 13u
+
+/* Whether there is anywhere to draw, which there is not on a machine with no
+ * graphics driver and in a build made without one. Says so once. */
+int xenolith_can_draw(void);
+
+/* Hands a shader the constants a title wrote, taken from where a title wrote
+ * them and turned into the order a host reads. */
+int xenolith_hand_over_constants(const uint8_t *from, const uint8_t *truths,
+                                 const uint8_t *counts);
+
+/* Says what the hardware would have done to a position a shader put out, as
+ * something to multiply by and something to add. Passing nothing says to leave
+ * a position as the shader gave it. */
+void xenolith_move_a_position_by(const float *scale, const float *offset);
+
+
+/* Keeps drawing inside the window a title named, in the pixels of what is
+ * being drawn into. A window reaching past the edge is brought back to it. */
+void xenolith_clip_to(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom);
+
+/* Hands over a picture a shader reads, laid out the way a host reads one.
+ *
+ * The console keeps a picture in an order that puts the parts near one another
+ * on the screen near one another in memory, and squeezed into squares of four
+ * by four. A host squeezes them the same way, so what is squeezed is handed over
+ * as it is and only the order is undone. Says whether it took.
+ */
+int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t where, uint32_t across,
+                               uint32_t down, uint32_t pitch, int in_squares, uint32_t order,
+                               uint32_t kept, uint32_t held_how);
+
+/* Leaves a place a shader reads a picture from holding nothing.
+ *
+ * A title fills the same few places over and over, so a place left as it was is
+ * a place still holding a picture the title named for an earlier draw. Where
+ * what it names now cannot be read, that is another of the title's own pictures
+ * drawn in its stead, which looks like a drawing gone wrong rather than like
+ * something not being read. */
+void xenolith_look_at_nothing(uint32_t slot);
+
+/* Says what shape of place a title is about to draw into, so that what each of
+ * them holds is kept apart from what the others hold. */
+void xenolith_drawing_into(uint32_t shaped);
+
+/* Says whether the copy just made asked for how far away things are to start
+ * again before the next drawing, and what to start it as. */
+void xenolith_wipe_how_far_after_a_copy(int wipe, float to);
+
+/* Says whether the copy just made asked for the colours to start again before
+ * the next drawing, and what to start them as. */
+void xenolith_wipe_the_colours_after_a_copy(int wipe, uint32_t to);
+
+/* Says which kit a title was built against, read out of its container.
+ *
+ * The graphics library a title links keeps its device in a layout that changes
+ * between kits, and the runtime answers a few words of that layout: how far the
+ * hardware has got, in the two forms the library keeps. Told the kit, it knows
+ * where those words are; told nothing, it answers neither and a title that
+ * watches them decides the hardware has stopped. */
+void xenolith_built_against(uint32_t build);
+
+/* Somewhere to put the vertices a shader goes and gets, and how many words of it
+ * there is room for. Returns nothing where there is nothing to draw with. */
+uint32_t *xenolith_room_for_vertices(uint32_t *how_many);
+
+/* Says the vertices are in place, and how many words of the room given were
+ * written. A frame keeps every draw's words at once, so what one draw took has
+ * to be known before the next is given room. */
+void xenolith_done_with_vertices(uint32_t words);
+
+/* Forgets any picture already turned that came out of memory the title has
+ * since written over, so that the next draw reads what is there now. */
+void xenolith_forget_pictures_at(uint32_t where, uint32_t bytes);
+
+/* Shows the drawing that was last copied out to where a title names, rather
+ * than whatever has been drawn since. Says whether there was one to show. */
+int xenolith_show_what_was_copied_to(uint32_t where);
+
+/* Shows whatever is on the drawing surface now, for a title that hands a frame
+ * straight to the display without copying it out first. The copied-frame path
+ * above is preferred where a title uses it; this is the fallback. */
+int xenolith_show_the_frame(void);
+
+/* Says where on what is drawn into a position between one and minus one lands,
+ * as the console says it: what to multiply a position by and what to add.
+ * Nothing said means the whole of what is drawn into. */
+void xenolith_look_at(const float *scale, const float *offset);
+
+/* Hands what was drawn back into a title's own memory, where it said to put it,
+ * a row at a time. Returns zero where there is nothing to hand back.
+ *
+ * A title asks for how far away things came out as often as it asks for their
+ * colours, and reads that back as a picture to work out haze, fog and what is
+ * out of focus. Handed the colours instead it draws none of those, so which of
+ * the two is wanted is said here. How far away is kept either as a fraction of
+ * the whole or as the console's small float, which is the other flag. */
+int xenolith_hand_back_what_was_drawn(uint8_t *base, uint32_t into, uint32_t across,
+                                      uint32_t down, int as_one_float, int from_how_far,
+                                      int how_far_as_a_float);
+
+/* What is held down on the keyboard, as a controller's buttons and the two
+ * thumbsticks. Returns zero where there is no window to read one from. */
+int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs);
+
+/* Starts a frame, cleared to nothing. Reports whether there was anywhere to
+ * start one. */
+int xenolith_begin_a_frame(void);
+
+/* The test that draws a place however solid it is, which is what a title asking
+ * for no test at all comes to. Its three bits stand for drawing a place less
+ * solid than the test, exactly as solid, and more solid. */
+#define XENOLITH_DRAWN_HOWEVER_SOLID 7u
+
+/* Draws what a title asked to draw, with the shaders it last handed over.
+ *
+ * A place is thrown away before it is drawn where how solid it is does not
+ * answer `cut_off`, the console's own three bits, against `cut_off_at`, which
+ * carries the bits of the number they are measured against. */
+int xenolith_draw_now(uint32_t blending, uint32_t written, uint32_t how_far, uint32_t cut_off,
+                      uint32_t cut_off_at, uint32_t vertex_sum, const uint32_t *vertex,
+                      uint32_t vertex_length, uint32_t pixel_sum, const uint32_t *pixel,
+                      uint32_t pixel_length, uint32_t vertices, uint32_t kind);
+
+/* Finishes a frame and reads it back. */
+int xenolith_end_a_frame(void);
+
+/* Whether a pair of shaders can be drawn with, building what a device needs
+ * the first time the pair is asked for. */
+int xenolith_can_draw_with(uint32_t vertex_sum, const uint32_t *vertex, uint32_t vertex_length,
+                           uint32_t pixel_sum, const uint32_t *pixel, uint32_t pixel_length);
+
+/* Writes what was drawn where somebody can look at it. */
+int xenolith_keep_a_frame(const char *where);
+
 #define XENOLITH_STACK_TOP 0x70000000u
 
 #endif /* XENOLITH_H */

@@ -16,8 +16,8 @@ use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_analysis::analyze;
 use xenolith_lift::{
-    COMMAND_STREAM_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, SOUND_SOURCE, Unlifted, declaration_of,
-    lift, name_of,
+    COMMAND_STREAM_SOURCE, RENDERER_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, SOUND_SOURCE, Unlifted,
+    declaration_of, lift, name_of,
 };
 
 use crate::input::{Source, number};
@@ -363,7 +363,45 @@ CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-infinite-recursion
 LDLIBS ?= -lm -lpthread
 
-SOURCES := $(wildcard lifted.*.c) unlifted.c table.c xenolith.c main.c
+# Where a title's drawing goes, if this machine has anywhere to put it.
+#
+# Built against what is installed rather than required: without a graphics
+# driver to build against, everything else still builds and the program says it
+# has nowhere to draw rather than failing to link.
+DRAWING := $(shell pkg-config --exists vulkan 2>/dev/null && echo yes)
+ifeq ($(DRAWING),yes)
+CFLAGS += -DXENOLITH_WITH_VULKAN
+LDLIBS += -lvulkan
+endif
+
+# A window to show it in, on the same terms. Either way of asking a desktop for
+# one is a window, so this is asked of both together; which one is used is asked
+# of each below, because a host can have one, the other, or both.
+SHOWING := $(shell pkg-config --exists x11 2>/dev/null && echo yes)
+TALKING := $(shell pkg-config --exists wayland-client wayland-protocols 2>/dev/null \
+	&& command -v wayland-scanner >/dev/null 2>&1 && echo yes)
+ifneq ($(strip $(SHOWING) $(TALKING)),)
+CFLAGS += -DXENOLITH_WITH_WINDOW
+endif
+
+ifeq ($(SHOWING),yes)
+CFLAGS += -DXENOLITH_WITH_X11
+LDLIBS += -lX11
+endif
+
+# The part that says how a window is placed and titled is a description rather
+# than a library, turned into code by the tool that comes with it.
+ifeq ($(TALKING),yes)
+SHELL_XML := $(shell pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml
+CFLAGS += -DXENOLITH_WITH_WAYLAND $(shell pkg-config --cflags wayland-client)
+LDLIBS += $(shell pkg-config --libs wayland-client)
+MADE := xdg-shell-client-protocol.h xdg-shell-protocol.c
+endif
+
+SOURCES := $(wildcard lifted.*.c) unlifted.c table.c xenolith.c vulkan.c main.c
+ifeq ($(TALKING),yes)
+SOURCES += xdg-shell-protocol.c
+endif
 OBJECTS := $(SOURCES:.c=.o)
 
 all: lifted
@@ -371,11 +409,18 @@ all: lifted
 lifted: $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
-%.o: %.c lifted.h xenolith.h
+# The description turned into code, before anything that reads it is built.
+xdg-shell-client-protocol.h:
+	wayland-scanner client-header $(SHELL_XML) $@
+
+xdg-shell-protocol.c:
+	wayland-scanner private-code $(SHELL_XML) $@
+
+%.o: %.c lifted.h xenolith.h $(MADE)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJECTS) lifted
+	rm -f $(OBJECTS) $(MADE) lifted
 
 .PHONY: all clean
 ";
@@ -391,6 +436,7 @@ fn write_the_runtime(out: &Path) -> Result<()> {
         ("xenolith.c", RUNTIME_SOURCE),
         ("command_stream.c", COMMAND_STREAM_SOURCE),
         ("sound.c", SOUND_SOURCE),
+        ("vulkan.c", RENDERER_SOURCE),
     ] {
         let path = out.join(name);
         std::fs::write(&path, text)

@@ -2139,3 +2139,85 @@ int main(void) {
         "a run with no device said so {mentions} times and should say it once:\n{complaint}"
     );
 }
+
+/// The renderer opens a device where the machine has one, and says which.
+///
+/// A renderer that cannot open a device is not a failure: a machine without a
+/// graphics driver is the ordinary case. What would be wrong is opening one and
+/// not saying so, or claiming to draw where nothing was opened, so the answer
+/// and the line have to agree.
+#[test]
+fn the_renderer_opens_a_device_where_there_is_one() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    /* Asked twice, because opening a device is something a run does once and
+     * the second answer has to be the first one. */
+    int first = xenolith_can_draw();
+    int again = xenolith_can_draw();
+    if (first != again) {
+        fprintf(stderr, "asking twice gave %d and then %d\n", first, again);
+        return 1;
+    }
+    printf("drawing %d\n", first);
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs_with_the_renderer("renderer", program) {
+        panic!("the renderer did not answer about a device:\n{complaint}");
+    }
+}
+
+/// Builds and runs a program beside the renderer, with it turned on.
+fn runs_with_the_renderer(name: &str, program: &str) -> Result<(), String> {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text)
+            .map_err(|error| format!("writing {file}: {error}"))?;
+    }
+
+    let program_path = directory.join("program");
+    let output = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-Wall", "-Wextra", "-Werror", "-pedantic"])
+        .arg("-DXENOLITH_WITH_VULKAN")
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("vulkan.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
+        .output()
+        .map_err(|error| format!("running the compiler: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .output()
+        .map_err(|error| format!("running the check: {error}"))?;
+    if ran.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "check {} failed:\n{}",
+            ran.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&ran.stderr)
+        ))
+    }
+}
