@@ -34,6 +34,12 @@ pub const RUNTIME_SOURCE: &str = include_str!("../runtime/xenolith.c");
 /// so it is written beside the runtime and not compiled separately.
 pub const COMMAND_STREAM_SOURCE: &str = include_str!("../runtime/command_stream.c");
 
+/// The part of the runtime that plays the sound a title makes.
+///
+/// Its own file for the same reason: it is a subject of its own, and the runtime
+/// includes it rather than compiling it separately.
+pub const SOUND_SOURCE: &str = include_str!("../runtime/sound.c");
+
 pub use effect::{Effect, Location, effect_of, is_modelled, unmodelled};
 pub use emit::{
     Imported, Imports, Lifted, Unlifted, code_for, declaration_of, is_liftable, lift, name_of,

@@ -21,6 +21,7 @@
 #include "xenolith.h"
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -1396,6 +1397,8 @@ static void set_register(uint8_t *base, uint32_t index, uint32_t value) {
 
 #include "command_stream.c"
 
+#include "sound.c"
+
 /* Reads the packets a title wrote, and does what this can with them. */
 static void consume_the_ring(uint8_t *base, uint32_t written) {
     if (graphics.ring_at == 0) {
@@ -2452,6 +2455,40 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         return 1;
     case 228:
         query_directory(ctx, base);
+        return 1;
+    case 501: {
+        /* Handing over a frame of sound. The frame is six channels of the
+         * console's own floats, and what a device here takes is two, so it is
+         * folded on its way in and played at whatever rate the device runs.
+         * Saying it was taken is what lets a title carry on to the next one,
+         * and the taking itself is counted, because that count is the clock the
+         * title paces by. A title handing over nothing is one asking for
+         * silence to be played in its place, which a starved device is given
+         * anyway. */
+        uint32_t given = (uint32_t)ctx->r[4];
+        if (given != 0) {
+            hand_a_frame_over(base, given);
+        } else {
+            start_the_output();
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 844:
+        /* How far playback has got, in samples the device has taken. */
+        ctx->r[3] = how_far_playback_has_got();
+        return 1;
+    case 504:
+        /* How loud a kind of sound should be, written where a title points.
+         *
+         * A console that has had nothing turned down reads as full volume, and
+         * a title multiplying its mix by what it reads here has to read
+         * something: left holding whatever the word held, it multiplied by
+         * nothing and mixed silence. */
+        if ((uint32_t)ctx->r[4] != 0) {
+            xenolith_store32(base, (uint32_t)ctx->r[4], 0x3f800000u);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 617:
     case 618:

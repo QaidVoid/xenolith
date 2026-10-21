@@ -184,6 +184,7 @@ fn runs(name: &str, program: &str) -> Result<(), String> {
             "command_stream.c",
             include_str!("../runtime/command_stream.c"),
         ),
+        ("sound.c", include_str!("../runtime/sound.c")),
         ("main.c", program),
     ] {
         std::fs::write(directory.join(file), text)
@@ -1711,6 +1712,7 @@ fn runs_sanitized(sanitizer: &str, program: &str) -> Result<(), String> {
             "command_stream.c",
             include_str!("../runtime/command_stream.c"),
         ),
+        ("sound.c", include_str!("../runtime/sound.c")),
         ("main.c", program),
     ] {
         std::fs::write(directory.join(file), text)
@@ -2046,5 +2048,94 @@ int main(void) {
     assert!(
         complaint.contains("only 2 is written"),
         "an unknown byte order was not reported:\n{complaint}"
+    );
+}
+
+/// A run with no sound device says so once and carries on.
+///
+/// A title hands over a frame and expects to be told it was taken, because that
+/// answer is the clock it paces itself by. A runtime that stops at the first
+/// frame draws nothing further, and one that says nothing leaves a run looking
+/// as though it had sound in it. So the frame is taken, the count moves, and the
+/// one line says what is not happening.
+#[test]
+fn a_run_with_no_sound_device_says_so_once() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+
+    /* A frame of six channels, every sample a half, which is a sound a device
+     * would play. */
+    uint32_t frame = 0x01000000u;
+    for (unsigned channel = 0; channel < 6; channel++) {
+        for (unsigned sample = 0; sample < 256; sample++) {
+            uint32_t bits = 0x3f000000u;
+            bits = __builtin_bswap32(bits);
+            xenolith_store32(base, frame + (channel * 256u + sample) * 4u, bits);
+        }
+    }
+
+    /* Handed over three times, and taken every time. */
+    for (int at = 0; at < 3; at++) {
+        ctx.r[3] = 0;
+        ctx.r[4] = frame;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 501, "XAudioSubmitRenderFrame");
+        if (ctx.r[3] != 0u) {
+            fprintf(stderr, "a frame was not taken: %#llx\n",
+                    (unsigned long long)ctx.r[3]);
+            return 3;
+        }
+    }
+
+    /* And how far playback has got is readable, whether or not there is a
+     * device to have played anything. */
+    ctx.r[3] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 844, "XAudioGetRenderingFrame");
+    if (ctx.r[3] > 0xffffffffu) {
+        return 4;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("no_device", program) {
+        panic!("a run with no sound device did not carry on:\n{complaint}");
+    }
+
+    /* The one line names what is missing, and says it once. */
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("no_device");
+    let said = Command::new(directory.join("program"))
+        .current_dir(&directory)
+        .output()
+        .unwrap_or_else(|error| panic!("running the check: {error}"));
+    let complaint = String::from_utf8_lossy(&said.stderr);
+    let mentions = complaint.matches("no sound will be heard").count();
+    assert_eq!(
+        mentions, 1,
+        "a run with no device said so {mentions} times and should say it once:\n{complaint}"
     );
 }

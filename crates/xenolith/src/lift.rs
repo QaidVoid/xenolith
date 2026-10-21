@@ -16,7 +16,8 @@ use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_analysis::analyze;
 use xenolith_lift::{
-    COMMAND_STREAM_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, Unlifted, declaration_of, lift, name_of,
+    COMMAND_STREAM_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE, SOUND_SOURCE, Unlifted, declaration_of,
+    lift, name_of,
 };
 
 use crate::input::{Source, number};
@@ -367,6 +368,26 @@ clean:
 .PHONY: all clean
 ";
 
+/// Writes the runtime the emitted code is built against.
+///
+/// Four files rather than one, because the command stream and the sound are
+/// subjects of their own and the runtime includes them. They go beside the
+/// runtime because that is where it looks for them.
+fn write_the_runtime(out: &Path) -> Result<()> {
+    for (name, text) in [
+        ("xenolith.h", RUNTIME_HEADER),
+        ("xenolith.c", RUNTIME_SOURCE),
+        ("command_stream.c", COMMAND_STREAM_SOURCE),
+        ("sound.c", SOUND_SOURCE),
+    ] {
+        let path = out.join(name);
+        std::fs::write(&path, text)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Runs the lift subcommand.
 ///
 /// # Errors
@@ -402,16 +423,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .into_diagnostic()
         .wrap_err_with(|| format!("making {}", args.out.display()))?;
     clear_units(&args.out)?;
-    for (name, text) in [
-        ("xenolith.h", RUNTIME_HEADER),
-        ("xenolith.c", RUNTIME_SOURCE),
-        ("command_stream.c", COMMAND_STREAM_SOURCE),
-    ] {
-        let path = args.out.join(name);
-        std::fs::write(&path, text)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("writing {}", path.display()))?;
-    }
+    write_the_runtime(&args.out)?;
 
     let mut lifted = 0u64;
     let mut thunks = 0u64;
