@@ -185,6 +185,19 @@ static void hand_a_frame_over(const uint8_t *base, uint32_t at) {
     if (output.writing - output.reading >= XENOLITH_QUEUED_FRAMES) {
         output.dropped++;
         pthread_mutex_unlock(&output.handing);
+        /* Said rather than counted in silence. A frame dropped here is sound a
+         * title mixed that nobody hears, and a title that paces itself by the
+         * count goes on mixing into a queue that is not draining. One line is
+         * the difference between a run with a stutter in it and a run with no
+         * explanation for the stutter, and saying it per frame would bury the
+         * explanation under thousands of copies of itself. */
+        static int said;
+        if (!said) {
+            said = 1;
+            say_a_report("a frame of sound was dropped: the queue holds %u and the "
+                         "device is not taking them",
+                         XENOLITH_QUEUED_FRAMES);
+        }
         return;
     }
     float *into = output.queued[output.writing % XENOLITH_QUEUED_FRAMES];
