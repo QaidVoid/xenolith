@@ -409,6 +409,19 @@ all: lifted
 lifted: $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
+# Saying a shader while a title runs, for the ones it loads from the data beside
+# its executable rather than out of the executable itself. Reading the
+# executable cannot find one of those, so this answers for them.
+#
+# Built against what is beside the emitted code rather than required: without it
+# everything else still builds, and a title handing over a shader that was not
+# found simply says so.
+SAYING := $(wildcard libxenolith_shader.a)
+ifneq ($(SAYING),)
+CFLAGS += -DXENOLITH_CAN_SAY_A_SHADER
+LDLIBS += $(SAYING)
+endif
+
 # The description turned into code, before anything that reads it is built.
 xdg-shell-client-protocol.h:
 	wayland-scanner client-header $(SHELL_XML) $@
@@ -446,6 +459,54 @@ fn write_the_runtime(out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Puts the shader library beside the emitted code, where the makefile looks.
+///
+/// A title loads some shaders from the data beside its executable rather than
+/// out of the executable, and reading the executable cannot find one of those.
+/// The library answers for them, and it is copied rather than required: without
+/// it everything else still builds, and a title handing over one of those
+/// shaders says so instead of drawing nothing.
+///
+/// The path is the one the build that made this tool left it at, which is the
+/// only place it can be: nothing else knows where a target directory is.
+fn write_the_shader_library(out: &Path) {
+    let Some(beside) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    else {
+        return;
+    };
+    let library = beside.join("libxenolith_shader.a");
+    if !library.is_file() {
+        eprintln!(
+            "note: {} is not there, so a shader a title loads while it runs will not be said",
+            library.display()
+        );
+        return;
+    }
+    if let Err(error) = std::fs::copy(&library, out.join("libxenolith_shader.a")) {
+        eprintln!(
+            "note: {} could not be copied, so a shader a title loads while it runs will not be said: {error}",
+            library.display()
+        );
+    }
+}
+
+/// Makes the output directory and writes everything that does not depend on
+/// which functions were lifted.
+///
+/// Kept apart from the lift itself because none of it looks at the analysis:
+/// the runtime, the shader table and the empty units are the same whatever the
+/// title turns out to hold.
+fn prepare_the_output(out: &Path, image: &xenolith_xex::Image) -> Result<()> {
+    std::fs::create_dir_all(out)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("making {}", out.display()))?;
+    clear_units(out)?;
+    write_the_runtime(out)?;
+    write_shaders(out, image)
+}
+
 /// Runs the lift subcommand.
 ///
 /// # Errors
@@ -478,12 +539,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         ));
     }
 
-    std::fs::create_dir_all(&args.out)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("making {}", args.out.display()))?;
-    clear_units(&args.out)?;
-    write_the_runtime(&args.out)?;
-    write_shaders(&args.out, &image)?;
+    prepare_the_output(&args.out, &image)?;
 
     let mut lifted = 0u64;
     let mut thunks = 0u64;
@@ -561,6 +617,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         &emitted,
         built_against.unwrap_or(0),
     )?;
+    write_the_shader_library(&args.out);
     write_into(&args.out, "Makefile", BUILD_FILE)?;
 
     report(
