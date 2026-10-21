@@ -89,9 +89,11 @@ static int painting_over_everything(void) {
  * title changes them between draws and a frame holds many draws.
  *
  * Enough for the busiest frame a title here draws rather than for the ordinary
- * one. Running out is not refused, because a frame half drawn is worse than a
- * frame drawn with the wrong words: the draws after it are handed what earlier
- * ones wrote instead, and that is a scene quietly wrong rather than missing. */
+ * one. Running out is not refused here, because what comes round again is a
+ * saying of the same shape: the descriptors are rewritten for the draw that
+ * takes one, so the oldest is reused rather than being read stale. The arenas
+ * below are the ones that refuse, because what a draw reads from those cannot
+ * be rewritten under a draw that already used it. */
 #define XENOLITH_SAYINGS 1024
 
 static struct {
@@ -3869,6 +3871,28 @@ static int held(const char *keyboard, KeySym key) {
 }
 #endif /* XENOLITH_WITH_X11 */
 
+/* What a run with no keyboard is told is held.
+ *
+ * A run that is not shown in a window has nothing to read keys from, and a
+ * title that only ever sees nothing held cannot be taken past the screen that
+ * waits for a button. So a run can say what is held, as the number a title
+ * would be given, and every way of reading a keyboard here gives that first.
+ *
+ * Read once, because what is held is meant to stay held for the length of a
+ * run rather than changing under a title that is waiting for it. */
+static int what_a_run_says_is_held(uint16_t *buttons) {
+    static int settled = -1;
+    static uint16_t told;
+
+    if (settled < 0) {
+        const char *asked = getenv("XENOLITH_HOLD");
+        told = asked != NULL ? (uint16_t)strtoul(asked, NULL, 0) : 0;
+        settled = 1;
+    }
+    *buttons |= told;
+    return told != 0;
+}
+
 int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
     if (buttons == NULL || thumbs == NULL) {
         return 0;
@@ -3876,6 +3900,9 @@ int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
     *buttons = 0;
     for (unsigned int at = 0; at < 4u; at++) {
         thumbs[at] = 0;
+    }
+    if (what_a_run_says_is_held(buttons)) {
+        return 1;
     }
 
 #ifdef XENOLITH_WITH_WAYLAND

@@ -2179,6 +2179,112 @@ int main(void) {
     );
 }
 
+/// A run with no window can be told what is held.
+///
+/// A run that is not shown has nothing to read keys from, and a title that only
+/// ever sees nothing held cannot be taken past the screen that waits for a
+/// button. `XENOLITH_HOLD` is that: the number a title would be given, held for
+/// the length of the run.
+#[test]
+fn a_run_with_no_window_can_be_told_what_is_held() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    if (xenolith_boot(path, 0) == NULL) { return 2; }
+
+    /* What the run was told to hold, as the number it was told in. Nought
+     * means nothing was told, which is a truthful answer rather than a
+     * failure: a port that answers with nothing pressed. */
+    uint16_t buttons = 0xffff;
+    int16_t thumbs[4] = {9, 9, 9, 9};
+    if (!xenolith_what_is_held(&buttons, thumbs)) {
+        fprintf(stderr, "a controller that is there was said not to be\n");
+        return 3;
+    }
+    uint16_t wanted = (uint16_t)strtoul(getenv("WANTED") == NULL ? "0" : getenv("WANTED"), 0, 0);
+    if (buttons != wanted) {
+        fprintf(stderr, "held %#x where %#x was asked for\n", buttons, wanted);
+        return 4;
+    }
+    printf("held %#x\n", buttons);
+    return 0;
+}
+"#;
+
+    for wanted in ["0x0000", "0x1000", "0x0003"] {
+        let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("held_{wanted}"));
+        std::fs::create_dir_all(&directory).expect("making a directory");
+        for (file, text) in [
+            ("xenolith.h", HEADER),
+            ("xenolith.c", include_str!("../runtime/xenolith.c")),
+            (
+                "command_stream.c",
+                include_str!("../runtime/command_stream.c"),
+            ),
+            ("drawing.c", include_str!("../runtime/drawing.c")),
+            ("sound.c", include_str!("../runtime/sound.c")),
+            ("vulkan.c", include_str!("../runtime/vulkan.c")),
+            ("shaders.c", SHADER_TABLE),
+            ("main.c", program),
+        ] {
+            std::fs::write(directory.join(file), text).expect("writing a file");
+        }
+        let program_path = directory.join("program");
+        let built = Command::new(honest::host_compiler())
+            .args([
+                "-std=c17",
+                "-O1",
+                "-DXENOLITH_WITH_VULKAN",
+                "-DXENOLITH_WITH_WINDOW",
+                "-DXENOLITH_WITH_X11",
+            ])
+            .arg("-o")
+            .arg(&program_path)
+            .arg(directory.join("main.c"))
+            .arg(directory.join("xenolith.c"))
+            .arg(directory.join("vulkan.c"))
+            .arg(directory.join("shaders.c"))
+            .args(["-lvulkan", "-lX11", "-lm", "-lpthread"])
+            .output()
+            .expect("running the compiler");
+        assert!(
+            built.status.success(),
+            "the held test did not build:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+
+        let ran = Command::new(&program_path)
+            .current_dir(&directory)
+            .env("XENOLITH_HOLD", wanted)
+            .env("WANTED", wanted)
+            .output()
+            .expect("running the check");
+        assert!(
+            ran.status.success(),
+            "a run told to hold {wanted} went wrong, {}:\n{}",
+            ran.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+}
+
 /// A full vertex arena refuses the draw rather than wrapping to the front.
 ///
 /// Wrapping would have the draw read what an earlier draw in the same frame
