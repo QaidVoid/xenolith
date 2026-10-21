@@ -50,14 +50,6 @@
 #define XENOLITH_ALL_TO_ONE 0x8000u
 #define XENOLITH_REGISTER_INDEX 0x7fffu
 
-/* What a packet's effect was, as far as anything here can tell. */
-enum packet_effect {
-    PACKET_READ = 0,
-    PACKET_DRAWN,
-    PACKET_PASSED_OVER,
-    PACKET_NOT_READ,
-};
-
 /* What has been read since the run began, so that a run can say what it found
  * rather than only what it did not. */
 struct read_so_far {
@@ -130,7 +122,12 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
             follows = 2;
             break;
         default:
-            follows = ((header >> 16) & 0x3fff) + 1;
+            /* The field is how many words the packet takes altogether, its own
+             * header counted. Adding the header again here counts it twice,
+             * which makes every packet one word too long: the walk then starts
+             * the next one a word early and reads its header out of the middle
+             * of the one before. */
+            follows = (header >> 16) & 0x3fff;
             break;
         }
 

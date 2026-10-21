@@ -1811,7 +1811,8 @@ int main(void) {
      * registers, the next fourteen say how many words follow, and the low
      * fifteen are the register it starts at. */
     uint32_t ring = 0x01000000u;
-    uint32_t header = (0u << 30) | (0u << 16) | 0x20u;
+    /* The field is how many words follow the header, so one word after it. */
+    uint32_t header = (0u << 30) | (1u << 16) | 0x20u;
     xenolith_store32(base, ring, header);
     xenolith_store32(base, ring + 4, 0xdeadbeefu);
 
@@ -1933,4 +1934,117 @@ int main(void) {
     if let Err(complaint) = runs("answered", program) {
         panic!("an answered import did not say it succeeded:\n{complaint}");
     }
+}
+
+/// A report packet writes its value where it was asked to.
+///
+/// A title reports that the hardware hung and waits for an answer at a fixed
+/// address. Without the answer it waits for ever, which is indistinguishable
+/// from a hang. The value is written as it was given, and a byte order this
+/// does not know is reported rather than written in the wrong way round, since
+/// a number a title compares against and never matches is the same as no
+/// number at all except that it looks like one.
+#[test]
+fn a_report_packet_writes_its_value() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+
+    /* Two report packets: one asking for the byte order a console's own reads
+     * want, and one asking for another. */
+    uint32_t ring = 0x01000000u;
+    uint32_t at = ring;
+    uint32_t answers = 0x04000000u;
+
+    /* The first: opcode 0x58, three words following. The field is how many
+     * words the packet takes altogether, its own header counted, which is what
+     * the walk reads it as. */
+    xenolith_store32(base, at, (3u << 30) | (3u << 16) | (0x58u << 8));
+    xenolith_store32(base, at + 4, 0u);
+    xenolith_store32(base, at + 8, answers | 2u);
+    xenolith_store32(base, at + 12, 0xcafef00du);
+    at += 16;
+
+    /* The second, asking for byte order 1. */
+    xenolith_store32(base, at, (3u << 30) | (3u << 16) | (0x58u << 8));
+    xenolith_store32(base, at + 4, 0u);
+    xenolith_store32(base, at + 8, (answers + 4u) | 1u);
+    xenolith_store32(base, at + 12, 0xcafef00du);
+    at += 16;
+
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    uint32_t read_back = 0x02000000u + 60u;
+    ctx.r[3] = read_back;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+
+    /* Two packets of four words each. */
+    xenolith_store32(base, 0x7fc80714u, 8u);
+
+    /* Both packets are walked in one pass, so the first is waited for and the
+     * second has been reached by the time it appears. */
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, answers) == 0xcafef00du) {
+            break;
+        }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    if (xenolith_load32(base, answers) != 0xcafef00du) {
+        fprintf(stderr, "the report was not written, the word holds %#x\n",
+                xenolith_load32(base, answers));
+        return 4;
+    }
+
+    /* The one asking for another order must not have written. */
+    if (xenolith_load32(base, answers + 4u) != 0u) {
+        fprintf(stderr, "a report in an unknown byte order was written\n");
+        return 3;
+    }
+    printf("read\n");
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("report_packet", program) {
+        panic!("a report packet did not write its value:\n{complaint}");
+    }
+
+    /* The unknown byte order is named once in the output. The run is given a
+     * moment to reach the second packet, which is the one that asks for it. */
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("report_packet");
+    let said = Command::new(directory.join("program"))
+        .current_dir(&directory)
+        .output()
+        .unwrap_or_else(|error| panic!("running the check: {error}"));
+    let complaint = String::from_utf8_lossy(&said.stderr);
+    assert!(
+        complaint.contains("only 2 is written"),
+        "an unknown byte order was not reported:\n{complaint}"
+    );
 }
