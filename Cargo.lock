@@ -972,6 +972,7 @@ dependencies = [
  "xenolith-analysis",
  "xenolith-lift",
  "xenolith-ppc",
+ "xenolith-shader",
  "xenolith-xex",
 ]
 

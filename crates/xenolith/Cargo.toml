@@ -13,6 +13,7 @@ miette = { version = "7.6.0", features = ["fancy"] }
 xenolith-analysis = { version = "0.1.0", path = "../xenolith-analysis" }
 xenolith-lift = { version = "0.1.0", path = "../xenolith-lift" }
 xenolith-ppc = { version = "0.1.0", path = "../xenolith-ppc" }
+xenolith-shader = { version = "0.1.0", path = "../xenolith-shader" }
 xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
 
 [lints]

@@ -459,6 +459,8 @@ fn lift_emits_c_for_a_crafted_image() {
         "xenolith.c",
         "command_stream.c",
         "sound.c",
+        "shaders.c",
+        "vulkan.c",
         "lifted.h",
         "unlifted.c",
         "table.c",

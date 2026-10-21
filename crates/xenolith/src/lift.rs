@@ -398,7 +398,7 @@ LDLIBS += $(shell pkg-config --libs wayland-client)
 MADE := xdg-shell-client-protocol.h xdg-shell-protocol.c
 endif
 
-SOURCES := $(wildcard lifted.*.c) unlifted.c table.c xenolith.c vulkan.c main.c
+SOURCES := $(wildcard lifted.*.c) unlifted.c table.c shaders.c xenolith.c vulkan.c main.c
 ifeq ($(TALKING),yes)
 SOURCES += xdg-shell-protocol.c
 endif
@@ -483,6 +483,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .wrap_err_with(|| format!("making {}", args.out.display()))?;
     clear_units(&args.out)?;
     write_the_runtime(&args.out)?;
+    write_shaders(&args.out, &image)?;
 
     let mut lifted = 0u64;
     let mut thunks = 0u64;
@@ -725,4 +726,185 @@ fn report(args: &Args, outcome: &Outcome<'_>, built_against: Option<u32>) {
             );
         }
     }
+}
+
+/// Writes the shaders an image holds, said in a host graphics driver's terms.
+///
+/// A title hands a shader to the hardware while it runs, out of its own data, so
+/// what the runtime gets is words rather than a name. Every shader the image
+/// holds is translated here and kept beside the sum of the words it was made
+/// from, so the runtime can find it again by what it was given.
+///
+/// A shader this has no reading of is left out rather than guessed at, and the
+/// runtime says so when a title hands it one that is not here.
+fn write_shaders(out: &Path, image: &xenolith_xex::Image) -> Result<()> {
+    let words: Vec<u32> = image
+        .bytes()
+        .chunks_exact(4)
+        .filter_map(|four| four.try_into().ok())
+        .map(u32::from_be_bytes)
+        .collect();
+
+    let mut file = String::from(
+        "/* Emitted by xenolith: the shaders an image holds, in a host's terms.\n\
+         \x20*\n\
+         \x20* Each is kept beside the sum of the words it was made from, because what\n\
+         \x20* a title hands over is words rather than a name.\n\
+         \x20*/\n\n#include \"xenolith.h\"\n\n",
+    );
+
+    /* A shader is one kind or the other, and which it is a title says when it
+     * hands it over rather than the words saying so. Both readings are written
+     * out, and the runtime takes the one a title asked for. The reading that is
+     * wrong for a shader is usually still a module, so what rules one out is a
+     * reading being refused rather than anything here choosing. */
+    let mut entries = Vec::new();
+    let mut written = 0usize;
+    for found in xenolith_shader::scan(&words) {
+        let Some(body) = words.get(found.at..found.at.saturating_add(found.words)) else {
+            continue;
+        };
+
+        for (number, kind) in [
+            (0u32, xenolith_shader::Kind::Vertex),
+            (1u32, xenolith_shader::Kind::Pixel),
+        ] {
+            let Ok(translated) = xenolith_shader::translate(kind, body) else {
+                continue;
+            };
+
+            let which = written;
+            written += 1;
+
+            write_one_shader(&mut file, which, &translated);
+
+            entries.push((
+                number,
+                xenolith_shader::sum_of(body),
+                body.len(),
+                which,
+                translated.words.len(),
+                translated.streams.len(),
+                translated.pictures.len(),
+            ));
+        }
+    }
+
+    write_shader_table(&mut file, &entries);
+
+    write_into(out, "shaders.c", &file)
+}
+
+/// Writes one translated shader: the module itself, where it goes for its
+/// vertices, and which pictures it looks at.
+fn write_one_shader(file: &mut String, which: usize, translated: &xenolith_shader::Translated) {
+    let _ = writeln!(file, "static const uint32_t said_{which}[] = {{");
+    for word in &translated.words {
+        let _ = writeln!(file, "    {word:#010x}u,");
+    }
+    file.push_str("};\n\n");
+
+    if !translated.streams.is_empty() {
+        let _ = writeln!(file, "static const uint32_t reads_{which}[] = {{");
+        for stream in &translated.streams {
+            let _ = writeln!(
+                file,
+                "    {}u, {}u, {}u, {}u,",
+                stream.slot, stream.stride, stream.offset, stream.words
+            );
+        }
+        file.push_str("};\n\n");
+    }
+
+    if !translated.pictures.is_empty() {
+        let _ = writeln!(file, "static const uint32_t looks_{which}[] = {{");
+        for place in &translated.pictures {
+            let _ = writeln!(file, "    {place}u,");
+        }
+        file.push_str("};\n\n");
+    }
+}
+
+/// Writes the table the runtime finds a shader again by, and the three ways it
+/// is asked for.
+fn write_shader_table(
+    file: &mut String,
+    entries: &[(u32, u32, usize, usize, usize, usize, usize)],
+) {
+    file.push_str(concat!(
+        "typedef struct said {\n",
+        "    uint32_t kind;\n",
+        "    uint32_t sum;\n",
+        "    uint32_t words;\n",
+        "    const uint32_t *said;\n",
+        "    uint32_t length;\n",
+        "    const uint32_t *reads;\n",
+        "    uint32_t streams;\n",
+        "    const uint32_t *looks;\n",
+        "    uint32_t pictures;\n",
+        "} said;\n\n",
+        "static const said everything[] = {\n",
+    ));
+    for (kind, sum, words, which, length, streams, pictures) in entries {
+        let reads = if *streams == 0 {
+            String::from("0")
+        } else {
+            format!("reads_{which}")
+        };
+        let looks = if *pictures == 0 {
+            String::from("0")
+        } else {
+            format!("looks_{which}")
+        };
+        let _ = writeln!(
+            file,
+            "    {{ {kind}u, {sum:#010x}u, {words}u, said_{which}, {length}u, {reads}, {streams}u, {looks}, {pictures}u }},"
+        );
+    }
+    file.push_str("};\n\n");
+
+    /* The count is a named constant rather than a sizeof in each loop. An empty
+     * table is the common case, and a title whose image holds no shader that
+     * translated is built with one, where the sizeof folded to zero and the loop
+     * condition became an unsigned comparison against zero. Held to warnings as
+     * errors, that stopped the build of any title with no translated shader. */
+    file.push_str(
+        "static const size_t everything_there = sizeof everything / sizeof *everything;\n\n",
+    );
+
+    file.push_str(concat!(
+        "const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                              uint32_t *length) {\n",
+        "    for (size_t at = 0; at < everything_there; at++) {\n",
+        "        if (everything[at].kind == kind && everything[at].sum == sum\n",
+        "            && everything[at].words == words) {\n",
+        "            if (length != 0) { *length = everything[at].length; }\n",
+        "            return everything[at].said;\n",
+        "        }\n",
+        "    }\n",
+        "    return 0;\n",
+        "}\n\n",
+        "const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                               uint32_t *streams) {\n",
+        "    for (size_t at = 0; at < everything_there; at++) {\n",
+        "        if (everything[at].kind == kind && everything[at].sum == sum\n",
+        "            && everything[at].words == words) {\n",
+        "            if (streams != 0) { *streams = everything[at].streams; }\n",
+        "            return everything[at].reads;\n",
+        "        }\n",
+        "    }\n",
+        "    return 0;\n",
+        "}\n\n",
+        "const uint32_t *xenolith_looks_at(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                                  uint32_t *pictures) {\n",
+        "    for (size_t at = 0; at < everything_there; at++) {\n",
+        "        if (everything[at].kind == kind && everything[at].sum == sum\n",
+        "            && everything[at].words == words) {\n",
+        "            if (pictures != 0) { *pictures = everything[at].pictures; }\n",
+        "            return everything[at].looks;\n",
+        "        }\n",
+        "    }\n",
+        "    return 0;\n",
+        "}\n",
+    ));
 }
