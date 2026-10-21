@@ -25,6 +25,13 @@ pub(crate) struct Loaded {
     /// records will not decode should still be one the other subcommands can be
     /// pointed at, since they are how anyone would find out why.
     pub(crate) imports: Result<Imports>,
+    /// What kernel build the image was made against, or nothing where the
+    /// container did not say.
+    ///
+    /// A title's device layout depends on it, so it is carried to the boot
+    /// program rather than read again there, which would mean parsing the
+    /// container twice.
+    pub(crate) built_against: Option<u32>,
 }
 
 /// Where a subcommand reads its image from.
@@ -93,6 +100,9 @@ impl Source {
             return Ok(Loaded {
                 image: Image::new(base, bytes, sections),
                 imports: Ok(Imports::new()),
+                /* A bare image carries no import libraries, so nothing says
+                 * what it was built against. */
+                built_against: None,
             });
         }
 
@@ -136,9 +146,19 @@ impl Source {
                     .collect()
             });
 
+        /* What the image was built against, from the kernel's own import
+         * library. A container without that library says nothing rather than
+         * nought, because nought is a build number that means something. */
+        let built_against = container
+            .import_libraries()
+            .iter()
+            .find(|library| library.name == "xboxkrnl.exe")
+            .map(|library| library.version.0);
+
         Ok(Loaded {
             image,
             imports: thunks,
+            built_against,
         })
     }
 }

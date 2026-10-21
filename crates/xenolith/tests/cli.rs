@@ -457,6 +457,8 @@ fn lift_emits_c_for_a_crafted_image() {
         "Makefile",
         "xenolith.h",
         "xenolith.c",
+        "command_stream.c",
+        "sound.c",
         "lifted.h",
         "unlifted.c",
         "table.c",
@@ -720,5 +722,60 @@ fn lift_succeeds_when_only_some_functions_lift() {
     assert!(
         stdout.contains("vpkpx"),
         "what blocked it should be named: {stdout}"
+    );
+}
+
+/// The boot program is told what kernel build the image was made against.
+///
+/// A title's device layout depends on it. A container carries it beside the
+/// kernel's import library, and a container that does not is one whose boot
+/// program says nought rather than guessing.
+#[test]
+fn the_boot_program_carries_the_kernel_build() {
+    // mflr r12; stwu r1, -96(r1); li r3, 7; addi r1, r1, 96; blr
+    const WORDS: [u32; 5] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x3860_0007,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let source = std::env::temp_dir().join("xenolith-lift-kernel-build.bin");
+    let out = std::env::temp_dir().join("xenolith-lift-kernel-build-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = WORDS.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let (ok, stdout, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        out.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting a crafted image should succeed: {stderr}");
+
+    let main = std::fs::read_to_string(out.join("main.c")).expect("reading main.c");
+    assert!(
+        main.contains("xenolith_built_against("),
+        "the boot program does not say what kernel build it was made against"
+    );
+    /* A bare image carries no import libraries, so it says nought. */
+    assert!(
+        main.contains("xenolith_built_against(0x00000000u)"),
+        "a bare image should say nothing was known, and it said something else"
+    );
+    /* And the block a title reaches the kernel's counters through. */
+    assert!(
+        main.contains("xenolith_processor_block(base)"),
+        "the boot program does not give the title a processor block"
+    );
+    /* The report says it too, so a run says what it was told. */
+    assert!(
+        stdout.contains("kernel build") && stdout.contains("unknown"),
+        "the lift did not report what it knew about the kernel build: {stdout}"
     );
 }

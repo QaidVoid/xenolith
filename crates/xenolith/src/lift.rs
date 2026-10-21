@@ -244,6 +244,11 @@ int main(int count, char **arguments) {
         return 1;
     }
 
+    /* What kernel build the image was made against, which a title's device
+     * layout depends on. The container carries it beside the import libraries,
+     * and nought says it did not. */
+    xenolith_built_against(BUILT_AGAINST);
+
     xenolith_function entered = xenolith_lookup(address);
     if (entered == 0) {
         fprintf(stderr, "xenolith: %#010x is not a lifted function\n", address);
@@ -259,19 +264,25 @@ int main(int count, char **arguments) {
      * pointer starts below the top rather than at it. */
     state.r[1] = XENOLITH_STACK_TOP - 64;
 
+    /* And the block it reaches the kernel's own counters through. A title that
+     * finds nothing there reads processor nought on every thread, and its vector
+     * code picks a slot from that number and steps a counter in it. */
+    state.r[13] = xenolith_processor_block(base);
+
     entered(&state, base);
     return 0;
 }
 "#;
 
 /// Returns that program with the addresses this title uses.
-fn main_program(base: u32, entry: Option<u32>) -> String {
+fn main_program(base: u32, entry: Option<u32>, built_against: u32) -> String {
     BOOT_PROGRAM
         .replace(
             "ENTRY_POINT",
             &entry.map_or_else(|| "0".to_owned(), |address| format!("{address:#010x}u")),
         )
         .replace("LOAD_ADDRESS", &format!("{base:#010x}u"))
+        .replace("BUILT_AGAINST", &format!("{built_against:#010x}u"))
 }
 
 /// Writes everything the build needs besides the units themselves.
@@ -284,6 +295,7 @@ fn write_support(
     image: &xenolith_xex::Image,
     referenced: &BTreeSet<u32>,
     emitted: &BTreeSet<u32>,
+    built_against: u32,
 ) -> Result<()> {
     // Everything the emitted code names but did not get a body becomes a trap,
     // so the program links and says where it went rather than walking past the
@@ -329,7 +341,7 @@ fn write_support(
     write_into(
         out,
         "main.c",
-        &main_program(image.base_address(), image.entry_point()),
+        &main_program(image.base_address(), image.entry_point(), built_against),
     )?;
 
     Ok(())
@@ -408,6 +420,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     }
 
     let loaded = args.source.load()?;
+    let built_against = loaded.built_against;
     let image = loaded.image;
     let imports = loaded.imports?;
     let program = analyze(&image, &named_roots(args)?);
@@ -494,7 +507,13 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .into_diagnostic()
         .wrap_err_with(|| format!("writing {}", path.display()))?;
 
-    write_support(&args.out, &image, &referenced, &emitted)?;
+    write_support(
+        &args.out,
+        &image,
+        &referenced,
+        &emitted,
+        built_against.unwrap_or(0),
+    )?;
     write_into(&args.out, "Makefile", BUILD_FILE)?;
 
     report(
@@ -508,6 +527,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
             declarations: referenced.len(),
             sizes,
         },
+        built_against,
     );
 
     Ok(())
@@ -606,7 +626,7 @@ struct Outcome<'a> {
 }
 
 /// Prints what lifting produced.
-fn report(args: &Args, outcome: &Outcome<'_>) {
+fn report(args: &Args, outcome: &Outcome<'_>, built_against: Option<u32>) {
     let total = outcome.lifted + outcome.refused.len() as u64;
     println!("functions          {total:>10}");
     println!(
@@ -623,6 +643,11 @@ fn report(args: &Args, outcome: &Outcome<'_>) {
         "  largest          {:>10} bytes",
         outcome.sizes.iter().copied().max().unwrap_or(0)
     );
+    match built_against {
+        Some(build) => println!("kernel build      {build:#010x}"),
+        None => println!("kernel build      unknown, the container did not say"),
+    }
+
     println!("\nwritten to {}", args.out.display());
     println!("build it with make -j8, which links into a program");
     println!("give -j a number: a job for each unit is more than a machine has");

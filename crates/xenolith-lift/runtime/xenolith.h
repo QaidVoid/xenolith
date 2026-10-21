@@ -670,6 +670,24 @@ xenolith_function xenolith_lookup(uint32_t address);
  */
 uint8_t *xenolith_boot(const char *image, uint32_t load_address);
 
+/* The block a title reaches through r13, which is what it reads the kernel's
+ * tick count and its own processor number out of.
+ *
+ * A title that finds nothing there reads processor nought on every thread, and
+ * its vector code picks a slot from that number and steps a counter in it, so
+ * two threads on one block step the same counter and carry it past the end.
+ */
+uint32_t xenolith_processor_block(uint8_t *base);
+
+/* What kernel build the image was made against, or nothing where the container
+ * did not say.
+ *
+ * A title's device layout depends on it, so a runtime told nothing is a runtime
+ * that cannot answer the question. Nought means the container did not carry it,
+ * which is said rather than guessed at.
+ */
+void xenolith_built_against(uint32_t build);
+
 /* Where the guest's stack pointer starts.
  *
  * A title expects to have been given one. Entered with the register at zero it

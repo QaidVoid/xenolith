@@ -928,6 +928,28 @@ static uint32_t take_processor_block(uint8_t *base) {
     return block;
 }
 
+/* The same block, for whatever enters a title rather than a thread it started. */
+uint32_t xenolith_processor_block(uint8_t *base) {
+    return take_processor_block(base);
+}
+
+/* What kernel build the image was made against, kept for anything that asks. */
+static uint32_t built_against;
+
+void xenolith_built_against(uint32_t build) {
+    built_against = build;
+    /* Said rather than kept to itself. A title's device layout depends on this
+     * number, and nothing here uses it to choose one: what a runtime that does
+     * not choose needs is for the number to be visible, so that a run says what
+     * it was told and the absence of a choice can be seen rather than guessed
+     * at. */
+    if (build == 0) {
+        say_a_report("the container did not say what kernel build it was made against");
+    } else {
+        say_a_report("the image was made against kernel build %u", build);
+    }
+}
+
 /* Where each thread's stack is taken from, below the one the first thread was
  * given so that none of them meet.
  *
