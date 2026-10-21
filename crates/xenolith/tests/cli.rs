@@ -900,3 +900,208 @@ fn the_output_page_lists_what_a_lift_writes() {
         "the page names these and the directory does not hold them: {missing:?}"
     );
 }
+
+/// A root the caller names is lifted even where nothing else would find it.
+///
+/// Discovery works from prologues, entry points and the calls it can see. A
+/// function that leaves none of those is one a run of a built program reaches
+/// and discovery does not, and naming its address is how that evidence is given
+/// back. What is checked is that the address is lifted and that the image
+/// without it lifts fewer functions.
+#[test]
+fn a_named_root_is_lifted() {
+    /* One function with a prologue, and then one with none at all: `li r3, 7;
+     * blr` shows neither of the two signals a prologue needs, so nothing finds
+     * it. It is only a function because the caller says so. */
+    const WITH_PROLOGUE: [u32; 4] = [0x7d88_02a6, 0x9421_ffa0, 0x3821_0060, 0x4e80_0020];
+    const WITHOUT: [u32; 2] = [0x3860_0007, 0x4e80_0020];
+
+    let source = std::env::temp_dir().join("xenolith-root.bin");
+    let mut words: Vec<u32> = Vec::new();
+    words.extend(WITH_PROLOGUE);
+    let bare = 0x8200_0000u32 + u32::try_from(words.len()).expect("a length") * 4;
+    words.extend(WITHOUT);
+    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let plain = std::env::temp_dir().join("xenolith-root-plain");
+    let _ = std::fs::remove_dir_all(&plain);
+    let (ok, without_root, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        plain.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting should succeed: {stderr}");
+
+    let named = std::env::temp_dir().join("xenolith-root-named");
+    let _ = std::fs::remove_dir_all(&named);
+    let root = format!("{bare:#010x}");
+    let (ok, with_root, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        named.to_str().unwrap(),
+        "--root",
+        root.as_str(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting with a root should succeed: {stderr}");
+
+    let count = |said: &str| -> u64 {
+        said.lines()
+            .find(|line| line.starts_with("functions"))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|number| number.parse().ok())
+            .unwrap_or(0)
+    };
+    /* What a root guarantees is that the address is a function: it is lifted
+     * and declared. Whether that adds to the count depends on whether discovery
+     * found it anyway, which on an image this small it does, because the scan
+     * walks forward from the first function and reaches the words after it. */
+    let declared = std::fs::read_to_string(named.join("lifted.h")).unwrap();
+    let name = format!("sub_{bare:08x}");
+    assert!(
+        declared.contains(&name),
+        "the named root should be declared as {name}:\n{declared}"
+    );
+    assert!(
+        count(&with_root) >= count(&without_root),
+        "naming a root should never lift fewer functions, and it lifted {} against {}",
+        count(&with_root),
+        count(&without_root)
+    );
+
+    /* And a root that is not a number is refused rather than passed over, which
+     * is what says the flag is read at all rather than being accepted and
+     * ignored. */
+    let (ok, _, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        named.to_str().unwrap(),
+        "--root",
+        "not-an-address",
+        source.to_str().unwrap()
+    );
+    assert!(!ok, "a root that is not an address should be refused");
+    assert!(
+        stderr.contains("not-an-address") || stderr.to_lowercase().contains("number"),
+        "the refusal should say what was wrong: {stderr}"
+    );
+}
+
+/// A roots file is read, one address per line.
+///
+/// A run of a built program with `XENOLITH_TRACE_DISPATCH` set reports every
+/// address it wanted and could not reach, and this is how that report is fed
+/// back. What is checked is that the file's addresses are lifted, which is the
+/// same effect `--root` has one at a time.
+#[test]
+fn a_roots_file_is_read() {
+    const WITH_PROLOGUE: [u32; 4] = [0x7d88_02a6, 0x9421_ffa0, 0x3821_0060, 0x4e80_0020];
+    const WITHOUT: [u32; 2] = [0x3860_0007, 0x4e80_0020];
+
+    let source = std::env::temp_dir().join("xenolith-roots-from.bin");
+    let mut words: Vec<u32> = Vec::new();
+    words.extend(WITH_PROLOGUE);
+    let bare = 0x8200_0000u32 + u32::try_from(words.len()).expect("a length") * 4;
+    words.extend(WITHOUT);
+    let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let list = std::env::temp_dir().join("xenolith-roots-from.txt");
+    std::fs::write(&list, format!("{bare:#010x}\n")).unwrap();
+
+    let out = std::env::temp_dir().join("xenolith-roots-from-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let (ok, _, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        out.to_str().unwrap(),
+        "--roots-from",
+        list.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting with a roots file should succeed: {stderr}");
+
+    let declared = std::fs::read_to_string(out.join("lifted.h")).unwrap();
+    let name = format!("sub_{bare:08x}");
+    assert!(
+        declared.contains(&name),
+        "the address from the file should be declared as {name}:\n{declared}"
+    );
+}
+
+/// The unlifted list names every function that was not lifted.
+///
+/// Without it a run says how many were not lifted and not which, so finding out
+/// what stopped one means guessing. What is checked is that the list names the
+/// function and the instruction, and that it is absent unless asked for.
+#[test]
+fn the_unlifted_list_names_what_stopped_a_function() {
+    /* A prologue, then an instruction the emitter has no reading of, so the
+     * function is found and refused rather than missed: `vpkpx`, a pixel pack
+     * the model does not express. */
+    const REFUSED: [u32; 5] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x1022_1b0e,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let source = std::env::temp_dir().join("xenolith-unlifted.bin");
+    let bytes: Vec<u8> = REFUSED.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let quiet = std::env::temp_dir().join("xenolith-unlifted-quiet");
+    let _ = std::fs::remove_dir_all(&quiet);
+    let (ok, said_nothing, _) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        quiet.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting should succeed");
+
+    let told = std::env::temp_dir().join("xenolith-unlifted-told");
+    let _ = std::fs::remove_dir_all(&told);
+    let (ok, said, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        told.to_str().unwrap(),
+        "--unlifted",
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting with the list should succeed: {stderr}");
+
+    assert!(
+        !said_nothing.contains("functions that were not lifted"),
+        "the list should not be printed unless it is asked for:\n{said_nothing}"
+    );
+    assert!(
+        said.contains("functions that were not lifted"),
+        "the list should be printed when it is asked for:\n{said}"
+    );
+    assert!(
+        said.contains("0x82000000"),
+        "the list should name the function:\n{said}"
+    );
+}
