@@ -2179,6 +2179,74 @@ int main(void) {
     );
 }
 
+/// A full vertex arena refuses the draw rather than wrapping to the front.
+///
+/// Wrapping would have the draw read what an earlier draw in the same frame
+/// wrote: the geometry is there, the vertices are somebody else's, and what
+/// appears is a shape nobody asked for. A draw left out is a gap that can be
+/// seen.
+#[test]
+fn a_full_vertex_arena_refuses_rather_than_wraps() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    if (!xenolith_can_draw()) {
+        printf("no device\n");
+        return 0;
+    }
+
+    /* A frame's worth of draws, each taking a whole draw's room, until one does
+     * not fit. */
+    int refused = 0;
+    for (int at = 0; at < 64; at++) {
+        uint32_t room = 0;
+        uint32_t *window = xenolith_room_for_vertices(&room);
+        if (window == NULL) {
+            refused = 1;
+            break;
+        }
+        xenolith_done_with_vertices(room);
+    }
+
+    if (!refused) {
+        fprintf(stderr, "the arena never filled, so nothing was refused\n");
+        return 3;
+    }
+
+    /* And after a refusal, a new frame starts with the room again. */
+    xenolith_begin_a_frame();
+    uint32_t room = 0;
+    if (xenolith_room_for_vertices(&room) == NULL || room == 0) {
+        fprintf(stderr, "a new frame did not have the room again\n");
+        return 4;
+    }
+    printf("refused\n");
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs_with_the_renderer("arena", program) {
+        panic!("a full arena did not refuse:\n{complaint}");
+    }
+}
+
 /// The renderer opens a device where the machine has one, and says which.
 ///
 /// A renderer that cannot open a device is not a failure: a machine without a
@@ -2222,9 +2290,19 @@ int main(void) {
 fn runs_with_the_renderer(name: &str, program: &str) -> Result<(), String> {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
+    /* The runtime and the renderer both, because a program that asks the
+     * renderer for room asks through the runtime's own interface. */
     for (file, text) in [
         ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("sound.c", include_str!("../runtime/sound.c")),
         ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", SHADER_TABLE),
         ("main.c", program),
     ] {
         std::fs::write(directory.join(file), text)
@@ -2238,7 +2316,9 @@ fn runs_with_the_renderer(name: &str, program: &str) -> Result<(), String> {
         .arg("-o")
         .arg(&program_path)
         .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
         .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
         .args(["-lvulkan", "-lm", "-lpthread"])
         .output()
         .map_err(|error| format!("running the compiler: {error}"))?;

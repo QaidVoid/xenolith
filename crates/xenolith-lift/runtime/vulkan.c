@@ -2472,16 +2472,24 @@ static VkDeviceSize lined_up(VkDeviceSize at, VkDeviceSize on) {
     return (at + on - 1u) / on * on;
 }
 
-/* Says once that a frame drew more than a frame's room holds. */
+/* Says once that a frame drew more than a frame's room holds.
+ *
+ * Said rather than passed over, and the draw that asked is refused rather than
+ * given room from the start of the arena. Wrapping around would have it read
+ * what an earlier draw in the same frame wrote, which is a scene that is wrong
+ * in a way nothing reports: the geometry is there, the vertices are somebody
+ * else's, and what appears is a shape nobody asked for. A draw that does not
+ * happen is a gap in a scene that can be seen. */
+static int said_what_a_frame_cannot_hold;
+
 static void more_than_a_frame_holds(const char *what) {
-    static int said;
-    if (said) {
+    if (said_what_a_frame_cannot_hold) {
         return;
     }
-    said = 1;
+    said_what_a_frame_cannot_hold = 1;
     fprintf(stderr,
             "xenolith: a frame asked for more %s than a frame is given room for, so the draws "
-            "after this one in it read what earlier ones wrote\n",
+            "that did not fit are left out rather than given room they do not have\n",
             what);
 }
 
@@ -2492,7 +2500,12 @@ uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
 
     if (through.vertex_at + XENOLITH_VERTEX_BYTES > XENOLITH_VERTEX_ROOM) {
         more_than_a_frame_holds("vertices");
-        through.vertex_at = 0;
+        /* Nothing, so the draw that asked for this reads nothing and is left
+         * out. A caller given nothing does not draw. */
+        through.vertex_from = 0;
+        through.vertex_wide = 0;
+        *how_many = 0;
+        return NULL;
     }
 
     through.vertex_from = through.vertex_at;
@@ -2541,7 +2554,12 @@ int xenolith_hand_over_constants(const uint8_t *from, const uint8_t *truths,
 
     if (through.constant_at + XENOLITH_CONSTANT_BYTES > XENOLITH_CONSTANT_ROOM) {
         more_than_a_frame_holds("shader constants");
+        /* Refused rather than wrapped: a shader handed the room at the front of
+         * the arena would read another draw's constants, which is a colour and
+         * a transform nothing asked for. */
+        through.constant_from = 0;
         through.constant_at = 0;
+        return 0;
     }
     through.constant_from = through.constant_at;
     through.constant_at =
