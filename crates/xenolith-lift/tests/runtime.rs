@@ -2279,11 +2279,12 @@ fn runs_with_the_renderer(name: &str, program: &str) -> Result<(), String> {
 #[ignore = "needs a driver that builds the pipeline"]
 #[allow(clippy::too_many_lines)]
 fn a_draw_with_real_shaders_puts_something_on_the_surface() {
-    /* Two shaders a title draws a scene with, taken from the crate's own
-     * validated fixtures: a vertex shader carrying a third thing on, and a pixel
-     * shader using comparisons, the predicate push and pop family and the four
-     * lane dot. Both are words a title hands the hardware, and both are modules
-     * a validator accepts. */
+    /* A vertex shader a title draws a scene with, taken from the crate's own
+     * validated fixtures, and a pixel shader that moves a constant into the
+     * colour. The scene's own pixel shader would be the better test of the
+     * translator, but it reads pictures, and a shader reading pictures nothing
+     * has filled puts out black whatever else is right. What this is testing is
+     * the draw, so the colour is one the shader can make on its own. */
     #[rustfmt::skip]
     const VERTEX: &[u32] = &[
         0xf255_6004,
@@ -2406,11 +2407,14 @@ fn a_draw_with_real_shaders_puts_something_on_the_surface() {
     table.push_str(concat!(
         "    return kind == 0 ? said_0 : said_1;\n",
         "}\n\n",
+        "/* One stream, slot 0, two words apart, read from the front. */\n",
+        "static const uint32_t reads_0[] = { 0u, 2u, 0u, 2u };\n\n",
         "const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,\n",
         "                               uint32_t *streams) {\n",
-        "    (void)kind; (void)sum; (void)words;\n",
-        "    if (streams != 0) { *streams = 0; }\n",
-        "    return 0;\n",
+        "    (void)sum; (void)words;\n",
+        "    if (kind != 0) { if (streams != 0) { *streams = 0; } return 0; }\n",
+        "    if (streams != 0) { *streams = 1; }\n",
+        "    return reads_0;\n",
         "}\n\n",
         "const uint32_t *xenolith_looks_at(uint32_t kind, uint32_t sum, uint32_t words,\n",
         "                                  uint32_t *pictures) {\n",
@@ -2464,35 +2468,63 @@ int main(void) {
     /* A frame of its own, cleared, with a triangle drawn into it. */
     if (!xenolith_begin_a_frame()) { return 3; }
 
-    static const uint32_t vertex[] = {0u};
-    static const uint32_t pixel[] = {0u};
-    if (!xenolith_can_draw_with(0u, vertex, 1u, 0u, pixel, 1u)) {
+    /* The words the table holds, found the way the runtime finds them. */
+    uint32_t vertex_length = 0;
+    uint32_t pixel_length = 0;
+    const uint32_t *vertex = xenolith_said(0u, 0u, 0u, &vertex_length);
+    const uint32_t *pixel = xenolith_said(1u, 0u, 0u, &pixel_length);
+    if (vertex == NULL || pixel == NULL || vertex_length == 0 || pixel_length == 0) {
+        printf("the table holds no shader\n");
+        return 0;
+    }
+    if (!xenolith_can_draw_with(0u, vertex, vertex_length, 0u, pixel, pixel_length)) {
         printf("the shaders would not build\n");
         return 0;
     }
-    xenolith_hand_over_constants(base, base, base);
     xenolith_look_at(NULL, NULL);
     xenolith_clip_to(0u, 0u, 1279u, 719u);
 
-    uint32_t room = 0;
-    uint32_t *window = xenolith_room_for_vertices(&room);
-    if (window == NULL) { return 4; }
-    /* Three corners of a triangle, each a position of two floats. */
+    /* Three corners of a triangle in the title's own memory, each a position of
+     * two floats. The fetch is told where they are and the shader's stream says
+     * how far apart two of them sit, which is what the runtime reads them by. */
     static const float corners[3][2] = {{0.0f, 0.5f}, {-0.5f, -0.5f}, {0.5f, -0.5f}};
-    uint32_t written = 0;
+    uint32_t at = 0x01000000u;
     for (unsigned one = 0; one < 3; one++) {
-        window[1u + one * 2u] = 0u;
         uint32_t across, down;
         __builtin_memcpy(&across, &corners[one][0], 4);
         __builtin_memcpy(&down, &corners[one][1], 4);
-        window[1u + one * 2u] = across;
-        window[2u + one * 2u] = down;
-        written += 2u;
+        xenolith_store32(base, at + one * 8u, across);
+        xenolith_store32(base, at + one * 8u + 4u, down);
     }
-    xenolith_done_with_vertices(1u + written);
+
+    /* What the hardware would have done to a position after the shader put it
+     * out, as something to multiply by and something to add. This shader reads
+     * those from the two constants past the ones a title names, and leaves the
+     * position it worked out multiplied by nothing where they are nought, which
+     * puts every corner at the origin. */
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u, 0x3f800000u);
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u + 4u, 0x3f800000u);
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u + 8u, 0x3f800000u);
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 512u) * 4u + 12u, 0x3f800000u);
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u, 0u);
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u + 4u, 0u);
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u + 8u, 0u);
+    xenolith_store32(base, 0x7fc80000u + (0x4000u + 513u) * 4u + 12u, 0x3f800000u);
+
+    /* Taken from the register block as it stands now, which is why this comes
+     * after the constants are written rather than before. */
+    xenolith_hand_over_constants(base + 0x7fc80000u + 0x4000u * 4u,
+                                 base + 0x7fc80000u + 0x4900u * 4u,
+                                 base + 0x7fc80000u + 0x4908u * 4u);
+
+    /* Fetch slot 0: vertices, at that address, that many words. */
+    xenolith_store32(base, 0x7fc80000u + (0x4800u + 0u) * 4u, at | 3u);
+    xenolith_store32(base, 0x7fc80000u + (0x4800u + 1u) * 4u, (3u * 2u) << 2);
+
+    if (xenolith_room_for_vertices(NULL) != NULL) { return 4; }
 
     int drawn = xenolith_draw_now(0u, 0xfu, 0u, XENOLITH_DRAWN_HOWEVER_SOLID, 0u,
-                                  0u, vertex, 1u, 0u, pixel, 1u, 3u,
+                                  0u, vertex, vertex_length, 0u, pixel, pixel_length, 3u,
                                   XENOLITH_SHAPE_TRIANGLES);
     if (!drawn) { return 5; }
 

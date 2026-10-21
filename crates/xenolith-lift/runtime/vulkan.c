@@ -307,6 +307,12 @@ static struct {
     VkCommandPool apart;
     int made;
     int refused;
+    /* Whether the surface has ever been read out of, which is what decides the
+     * layout it is in before a frame. A device starts an image in the layout it
+     * was made with, and saying otherwise in a barrier is undefined behaviour:
+     * the driver is entitled to discard what is there, and one of them refused
+     * the whole command buffer for it. */
+    int read_out;
 } surface;
 
 /* What each of the places a title draws into holds while another is being drawn
@@ -1493,12 +1499,34 @@ static int make_what_a_frame_goes_through(void) {
     only.pColorAttachments = &where;
     only.pDepthStencilAttachment = &how_far_where;
 
+    /* What has to finish before the pass reads what is there.
+     *
+     * The colour attachment is loaded rather than cleared, because a place a
+     * title comes back to holds what it left. What filled it is a transfer that
+     * ran before the pass, and without saying so nothing orders the two: a
+     * driver is entitled to start the pass first and load whatever the image
+     * happened to hold, which is nothing. */
+    VkSubpassDependency before[1] = {{0}};
+    before[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    before[0].dstSubpass = 0;
+    before[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT |
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    before[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    before[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+
     VkRenderPassCreateInfo asking = {0};
     asking.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     asking.attachmentCount = 2;
     asking.pAttachments = both;
     asking.subpassCount = 1;
     asking.pSubpasses = &only;
+    asking.dependencyCount = 1;
+    asking.pDependencies = before;
 
     if (vkCreateRenderPass(drawing.device, &asking, NULL, &through.pass) != VK_SUCCESS) {
         through.refused = 1;
@@ -2595,8 +2623,19 @@ static int xenolith_begin_a_frame_inside(void) {
 
     VkImageMemoryBarrier ready = {0};
     ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    ready.oldLayout = came_back_to_it ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-                                      : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    /* Where the surface is now, said as it actually is. A device starts an
+     * image in the layout it was made with, which is undefined, and saying it
+     * is somewhere else is undefined behaviour: one driver here refuses the
+     * whole command buffer for it and another discards what is there. After a
+     * frame it is where the copy out left it, and coming back to a place that
+     * was put back leaves it where putting it back left it. */
+    if (!surface.read_out) {
+        ready.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    } else if (came_back_to_it) {
+        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    } else {
+        ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    }
     ready.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -3992,6 +4031,9 @@ static int xenolith_end_a_frame_inside(void) {
     to_read.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(surface.commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &to_read);
+    /* From here the surface is somewhere a copy reads from, which is what the
+     * next frame's barrier has to say it is. */
+    surface.read_out = 1;
 
     VkBufferImageCopy back = {0};
     back.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
