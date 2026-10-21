@@ -34,6 +34,12 @@ Three sources are consulted, in order:
 2. The `XENOLITH_XEX_KEY` environment variable, as 32 hexadecimal digits.
 3. `~/.config/xenolith/xex.key`.
 
+The order is the one above and not the other way round. A caller who names a
+file has said which one they mean, and the variable is a fallback for a caller
+who said nothing, so `--key-file` wins even when the variable is set. The
+reverse was true for a while, which made the flag do nothing at all in exactly
+the case a caller was most likely to reach for it.
+
 The file form is usually what you want, since it survives across shells and does
 not end up in your history.
 
