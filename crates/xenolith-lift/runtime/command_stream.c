@@ -37,6 +37,14 @@
 #define XENOLITH_PACKET_REPORT 0x58u
 #define XENOLITH_PACKET_DRAW 0x36u
 #define XENOLITH_PACKET_DRAW_INDEXED 0x22u
+#define XENOLITH_PACKET_COMPARE 0x45u
+
+/* A comparison that is always true, which is how a title writes a register
+ * through the compare packet rather than through a register packet. */
+#define XENOLITH_COMPARE_ALWAYS 7u
+
+/* Set where the compare packet writes to memory rather than to a register. */
+#define XENOLITH_WRITES_MEMORY 0x20u
 
 /* How deep a run of commands kept somewhere else may nest.
  *
@@ -69,6 +77,26 @@ static struct read_so_far read_so_far;
  * Once per opcode rather than once per packet: a title writes thousands of them
  * a frame and the interesting fact is which kinds are not read, not how many
  * times each appeared. */
+/* Writes the words of a packet this does not read, where a run asks for them.
+ *
+ * Reading a packet kind by hand is the only way to tell whether a field was
+ * taken from the right bits, and the words are not kept anywhere a run can be
+ * asked for them afterwards. */
+static void say_what_a_packet_held(uint8_t *base, uint32_t at) {
+    static int telling = -1;
+    if (telling < 0) {
+        telling = getenv("XENOLITH_KEEP_PACKETS") != NULL;
+    }
+    if (!telling) {
+        return;
+    }
+    fprintf(stderr, "XPACKET %#010x:", at);
+    for (uint32_t k = 0; k < 4u; k++) {
+        fprintf(stderr, " %08x", xenolith_load32(base, at + k * 4u));
+    }
+    fprintf(stderr, "\n");
+}
+
 static void say_an_opcode_was_not_read(uint32_t opcode, uint32_t at) {
     static uint32_t said[32];
     static unsigned count;
@@ -122,12 +150,13 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
             follows = 2;
             break;
         default:
-            /* The field is how many words the packet takes altogether, its own
-             * header counted. Adding the header again here counts it twice,
-             * which makes every packet one word too long: the walk then starts
-             * the next one a word early and reads its header out of the middle
-             * of the one before. */
-            follows = (header >> 16) & 0x3fff;
+            /* The field is one less than how many words follow the header. A
+             * buffer packet a title wrote reads `c0013f00 163d0040 0000000b`:
+             * the field is one and there are two words after the header, so
+             * the field plus one is the count. Read as the count itself, every
+             * packet is one word short and the walk starts the next one inside
+             * the one before. */
+            follows = ((header >> 16) & 0x3fff) + 1;
             break;
         }
 
@@ -236,6 +265,24 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
                 break;
             }
 
+            /* Setting a register after looking at one.
+             *
+             * A title writes a register through this rather than through a
+             * register packet, saying the comparison always holds. Anything
+             * else here is a write that waits on something, and a register left
+             * holding what it held before is a shader reading numbers nobody
+             * sent. */
+            if (opcode == XENOLITH_PACKET_COMPARE && follows >= 6) {
+                uint32_t how = xenolith_load32(base, stream + (at + 1) * 4);
+                if ((how & 7u) == XENOLITH_COMPARE_ALWAYS
+                    && (how & XENOLITH_WRITES_MEMORY) == 0) {
+                    set_register(base, xenolith_load32(base, stream + (at + 5) * 4),
+                                 xenolith_load32(base, stream + (at + 6) * 4));
+                    read_so_far.registers++;
+                    break;
+                }
+            }
+
             /* Saying that what was handed over is finished.
              *
              * Everything written here is finished the moment it is read, so the
@@ -276,6 +323,7 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
             /* Anything else is read for its length and passed over. That is not
              * the same as executing it, and a frame reported finished here had
              * nothing drawn in it. */
+            say_what_a_packet_held(base, stream + at * 4);
             say_an_opcode_was_not_read(opcode, stream + at * 4);
             read_so_far.not_read++;
             break;

@@ -1852,8 +1852,9 @@ int main(void) {
      * registers, the next fourteen say how many words follow, and the low
      * fifteen are the register it starts at. */
     uint32_t ring = 0x01000000u;
-    /* The field is how many words follow the header, so one word after it. */
-    uint32_t header = (0u << 30) | (1u << 16) | 0x20u;
+    /* The field is one less than how many words follow the header, so nought
+     * is one word after it. */
+    uint32_t header = (0u << 30) | (0u << 16) | 0x20u;
     xenolith_store32(base, ring, header);
     xenolith_store32(base, ring + 4, 0xdeadbeefu);
 
@@ -2022,17 +2023,16 @@ int main(void) {
     uint32_t at = ring;
     uint32_t answers = 0x04000000u;
 
-    /* The first: opcode 0x58, three words following. The field is how many
-     * words the packet takes altogether, its own header counted, which is what
-     * the walk reads it as. */
-    xenolith_store32(base, at, (3u << 30) | (3u << 16) | (0x58u << 8));
+    /* The first: opcode 0x58, three words following. The field is one less than
+     * that, which is what the walk reads it as. */
+    xenolith_store32(base, at, (3u << 30) | (2u << 16) | (0x58u << 8));
     xenolith_store32(base, at + 4, 0u);
     xenolith_store32(base, at + 8, answers | 2u);
     xenolith_store32(base, at + 12, 0xcafef00du);
     at += 16;
 
     /* The second, asking for byte order 1. */
-    xenolith_store32(base, at, (3u << 30) | (3u << 16) | (0x58u << 8));
+    xenolith_store32(base, at, (3u << 30) | (2u << 16) | (0x58u << 8));
     xenolith_store32(base, at + 4, 0u);
     xenolith_store32(base, at + 8, (answers + 4u) | 1u);
     xenolith_store32(base, at + 12, 0xcafef00du);

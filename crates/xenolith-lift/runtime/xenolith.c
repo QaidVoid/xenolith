@@ -2567,6 +2567,20 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         graphics.frames++;
         finish_the_frame();
         xenolith_show_the_frame();
+        /* What was drawn, written where a run asks for it. A frame is read back
+         * the same way whatever it holds, so this is the only way to see
+         * whether a title drew anything rather than only that it asked to. */
+        {
+            const char *keeping = getenv("XENOLITH_FRAMES");
+            if (keeping != NULL) {
+                char where[512];
+                int written = snprintf(where, sizeof where, "%s/frame%04lu.ppm", keeping,
+                                       (unsigned long)graphics.frames);
+                if (written > 0 && (size_t)written < sizeof where) {
+                    xenolith_keep_a_frame(where);
+                }
+            }
+        }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 442: {
