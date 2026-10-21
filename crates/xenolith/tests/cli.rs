@@ -1,5 +1,6 @@
 //! Integration tests driving the built binary.
 
+use std::collections::BTreeSet;
 use std::process::Command;
 
 /// Runs the tool with the given arguments.
@@ -806,5 +807,96 @@ fn the_boot_program_carries_the_kernel_build() {
     assert!(
         stdout.contains("kernel build") && stdout.contains("unknown"),
         "the lift did not report what it knew about the kernel build: {stdout}"
+    );
+}
+
+/// What a lift writes and what the page says it writes are the same list.
+///
+/// A page that lists a file the directory does not hold sends a reader looking
+/// for something that is not there, and a file the page does not list is one
+/// nobody knows about. Both directions are checked here, against a directory
+/// this test just lifted.
+#[test]
+fn the_output_page_lists_what_a_lift_writes() {
+    // mflr r12; stwu r1, -96(r1); li r3, 7; addi r1, r1, 96; blr
+    const WORDS: [u32; 5] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x3860_0007,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let source = std::env::temp_dir().join("xenolith-output-page.bin");
+    let out = std::env::temp_dir().join("xenolith-output-page-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = WORDS.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let (ok, _, stderr) = run!(
+        "lift",
+        "--raw",
+        "--base",
+        "0x82000000",
+        "--out",
+        out.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting a crafted image should succeed: {stderr}");
+
+    /* The two tables that list files: the ones whose first column is a path.
+     * The makefile's variables and the capabilities looked for are tables too,
+     * and reading those as file names would have the check looking for a file
+     * called CFLAGS. */
+    let page = include_str!("../../../docs/reference/output.md");
+    let named: BTreeSet<&str> = page
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .filter_map(|line| line.split('`').nth(1))
+        .filter(|name| name.contains('.') || name == &"Makefile")
+        .collect();
+    assert!(!named.is_empty(), "the page names no file at all");
+
+    /* Every file the lift wrote is named by the page, bar the units, which the
+     * page describes by their naming rule rather than one by one. */
+    let mut unexplained = Vec::new();
+    for entry in std::fs::read_dir(&out).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if name.starts_with("lifted.")
+            && std::path::Path::new(&name).extension() == Some(std::ffi::OsStr::new("c"))
+        {
+            continue;
+        }
+        if !named.contains(name.as_str()) {
+            unexplained.push(name);
+        }
+    }
+    unexplained.sort();
+    assert!(
+        unexplained.is_empty(),
+        "the lift wrote these and the page does not name them: {unexplained:?}"
+    );
+
+    /* And every name the page gives is either there or is one of the files that
+     * comes and goes with the machine. */
+    let may_be_absent = [
+        /* Comes and goes with the machine and the build that made the tool. */
+        "libxenolith_shader.a",
+        "xdg-shell-client-protocol.h",
+        "xdg-shell-protocol.c",
+        /* A rule rather than a name: the page says how a unit is named and
+         * there is one of these for every unit in the directory. */
+        "lifted.<first>-<last>.c",
+    ];
+    let mut missing = Vec::new();
+    for name in &named {
+        if out.join(name).is_file() || may_be_absent.contains(name) {
+            continue;
+        }
+        missing.push(*name);
+    }
+    assert!(
+        missing.is_empty(),
+        "the page names these and the directory does not hold them: {missing:?}"
     );
 }
