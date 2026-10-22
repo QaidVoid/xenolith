@@ -1,0 +1,85 @@
+#!/bin/sh
+# Fails when a number a page quotes is not what the tool produces.
+#
+# Every count on the site is a claim about what this code does. A number typed
+# into a page is a claim about what the code did when the page was written, and
+# nothing in a build notices when that stops being true. This compares the pages
+# against `scripts/report`, which runs the tool.
+#
+# What is compared is deliberately narrow. Only the status table is checked,
+# because it is the one place a page states counts as facts about the tool, and
+# it is the place a reader looks first. Prose numbers, dates, and the worked
+# examples of instruction encodings are not counts of anything and are left
+# alone.
+set -eu
+
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+report=$(scripts/report)
+
+fail() {
+    printf 'check-numbers: %s\n' "$1" >&2
+    exit 1
+}
+
+# Reads one number out of the report for one title.
+number() {
+    printf '%s\n' "$report" |
+        awk -v title="title $1" -v key="$2" '
+            $0 == title { inside = 1; next }
+            /^title / { inside = 0 }
+            inside && $1 == key { print $2; exit }
+        '
+}
+
+# Reads the column of a status table row: the first is the row's label and the
+# second and third are the two titles.
+column() {
+    page=$1
+    label=$2
+    which=$3
+    awk -F'|' -v label="$label" -v which="$which" '
+        index($0, label) == 0 { next }
+        {
+            value = $(which + 1)
+            gsub(/[ ,]/, "", value)
+            sub(/\(.*/, "", value)
+            print value
+            exit
+        }
+    ' "$page"
+}
+
+check_row() {
+    page=$1
+    label=$2
+    title=$3
+    which=$4
+    key=$5
+
+    [ -f "$page" ] || return 0
+    stated=$(column "$page" "$label" "$which")
+    [ -n "$stated" ] || fail "$page has no row for $label"
+    produced=$(number "$title" "$key")
+    [ -n "$produced" ] || fail "$page quotes $label and the report has no such count"
+
+    [ "$stated" = "$produced" ] ||
+        fail "$page says $label for title $title is $stated and the tool produces $produced"
+}
+
+# The README's status table. The two titles are its two columns.
+check_row README.md "functions discovered" A 2 discovered
+check_row README.md "functions discovered" B 3 discovered
+check_row README.md "functions lifted to C" A 2 lifted
+check_row README.md "functions lifted to C" B 3 lifted
+check_row README.md "import thunks" A 2 thunks
+check_row README.md "import thunks" B 3 thunks
+check_row README.md "helper entries emitted beside them" A 2 helpers
+check_row README.md "helper entries emitted beside them" B 3 helpers
+check_row README.md "executable words claimed" A 2 claimed
+check_row README.md "executable words claimed" B 3 claimed
+
+printf 'check-numbers: every quoted count matches the tool\n'
+
+exit 0

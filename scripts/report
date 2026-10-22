@@ -1,0 +1,68 @@
+#!/bin/sh
+# Prints every number the documentation quotes, from the tool that produces it.
+#
+# A number on a page is a claim about what the tool does. Written by hand it is
+# a claim about what the tool did when the page was written, and nothing says
+# when that was. This prints them from a run, and `scripts/check-numbers`
+# compares the pages against this output, so a page that drifts fails the gate
+# rather than being believed.
+#
+# Nothing here copies game data. The corpus is read where it already is, and no
+# path it prints is a key.
+set -eu
+
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+corpus=${XENOLITH_CORPUS-$root/../xen/corpus}
+tool=$root/target/release/xenolith
+
+[ -x "$tool" ] || {
+    printf 'report: no built tool at %s; run cargo build --release first\n' "$tool" >&2
+    exit 1
+}
+
+# The key is read the way the documentation says it is, and never printed.
+key_file=${XENOLITH_KEY_FILE:-$HOME/.config/xenolith/xex.key}
+if [ -z "${XENOLITH_XEX_KEY-}" ] && [ -f "$key_file" ]; then
+    XENOLITH_XEX_KEY=$(tr -d '\n' <"$key_file")
+    export XENOLITH_XEX_KEY
+fi
+
+# The two titles the pages quote, by the names the pages use.
+first=$corpus/ac6_extract/default.xex
+second=$corpus/pes6-recomp/pes6_extract/default.xex
+
+for pair in "A:$first" "B:$second"; do
+    name=${pair%%:*}
+    file=${pair#*:}
+    [ -f "$file" ] || {
+        printf 'report: no title at %s\n' "$file" >&2
+        exit 1
+    }
+
+    printf 'title %s\n' "$name"
+
+    # Analysis, read as the key and value the report prints them.
+    "$tool" analyze "$file" 2>/dev/null |
+        sed -n -e 's/^functions  *\([0-9][0-9]*\)$/discovered \1/p' \
+               -e 's/^claimed  *\([0-9][0-9]*\)  *(\([0-9.]*\) percent)$/claimed \1 \2/p'
+
+    # The lift, into a directory of its own so nothing is read from an older
+    # one.
+    out=${TMPDIR:-/tmp}/xenolith-report-$name
+    rm -rf "$out"
+    "$tool" lift "$file" --out "$out" --part-size 0x400000 2>/dev/null |
+        sed -n -e 's/^  lifted  *\([0-9][0-9]*\)  *(\([0-9.]*\) percent)$/lifted \1/p' \
+               -e 's/^    import thunks  *\([0-9][0-9]*\)$/thunks \1/p' \
+               -e 's/^  not lifted  *\([0-9][0-9]*\)$/refused \1/p' \
+               -e 's/^helper entries  *\([0-9][0-9]*\)$/helpers \1/p' \
+               -e 's/^units  *\([0-9][0-9]*\)$/units \1/p'
+
+    # And what the emitted directory actually holds, which is a claim the output
+    # page makes file by file.
+    printf 'files %s\n' "$(ls "$out" | sed 's/lifted\.\([0-9a-f]*\)-\([0-9a-f]*\)\.c/lifted.units.c/' | sort -u | tr '\n' ' ')"
+    rm -rf "$out"
+done
+
+exit 0
