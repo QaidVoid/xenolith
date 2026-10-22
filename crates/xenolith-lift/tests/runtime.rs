@@ -3101,3 +3101,97 @@ int main(void) {
         "the frame is entirely black, so nothing was drawn into it"
     );
 }
+
+/// A translated vertex shader draws a triangle when run on its own.
+///
+/// This is the only check that separates the shader from the renderer. It builds
+/// a small Vulkan program that hands a module one vertex buffer and one block of
+/// constants, draws a triangle, and reads the pixels back. The same program with
+/// a shader written by hand draws a red triangle, so a frame with nothing lit in
+/// it says the module is at fault rather than the harness.
+///
+/// Ignored because it fails, and the failure is the finding: a vertex shader
+/// AC6 hands over draws nothing, with the fetch the translator declares and the
+/// constants the runtime supplies, while a hand-written shader draws. What it
+/// needs is a vertex shader translated from a title's words that draws, which
+/// means finding what the module does that the hand-written one does not.
+#[test]
+#[ignore = "a translated title shader draws nothing, which is the defect this is here to show"]
+fn a_translated_vertex_shader_draws_a_triangle() {
+    let harness = include_str!("shader_frame/render.c");
+
+    /* A vertex shader a title hands over, from the crate's own validated
+     * fixtures: the one a scene is drawn with. */
+    let words: &[u32] = &[
+        0x0000_0000,
+        0x1001_c400,
+        0x2200_0000,
+        0xc80f_8000,
+        0x0000_0000,
+        0xc200_0000,
+        0x0000_0000,
+        0x0000_0000,
+        0x0000_0000,
+    ];
+    let said = xenolith_shader::translate(xenolith_shader::Kind::Vertex, words)
+        .expect("the shader translates");
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("shader_frame");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    std::fs::write(directory.join("render.c"), harness).expect("writing the harness");
+
+    /* The module, as the words a driver reads. */
+    let mut module = Vec::new();
+    for word in &said.words {
+        module.extend_from_slice(&word.to_le_bytes());
+    }
+    std::fs::write(directory.join("vert.spv"), &module).expect("writing the module");
+
+    /* A fragment shader that puts out a colour whatever it is handed, built
+     * here rather than committed as a binary. */
+    std::fs::write(
+        directory.join("frag.frag"),
+        "#version 450\nlayout(location = 0) out vec4 colour;\n\
+         void main() { colour = vec4(1.0, 0.0, 0.0, 1.0); }\n",
+    )
+    .expect("writing the fragment shader");
+    let fragment = Command::new("glslangValidator")
+        .args(["-V", "-o"])
+        .arg(directory.join("frag.spv"))
+        .arg(directory.join("frag.frag"))
+        .output();
+    match fragment {
+        Ok(done) if done.status.success() => {}
+        _ => return,
+    }
+
+    let program = directory.join("render");
+    let built = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-O1", "-o"])
+        .arg(&program)
+        .arg(directory.join("render.c"))
+        .args(["-lvulkan", "-lm"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the harness did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let ran = Command::new(&program)
+        .current_dir(&directory)
+        .output()
+        .expect("running the harness");
+    let said = String::from_utf8_lossy(&ran.stdout);
+    let lit = said
+        .lines()
+        .find(|line| line.starts_with("lit pixels:"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .and_then(|number| number.parse::<u32>().ok())
+        .unwrap_or(0);
+    assert!(
+        lit > 0,
+        "the translated shader drew nothing, and a hand-written one draws:\n{said}"
+    );
+}
