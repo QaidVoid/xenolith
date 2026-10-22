@@ -71,13 +71,13 @@ const VECTOR_SEED_OFFSET: u32 = 128;
 /// product, and each wants that product both ways round so that the adding and
 /// the subtracting forms both cancel. The count also keeps the bytes each run
 /// reports a multiple of sixteen, which the vector stores rely on.
-const WATCHED_FLOAT_COUNT: usize = 10;
+const WATCHED_FLOAT_COUNT: usize = 12;
 
 /// The floating point registers under test, destination first.
 ///
 /// All of them are ones a called function is free to use without saving, so
 /// the harness need not preserve them around the call.
-const WATCHED_FLOATS: [u32; WATCHED_FLOAT_COUNT] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+const WATCHED_FLOATS: [u32; WATCHED_FLOAT_COUNT] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 /// The destination every float subject writes.
 const FLOAT_DESTINATION: u32 = 0;
@@ -101,6 +101,16 @@ const SINGLE_THIRD: u32 = 6;
 /// their third operand cancel the same way the ones that subtract it do.
 const FLOAT_NEGATED: u32 = 7;
 const SINGLE_NEGATED: u32 = 8;
+
+/// A pair at single precision whose product needs more bits than the register
+/// has, and a third operand.
+///
+/// The seeds above are values a single precision form holds exactly, so
+/// rounding the product before adding and fusing it and rounding once agree on
+/// them by construction. These do not: the two ways of computing differ in the
+/// last bit, which is the whole question a fused form exists to answer.
+const SINGLE_WIDE_FIRST: u32 = 10;
+const SINGLE_WIDE_SECOND: u32 = 11;
 
 /// Where the floating point seeds sit in the scratch page.
 ///
@@ -396,6 +406,14 @@ fn float_seed() -> [u64; WATCHED_FLOAT_COUNT] {
         0xbff6_e147_a000_0000,
         // A spare ordinary value, negative and not a power of two.
         0xbfe5_5555_5555_5555,
+        // A pair at single precision whose product needs more bits than a
+        // single precision register has, and a third operand to add to it.
+        // With these, rounding the product before adding and fusing it and
+        // rounding once give different answers, which none of the seeds above
+        // can show: theirs are values a single precision form holds exactly, so
+        // the two ways of computing agree on them by construction.
+        0x3fd7_32c7_0000_0000,
+        0x3c69_34d4_0000_0000,
     ]
 }
 
@@ -1017,6 +1035,16 @@ fn float_subjects() -> Vec<(u32, &'static str)> {
         (floating(sa, sc, sb, 59, 28), "fmsubs"),
         (floating(sa, sc, sb, 59, 31), "fnmadds"),
         (floating(sa, sc, sb, 59, 30), "fnmsubs"),
+        // The same four forms over a pair whose product does not fit in the
+        // register, so rounding it first and fusing it are different answers.
+        (
+            floating(SINGLE_WIDE_FIRST, sa, SINGLE_WIDE_SECOND, 59, 29),
+            "fmadds with a product that does not fit",
+        ),
+        (
+            floating(SINGLE_WIDE_FIRST, sa, SINGLE_WIDE_SECOND, 59, 28),
+            "fmsubs with a product that does not fit",
+        ),
         // Moving and changing a sign, which touch the bits and not the value.
         (floating_one(a, 72), "fmr"),
         (floating_one(a, 40), "fneg"),
