@@ -30,7 +30,14 @@ const sections = [
   {
     label: 'How it is checked',
     address: '0x20',
-    items: [{ text: 'Differential testing', link: '/verification/' }],
+    items: [
+      { text: 'Differential testing', link: '/verification/' },
+      { text: 'The container', link: '/verification/container' },
+      { text: 'The decoder', link: '/verification/decoder' },
+      { text: 'Finding functions', link: '/verification/functions' },
+      { text: 'The model', link: '/verification/model' },
+      { text: 'The runtime', link: '/verification/runtime' },
+    ],
   },
   {
     label: 'Reference',
