@@ -54,6 +54,18 @@ ignored rather than run. It reads the corpus where it already is and does not
 copy it, and it reads the key from the file the documentation names without
 printing it.
 
+`scripts/check` runs one of them too, and only one. The differential against
+hardware is the oracle that can see a wrong result rather than a wrong shape, so
+a machine that has the cross toolchain and the emulator runs it in the ordinary
+gate as well, and says so when it does not have them. The point is not to require
+them. It is that installing them and then never running them leaves the strongest
+check dark in the gate that decides whether a change lands, which is a state
+nobody would notice from the gate's output.
+
+That was checked by breaking the model: writing a fused multiply and add as a
+multiply then an add, which rounds twice where the hardware rounds once, fails
+the gate with twenty disagreements. Restoring it passes.
+
 A host C compiler is different, and is required. Most of this suite checks the
 emitted C by compiling it, and a suite that skipped those would be comparing
 strings. A machine without a compiler fails rather than passing quietly.

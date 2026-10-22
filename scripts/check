@@ -22,3 +22,21 @@ run rustdoc env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --qui
 run text scripts/check-text
 run licence scripts/check-licence
 run secrets scripts/check-secrets
+
+# The differential against hardware is ignored unless a cross toolchain is
+# named, which is right for a machine that has none. Where one is installed the
+# skip is the wrong answer, because the only oracle that can see a wrong result
+# would then be dark in the gate that decides whether a change lands.
+#
+# So it runs here when the tools answer, and is left alone when they do not. The
+# point is not to require them. It is that having them and not using them is the
+# case where the gate quietly stops checking the thing it is strongest at.
+if command -v powerpc64-linux-gnu-gcc >/dev/null 2>&1 &&
+   command -v qemu-ppc64 >/dev/null 2>&1; then
+    run differential env XENOLITH_PPC_TOOLCHAIN=powerpc64-linux-gnu- \
+        cargo test --release -p xenolith-lift --test execution -- --include-ignored
+else
+    printf 'check: differential skipped, because this machine has no cross toolchain\n'
+fi
+
+exit 0
