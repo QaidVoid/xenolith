@@ -2365,6 +2365,119 @@ int main(void) {
     }
 }
 
+/// A run with no way to show a frame says so once and carries on.
+///
+/// A machine with no display, or one asked to show nothing, is a limit of the
+/// host and not a fault in the title. A line that only says what is missing
+/// leaves a reader unable to tell whether the program gave up, so the line says
+/// both, and it is said once however many frames the run goes on to make.
+#[test]
+fn a_run_with_no_window_says_so_once_and_carries_on() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    if (xenolith_boot(path, 0) == NULL) { return 2; }
+
+    /* Asked for several times, because the line is about the host and saying it
+     * once per frame would bury it. */
+    for (int frame = 0; frame < 3; frame++) {
+        if (!xenolith_show_the_frame()) {
+            fprintf(stderr, "showing a frame reported failure\n");
+            return 3;
+        }
+    }
+    printf("still running\n");
+    return 0;
+}
+"#;
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("no_frame");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", SHADER_TABLE),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text).expect("writing a file");
+    }
+
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args([
+            "-std=c17",
+            "-O1",
+            "-DXENOLITH_WITH_VULKAN",
+            "-DXENOLITH_WITH_WINDOW",
+            "-DXENOLITH_WITH_X11",
+        ])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lX11", "-lm", "-lpthread"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the no frame test did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .env("XENOLITH_NO_WINDOW", "1")
+        .output()
+        .expect("running the check");
+    assert!(
+        ran.status.success(),
+        "a run with no window went wrong, {}:\n{}",
+        ran.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let complaint = String::from_utf8_lossy(&ran.stderr);
+    let mentions = complaint.matches("no frame will be shown").count();
+    assert_eq!(
+        mentions, 1,
+        "a run with no window said so {mentions} times and should say it once:\n{complaint}"
+    );
+    assert!(
+        complaint.contains("the run carries on"),
+        "the line about the window should say the run carries on:\n{complaint}"
+    );
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        said.contains("still running"),
+        "the run should have carried on past the frames it could not show: {said}"
+    );
+}
+
 /// A full vertex arena refuses the draw rather than wrapping to the front.
 ///
 /// Wrapping would have the draw read what an earlier draw in the same frame

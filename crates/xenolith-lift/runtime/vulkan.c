@@ -38,6 +38,21 @@
 
 #include <vulkan/vulkan.h>
 
+#ifdef XENOLITH_WITH_WINDOW
+/* Says why no frame will be shown, and that the run carries on.
+ *
+ * A machine with no way to show a window is a limit of the host and not a fault
+ * in the title, so the run does not stop for it. Saying only what is missing
+ * leaves a reader unable to tell whether the program gave up, which is why the
+ * second half of the sentence is there. */
+static void say_no_frame_will_be_shown(const char *why) {
+    fprintf(stderr,
+            "xenolith: no frame will be shown, because %s; the run carries on "
+            "with nothing on screen\n",
+            why);
+}
+#endif
+
 #include <poll.h>
 
 #ifdef XENOLITH_WITH_WAYLAND
@@ -3246,8 +3261,7 @@ static int talk_to_the_desktop(void) {
     wl_display_roundtrip(speaking.desktop);
 
     if (speaking.making == NULL || speaking.placing == NULL) {
-        fprintf(stderr, "xenolith: nothing to show a frame in, because the desktop offers no way "
-                        "to make a window\n");
+        say_no_frame_will_be_shown("the desktop offers no way to make a window");
         stop_talking_to_the_desktop();
         return 0;
     }
@@ -3344,8 +3358,7 @@ static int make_a_chain_of_images(void) {
 
     VkSwapchainKHR made = VK_NULL_HANDLE;
     if (vkCreateSwapchainKHR(drawing.device, &making, NULL, &made) != VK_SUCCESS) {
-        fprintf(stderr, "xenolith: nothing to show a frame in, because no chain of images was "
-                        "made\n");
+        say_no_frame_will_be_shown("no chain of images was made to draw into");
         return 0;
     }
     if (was != VK_NULL_HANDLE) {
@@ -3383,7 +3396,7 @@ static int open_a_window(void) {
      * a run nobody is looking at. */
     if (getenv("XENOLITH_NO_WINDOW") != NULL) {
         screen.refused = 1;
-        fprintf(stderr, "xenolith: showing nothing, because this run was asked not to\n");
+        say_no_frame_will_be_shown("this run was asked not to show one");
         return 0;
     }
 
@@ -3407,8 +3420,7 @@ static int open_a_window(void) {
             screen.refused = 1;
             screen.surface = VK_NULL_HANDLE;
             stop_talking_to_the_desktop();
-            fprintf(stderr, "xenolith: nothing to show a frame in, because the window took no "
-                            "drawing\n");
+            say_no_frame_will_be_shown("the window the desktop made took no drawing");
             return 0;
         }
         screen.the_desktops_own_way = 1;
@@ -3426,8 +3438,8 @@ static int open_a_window(void) {
          * refusal that does not say which one sends whoever reads it looking at
          * the drawing instead. */
         fprintf(stderr,
-                "xenolith: nothing to show a frame in, because the display %s did not answer; "
-                "the run carries on drawing, it is only not shown\n",
+                "xenolith: no frame will be shown, because the display %s did not answer; the "
+                "run carries on with nothing on screen\n",
                 asked != NULL && *asked != '\0' ? asked : "named by nothing at all");
         return 0;
     }
@@ -3477,8 +3489,7 @@ static int open_a_window(void) {
         || screen.surface == VK_NULL_HANDLE) {
         screen.refused = 1;
         screen.surface = VK_NULL_HANDLE;
-        fprintf(stderr, "xenolith: nothing to show a frame in, because the window took no "
-                        "drawing\n");
+        say_no_frame_will_be_shown("the window the desktop made took no drawing");
         return 0;
     }
 
@@ -3486,9 +3497,7 @@ static int open_a_window(void) {
 #else
 
     (void)0;
-    fprintf(stderr,
-            "xenolith: nothing to show a frame in, because no way of asking the desktop for one "
-            "was built into this; the run carries on drawing, it is only not shown\n");
+    say_no_frame_will_be_shown("no way of asking the desktop for a window was built into this");
     screen.refused = 1;
     return 0;
 #endif
@@ -3502,7 +3511,7 @@ static int finish_opening_a_window(void) {
     vkGetPhysicalDeviceSurfaceSupportKHR(drawing.adapter, drawing.family, screen.surface, &will);
     if (!will) {
         screen.refused = 1;
-        fprintf(stderr, "xenolith: nothing to show a frame in, because the device will not\n");
+        say_no_frame_will_be_shown("the device will not draw into the window it was given");
         return 0;
     }
 

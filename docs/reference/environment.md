@@ -20,6 +20,21 @@ value.
 Three sources are consulted in order: `--key-file`, this variable, then
 `~/.config/xenolith/xex.key`. See [Key material](/guide/keys).
 
+## What the host cannot do
+
+Two things a run does depend on the machine it runs on, and neither is a fault in
+a title. Both are reported once, in one line naming the host, and the run carries
+on without them.
+
+| variable | what it does |
+|---|---|
+| `XENOLITH_NO_WINDOW` | set to open no window at all, so a run that is being measured shows nothing |
+
+A host with no way to show a frame prints one line beginning `no frame will be
+shown, because`, names what was missing, and says the run carries on. A host
+with no sound device prints one line beginning `no sound will be heard:` and does
+the same. Neither stops the run, and neither is a translation defect.
+
 ## Running the tests for real
 
 No game data is in this repository. The tests that need a real title, a cross
