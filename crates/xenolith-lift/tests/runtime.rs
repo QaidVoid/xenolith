@@ -1978,6 +1978,86 @@ int main(void) {
     }
 }
 
+/// A load packet fills the block it names, not the front of the register file.
+///
+/// A title hands its shaders their constants by writing them where it likes and
+/// then saying to load them into the constant block. The number it names is
+/// counted from the front of that block rather than from the front of the
+/// register file, so a load written without the block's own start puts every
+/// constant eight thousand registers short of where the shader looks for it, and
+/// the shader computes from nought.
+#[test]
+fn a_load_fills_the_block_it_names() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* A value to load, and a ring holding one load packet: opcode 0x2f, four
+     * words after the header. The third word names constant 3 of the constant
+     * block, which is register 0x4003. */
+    uint32_t value_at = 0x01000000u;
+    xenolith_store32(base, value_at, 0x3f800000u);
+
+    uint32_t ring = 0x01100000u;
+    /* Three words after the header, and the field is one less than that. */
+    xenolith_store32(base, ring, (3u << 30) | (2u << 16) | (0x2fu << 8));
+    xenolith_store32(base, ring + 4, value_at);
+    xenolith_store32(base, ring + 8, 3u);          /* constant 3 */
+    xenolith_store32(base, ring + 12, 1u);         /* one word */
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02000000u + 60u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+
+    xenolith_store32(base, 0x7fc80714u, 4u);
+
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, 0x7fc80000u + 0x4003u * 4u) == 0x3f800000u) {
+            /* And nothing was written to the front of the file, which is where
+             * a load written without the block's start would have put it. */
+            if (xenolith_load32(base, 0x7fc80000u + 3u * 4u) != 0u) {
+                fprintf(stderr, "the load landed at the front of the file\n");
+                return 3;
+            }
+            printf("loaded\n");
+            return 0;
+        }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    fprintf(stderr, "constant 3 holds %#x, and the front holds %#x\n",
+            xenolith_load32(base, 0x7fc80000u + 0x4003u * 4u),
+            xenolith_load32(base, 0x7fc80000u + 3u * 4u));
+    return 4;
+}
+"#;
+    if let Err(complaint) = runs("load_block", program) {
+        panic!("a load did not fill the block it names:\n{complaint}");
+    }
+}
+
 /// A report packet writes its value where it was asked to.
 ///
 /// A title reports that the hardware hung and waits for an answer at a fixed

@@ -78,7 +78,7 @@ run() {
     # A test target with no tests in it is not a dark oracle, so only the ones
     # that must run something are held to it.
     case $name in
-        analysis | corpus | execution | title | operands | exports | sanitizers | drawing | arena | input | layout)
+        analysis | corpus | execution | title | operands | exports | sanitizers | drawing | arena | input | layout | load)
             # Summed over the package's targets, since a package may hold an
             # empty target beside the ones that matter.
             passed=$(printf '%s\n' "$out" \
@@ -106,5 +106,6 @@ run drawing cargo test --release -p xenolith-lift --test runtime a_draw_with_rea
 run arena cargo test --release -p xenolith-lift --test runtime a_full_vertex_arena -- --include-ignored
 run input cargo test --release -p xenolith-lift --test runtime a_run_with_no_window -- --include-ignored
 run layout cargo test --release -p xenolith --test cli the_output_page -- --include-ignored
+run load cargo test --release -p xenolith-lift --test runtime a_load_fills -- --include-ignored
 
 printf 'check-oracles: every oracle ran\n'
