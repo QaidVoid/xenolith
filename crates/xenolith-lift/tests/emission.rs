@@ -233,6 +233,47 @@ fn a_tail_call_returns_after_calling() {
     assert!(found, "a tail call should call and then return");
 }
 
+/// A function whose last instruction is a call runs into whatever follows it,
+/// and after the last function of a run that is padding.
+///
+/// A zero word is not an instruction and cannot be called. Emitting a call to
+/// it puts a call to nothing at the end of a function that was otherwise fine,
+/// and the program stops there rather than reporting where the title went.
+/// A real title does this: `0x821f4678` in the one this was found in calls
+/// `0x821f5ad8` and is followed by a zero word.
+#[test]
+fn a_call_running_into_a_zero_word_does_not_call_it() {
+    let words = [
+        // bl to the second function, then a zero word, then that function
+        0x4800_0009,
+        0x0000_0000,
+        0x3860_0001,
+        0x4e80_0020,
+    ];
+    let image = image_of(&words);
+    let program = analyze(&image, &[]);
+    let function = program
+        .functions()
+        .find(|function| function.start == BASE)
+        .expect("the first function should be discovered");
+
+    let lifted = lift(&image, function, &Imports::new()).expect("it should lift");
+
+    assert!(
+        !lifted.code.contains("sub_82000004(ctx, base)"),
+        "the zero word should not be called: {}",
+        lifted.code
+    );
+    assert!(
+        lifted
+            .code
+            .contains("xenolith_dispatch(ctx, base, 0x82000004u, 0x82000000u)"),
+        "the address that holds nothing should be reported from where it was \
+         wanted: {}",
+        lifted.code
+    );
+}
+
 /// A function holding one instruction with no semantics is refused whole. Code
 /// that is right except in one place compiles and runs and is wrong.
 #[test]

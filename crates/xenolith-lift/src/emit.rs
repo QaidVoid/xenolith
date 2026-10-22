@@ -2803,9 +2803,19 @@ fn terminator_code(
 /// entered another function, so that one is called and returned from. Writing
 /// nothing would let the emitted function run off its end, which loses the rest
 /// of the program quietly.
+///
+/// An address holding no instruction is neither of those. A function whose last
+/// instruction is a call runs into whatever follows it, and what follows the
+/// last function of a run is padding: zero words. Calling that address would
+/// put a call to nothing at the end of a function that was otherwise fine, so
+/// it is handed to the dispatcher instead, which says what is there and where
+/// it was wanted from. A title that reaches it has run off the end of a
+/// function, and that is worth reporting rather than passing over.
 fn continue_at(
     out: &mut String,
+    image: &Image,
     address: u32,
+    from: u32,
     starts: &std::collections::BTreeSet<u32>,
     calls: &mut std::collections::BTreeSet<u32>,
 ) {
@@ -2813,8 +2823,28 @@ fn continue_at(
         writeln!(out, "    goto {};", label_of(address)).ok();
         return;
     }
-    calls.insert(address);
-    writeln!(out, "    {}(ctx, base);\n    return;", name_of(address)).ok();
+    if goes_on_at(image, address) {
+        calls.insert(address);
+        writeln!(out, "    {}(ctx, base);\n    return;", name_of(address)).ok();
+        return;
+    }
+    writeln!(
+        out,
+        "    xenolith_dispatch(ctx, base, 0x{address:08x}u, 0x{from:08x}u);\n    return;"
+    )
+    .ok();
+}
+
+/// Whether control can go on at an address at all.
+///
+/// A fall through that leaves the function is a call to another one, and that
+/// is only so where the address holds a word this can lift. A zero word is not
+/// an instruction, and it is what separates one function from the next.
+fn goes_on_at(image: &Image, address: u32) -> bool {
+    let Ok(word) = image.u32(address) else {
+        return false;
+    };
+    is_liftable(Instruction::decode(word), address)
 }
 
 /// Returns the C condition a conditional branch tests.
@@ -3008,7 +3038,7 @@ pub fn lift(image: &Image, function: &Function, imports: &Imports) -> Result<Lif
                     // left to the order the blocks happen to be written in,
                     // which nothing downstream should have to rely on.
                     if instruction.flow(address).falls_through {
-                        continue_at(&mut body, block.end, &starts, &mut calls);
+                        continue_at(&mut body, image, block.end, address, &starts, &mut calls);
                     }
                 }
             }
@@ -3018,7 +3048,8 @@ pub fn lift(image: &Image, function: &Function, imports: &Imports) -> Result<Lif
 
         // A block that runs into the next one says so for the same reason.
         if let Terminator::FallsInto { next } = block.terminator {
-            continue_at(&mut body, next, &starts, &mut calls);
+            let last = block.end.saturating_sub(INSTRUCTION_SIZE);
+            continue_at(&mut body, image, next, last, &starts, &mut calls);
         }
     }
 

@@ -48,6 +48,15 @@ Control leaving the function:
 | indirect branch, no table | a call through the runtime's indirect dispatch |
 | import thunk | a call to the runtime's import entry point |
 
+A call whose fall through leaves the function continues in the function at the
+address that follows. Where that address holds no word this crate can lift, the
+fall through goes to the runtime's indirect dispatch instead, which names the
+address and what the guest memory holds there. The usual case is the last
+function of a run, whose final instruction is a call and which is followed by
+the zero words that pad out to the next boundary. A zero word is not an
+instruction and calling it says nothing about what went wrong. Dispatching to it
+says which address was reached and from where, which is the report worth having.
+
 ## The runtime interface
 
 The emitted code is written against `xenolith.h`, which this project ships and
