@@ -2405,6 +2405,94 @@ int main(void) {
     }
 }
 
+/// An unimplemented import names where it was wanted from.
+///
+/// Which import a title wants says what it was trying to do; where it asked says
+/// which part of the title that was. Without the second, a report of an
+/// unimplemented entry point sends a reader through a title with nothing to
+/// start from, and the title's own address is the only handle there is.
+#[test]
+fn an_unimplemented_import_names_where_it_was_wanted_from() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* An ordinal nothing answers, called from an address of the title's own. */
+    xenolith_context ctx = {0};
+    ctx.lr = 0x82119448u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 476, "VdShutdownEngines");
+
+    fprintf(stderr, "the run carried on past an import nothing answers\n");
+    return 3;
+}
+"#;
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wanted_from");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", SHADER_TABLE),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text).expect("writing a file");
+    }
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-O1"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the wanted-from test did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .output()
+        .expect("running the check");
+    let complaint = String::from_utf8_lossy(&ran.stderr);
+
+    assert!(
+        complaint.contains("VdShutdownEngines"),
+        "the import should be named: {complaint}"
+    );
+    assert!(
+        complaint.contains("0x82119448"),
+        "the address it was wanted from should be named: {complaint}"
+    );
+}
+
 /// A raised exception is reported with what was raised, and the run stops.
 ///
 /// A title reaching this has decided something is wrong and is handing over a

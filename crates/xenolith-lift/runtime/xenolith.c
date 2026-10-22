@@ -2884,8 +2884,16 @@ void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
     }
 
     if (!tracing) {
-        fprintf(stderr, "xenolith: %s ordinal %u (%s) is not implemented\n", library,
-                ordinal, name ? name : "unnamed");
+        /* Where it was called from, because which import a title wants says
+         * what it was trying to do and where it asked says which part of the
+         * title that was. Without the second, a report of an unimplemented
+         * entry point sends a reader looking through a title with nothing to
+         * start from. */
+        fprintf(stderr,
+                "xenolith: %s ordinal %u (%s) is not implemented, and was wanted "
+                "from %#010llx\n",
+                library, ordinal, name ? name : "unnamed",
+                (unsigned long long)ctx->lr);
         exit(3);
     }
 
