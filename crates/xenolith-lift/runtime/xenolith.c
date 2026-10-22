@@ -177,6 +177,16 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
                        uint32_t from) {
     xenolith_function target = xenolith_lookup(address);
     if (target == NULL) {
+        /* What is at the address, before saying it is not a function.
+         *
+         * A call through a table that was never filled names nought, and a call
+         * through one filled with something else names whatever that is. The
+         * two are different faults and look the same from the address alone, so
+         * the words there are said beside it. */
+        fprintf(stderr, "xenolith: %#010x was called from %#010x and is not a lifted "
+                        "function; it holds %08x %08x\n",
+                address, from, xenolith_load32(base, address),
+                xenolith_load32(base, address + 4u));
         wanted_but_not_lifted(address, from, "dispatched to");
         return;
     }
