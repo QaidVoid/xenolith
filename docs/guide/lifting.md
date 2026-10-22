@@ -133,6 +133,38 @@ entry moves the coverage figure by roughly its count.
 `--unlifted` lists every function that was not emitted, with the address and
 mnemonic that stopped it, which is where to look once you want to know why.
 
+## Feeding a run back
+
+A built program that reaches an address nothing was lifted for says where it was
+going. Setting `XENOLITH_TRACE_DISPATCH` makes it report every such address and
+carry on, rather than stopping at the first:
+
+```sh
+XENOLITH_TRACE_DISPATCH=1 ./lifted 2>&1 | grep '^dispatch ' | awk '{print $2}' | sort -u > roots.txt
+xenolith lift default.xex --out ./lifted --roots-from roots.txt
+```
+
+This is worth doing when the trace names an address inside the image. Such an
+address is a function that discovery did not find, and feeding it back is the
+evidence discovery could not have had. A function reached only through a table
+the title writes while it runs leaves nothing to find it by: no prologue, and no
+branch naming it.
+
+It is worth doing only then. A trace also names addresses that are not code at
+all, and those are the more common case once a title is failing: a value the
+title wrote into its own memory and then read back as a function pointer, or an
+address outside the image entirely. Handing one of those to `--roots-from` adds
+nothing, because there is no code there to lift.
+
+```sh
+xenolith disasm default.xex --start 0x82871af0 --length 4
+# error: 0x82871af0 is not in an executable section
+```
+
+An address the image does not hold is a title in a failure state rather than a
+gap in the translation. The question it raises is which step of the title's own
+initialisation did not happen, and no amount of lifting answers it.
+
 ## What it cannot do yet
 
 The runtime that ships with it maps guest memory, loads the image, resolves an
@@ -141,8 +173,12 @@ startup reaches, and reports anything it cannot do. Guest threads are real host
 threads with their own register state and stack.
 
 Both titles run their whole startup, every static constructor, and every kernel
-entry point they ask for. What they do not do is draw. Nothing here talks to
-graphics hardware, and the one video driver call either title makes is answered
-with the address the console keeps its graphics registers at and nothing more.
-That is the work that would turn this into something that plays a game, and it
-has not been started.
+entry point they ask for. What they do not do is play. On the title this has been
+taken furthest with, the renderer opens the host's device, translates the title's
+own shaders, reads the command stream it writes, and issues its draws, and the
+picture that comes out is black. The title stops by dispatching to an address
+outside its own image, which is its own failure state rather than a gap in the
+translation. The other title tried gets less far, and the runtime reports which
+entry point it asked for that nothing answers. Both are recorded in the project's
+research notes rather than here, because each is a finding about one title rather
+than a property of the translator.
