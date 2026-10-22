@@ -274,3 +274,42 @@ proptest! {
         check(&image, words.len());
     }
 }
+
+/// An import thunk nothing branches to is still a function.
+///
+/// A thunk's first two words are placeholders the loader overwrites and the two
+/// after them jump through the count register. Nothing in the image names it: a
+/// title that calls an import too far away to reach writes the address into a
+/// table while it runs. So a scan for branches into one never sees it, and a
+/// tail call to it then calls an address that was never lifted and stops there.
+///
+/// The four words are the evidence, and they are exact. Across a title's whole
+/// image every address its import records name has this shape and nothing else
+/// does, so recognizing the words claims nothing that is not a thunk.
+#[test]
+fn an_import_thunk_nothing_branches_to_is_still_a_function() {
+    let words = [
+        // a function that returns, so the image has an entry
+        0x4e80_0020,
+        // padding, so the thunk is not adjacent to the function above
+        0x6000_0000,
+        0x6000_0000,
+        // the thunk: library 0 kind 1, the same ordinal kind 2, then the jump
+        0x0100_01a4,
+        0x0200_01a4,
+        0x7d69_03a6,
+        0x4e80_0420,
+        // padding after it, and nothing anywhere that branches to it
+        0x6000_0000,
+    ];
+    let image = image_of(&words, Some(BASE));
+    let program = analyze(&image, &[]);
+
+    let thunk = BASE + 12;
+    let found = program.functions().find(|function| function.start == thunk);
+    assert!(
+        found.is_some(),
+        "the thunk at {thunk:#010x} should have been discovered, and {} functions were",
+        program.function_count()
+    );
+}

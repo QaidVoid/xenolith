@@ -502,6 +502,19 @@ fn is_import_thunk(image: &Image, address: u32) -> bool {
 ///
 /// What makes this safe to claim is the target. An unpatched import thunk is
 /// four exact words, and a branch to one is a branch to an import.
+/// Returns the addresses of import thunks and of the branches into them.
+///
+/// A call to an import too far away to reach goes through one of these, and
+/// nothing in the image names it: what names it is a pointer the title writes
+/// while it runs. So neither scanning for a prologue nor reading the image
+/// finds one, and a program reaching one has nowhere to go.
+///
+/// What makes this safe to claim is the shape. An unpatched import thunk is
+/// four exact words, and a branch to one is a branch to an import. A thunk is
+/// found both from a branch that names it and from its own words, because a
+/// title reaches some of them through a pointer that is written while it runs,
+/// and those are the ones a branch scan alone never sees. The words are four
+/// exact encodings, so recognizing them is the same evidence as being named.
 fn scan_for_import_branches(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32> {
     let mut claimed = BTreeSet::new();
     for blocks in walked.values() {
@@ -525,6 +538,10 @@ fn scan_for_import_branches(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -
             let address = at;
             at = at.saturating_add(4);
             if claimed.contains(&address) {
+                continue;
+            }
+            if is_import_thunk(image, address) {
+                found.push(address);
                 continue;
             }
             let Ok(word) = image.u32(address) else {
