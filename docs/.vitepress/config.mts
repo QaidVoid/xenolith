@@ -25,6 +25,7 @@ const sections = [
       { text: 'Emitting C', link: '/internals/lifting' },
       { text: 'Imports', link: '/internals/imports' },
       { text: 'Reading a shader', link: '/internals/shader' },
+      { text: 'The runtime', link: '/internals/runtime' },
     ],
   },
   {
@@ -47,6 +48,7 @@ const sections = [
       { text: 'Environment', link: '/reference/environment' },
       { text: 'Output', link: '/reference/output' },
       { text: 'Diagnostics', link: '/reference/errors' },
+      { text: 'The runtime interface', link: '/reference/interface' },
     ],
   },
 ]

@@ -53,6 +53,22 @@ No file in `src` may exceed 700 lines, and `tests/file_size.rs` fails the build
 where one does. The translator arrived as a single file of nearly four thousand
 lines, and the cap is what stops that happening again.
 
+## Finding one in an image, and naming it
+
+Two functions stand in front of the translation.
+
+`reads_as_shader` looks at a run of words and says whether it begins like a
+shader, returning where the shader starts. Padding reads as a shader just as well
+as the shader after it does, so without this a run would report one starting from
+every word of nothing in front of it, and where it starts is what a title hands
+over. Every shader a title was seen to hand over begins with a stretch to run or
+with room reserved.
+
+`sum_of` is the name a shader is known by. A title hands over words and not a
+name, so the sum of those words is what the runtime looks the translated module
+up with. It is a hash over the bytes, and the same words always give the same
+sum, which is the whole of what is required of it.
+
 ## Decoding never fails
 
 A word encoding nothing this crate recognizes reports an unknown operation

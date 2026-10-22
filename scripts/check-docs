@@ -1,0 +1,50 @@
+#!/bin/sh
+# Fails when an interface this project ships is not named on a page.
+#
+# Two things here are an interface with no compiler checking the documentation:
+# the runtime header the emitted code is written against, and the shader crate's
+# public surface. A function in either that no page names is one a reader cannot
+# find, and the header is the one place a reader would look.
+#
+# What is checked is the header's declarations rather than every function in the
+# runtime. A static helper inside one of the runtime's files is not interface: it
+# is named by whatever calls it, and listing every one on a page would bury the
+# thirty eight that matter.
+set -eu
+
+root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+fail() {
+    printf 'check-docs: %s\n' "$1" >&2
+    exit 1
+}
+
+[ -d docs ] || fail "there is no docs directory to check"
+
+# Everything the pages say, in one stream, so a name is found wherever it is
+# written.
+pages=$(find docs -name '*.md' -not -path 'docs/.vitepress/*' -exec cat {} +)
+
+# Every function the runtime header declares.
+missing=
+for name in $(grep -hoE 'xenolith_[a-z0-9_]+\(' crates/xenolith-lift/runtime/xenolith.h |
+    sed 's/($//; s/(//' | sort -u); do
+    printf '%s\n' "$pages" | grep -q "$name" || missing="$missing $name"
+done
+
+[ -z "$missing" ] || fail "the runtime header declares these and no page names them:$missing"
+
+# Every public item the shader crate exports.
+shader_missing=
+for name in $(grep -rhoE '^pub (fn|struct|enum|const|type) [a-z_0-9]+' \
+    crates/xenolith-shader/src/*.rs | sed 's/^pub [a-z]* //' | sort -u); do
+    printf '%s\n' "$pages" | grep -q "$name" || shader_missing="$shader_missing $name"
+done
+
+[ -z "$shader_missing" ] ||
+    fail "the shader crate exports these and no page names them:$shader_missing"
+
+printf 'check-docs: every name the project ships is on a page\n'
+
+exit 0

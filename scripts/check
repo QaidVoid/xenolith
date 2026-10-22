@@ -23,6 +23,10 @@ run text scripts/check-text
 run licence scripts/check-licence
 run secrets scripts/check-secrets
 
+# Every name the project ships, on a page. A function in the runtime header or
+# the shader crate that no page names is one a reader cannot find.
+run docs scripts/check-docs
+
 # Every count the documentation quotes, against a run of the tool. A number
 # typed into a page is a claim about what the code did when the page was
 # written, and nothing else in the build notices when that stops being true.
