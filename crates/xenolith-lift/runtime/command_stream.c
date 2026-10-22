@@ -120,7 +120,14 @@ static void say_an_opcode_was_not_read(uint32_t opcode, uint32_t at) {
     say_a_report("packet %#04x at %#010x is one this does not read", opcode, at);
 }
 
-/* Says what was read, once, at the end of a run. */
+/* Says what was read so far.
+ *
+ * The packets counted here are words walked, not distinct commands. A title
+ * that rewinds its write pointer has everything from there on read again, and
+ * one that spins on a short run of commands winds this count up without asking
+ * for anything new. So the count says how much walking was done, which is why
+ * it is worth having at the end of a run: a title reading quietly and a title
+ * spinning are the same thing to everything else here. */
 static void say_what_was_read(void) {
     say_a_report("read %lu packets: %lu set registers, %lu drew, %lu passed over, "
                  "%lu not read, %lu buffers, %lu shaders",
@@ -129,8 +136,19 @@ static void say_what_was_read(void) {
                  read_so_far.shaders);
 }
 
-/* Reads one run of commands, which may name others.
+/* Says what was read over the whole run, at the point the run ends.
  *
+ * The same counts the snapshot above reports, said once more so that a run which
+ * ended between two snapshots still leaves a record of what it walked. */
+static void say_what_was_read_in_total(void) {
+    say_a_report("in total, read %lu packets: %lu set registers, %lu drew, %lu "
+                 "passed over, %lu not read, %lu buffers, %lu shaders",
+                 read_so_far.packets, read_so_far.registers, read_so_far.drew,
+                 read_so_far.passed_over, read_so_far.not_read, read_so_far.buffers,
+                 read_so_far.shaders);
+}
+
+/* Reads one run of commands, which may name others.
  * Returns how many words it read, which is every word it was given: a packet
  * that runs past the end is the rest of it not having been written yet, and the
  * walk stops there rather than reading whatever follows. */

@@ -1463,6 +1463,23 @@ static void *drain_the_ring(void *given) {
 
     unsigned long reported_at = 0;
 
+    /* What the run read, said when the run ends.
+     *
+     * The reports below are snapshots taken while the title was still going, so
+     * a run that ends between two of them says nothing at all about what it
+     * read, and a run that ends before the first one says nothing either. That
+     * makes the counts unusable for telling whether a change got a title
+     * further, which is the one thing they would be good for.
+     *
+     * A run that reaches a gap in the translation ends from the thread that
+     * found it, so the total cannot be said where this loop ends. It is said at
+     * exit instead, which runs however the program finishes. */
+    static int counting_the_end;
+    if (!counting_the_end) {
+        counting_the_end = 1;
+        atexit(say_what_was_read_in_total);
+    }
+
     while (graphics.read_back_at != 0) {
         uint32_t written = xenolith_load32(base, XENOLITH_RING_WRITE_POINTER);
         consume_the_ring(base, written);
