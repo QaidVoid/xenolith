@@ -459,14 +459,29 @@ static void current_process_type(xenolith_context *ctx) {
 
 /* Whether the executable holds a privilege.
  *
- * Assumed. What each privilege number means is not recorded anywhere this can
- * read, and a title that is told it holds one it does not would take a path
- * nothing here can service, so the safer answer of the two is that it does not.
- */
+ * The answer is a bit in the system flags word the title's own container
+ * carries, which is passed in by the program that booted it. A privilege number
+ * names a bit, so the question is whether that bit is set.
+ *
+ * Answering no to everything was the first thing tried, and it is wrong on a
+ * real title: one asks whether it may do something, is told no, and shuts
+ * itself down before it draws a frame. The evidence for the answer was in the
+ * container the whole time.
+ *
+ * A number past the width of the word names no bit, and is answered the same
+ * way as a clear one. */
+static uint32_t declared_privileges;
+
+void xenolith_privileges(uint32_t flags) {
+    declared_privileges = flags;
+    if (flags == 0) {
+        say_a_report("the container did not say what the title is allowed to do");
+    }
+}
+
 static void check_executable_privilege(xenolith_context *ctx) {
-    assumed("a title holds no special privilege",
-            "what each privilege means is not recorded in the container");
-    ctx->r[3] = 0;
+    uint32_t which = (uint32_t)ctx->r[3];
+    ctx->r[3] = which < 32u ? (declared_privileges >> which) & 1u : 0u;
 }
 
 /* A lock, on a runtime that has one thread.
@@ -1273,6 +1288,12 @@ static void time_to_fields(xenolith_context *ctx, uint8_t *base) {
  */
 #define XENOLITH_SYSTEM_VERSION 0x200a3200u
 
+/* Which cable a console's video output is going through.
+ *
+ * The values are the console's own numbering, and the title's startup compares
+ * against four of them. Three is the component cable. */
+#define XENOLITH_AV_PACK_COMPONENT 3u
+
 /* What a title told the graphics hardware, kept because it is the only record
  * of it.
  *
@@ -2064,6 +2085,22 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         case 642:
             ctx->r[3] = XENOLITH_SYSTEM_VERSION;
             return 1;
+        case 971:
+            /* Which cable the console's video output is going through. The
+             * title's startup asks, and refuses to start for four of the eight
+             * answers it knows about, so this is a setting rather than a
+             * formality.
+             *
+             * The answer is a component cable. That is a state a real console
+             * can be in, it is the one that goes with the display this runtime
+             * reports elsewhere, and it is one of the four the title accepts.
+             * The console it was recorded from is not here and the container
+             * does not carry what it was plugged into. */
+            assumed("a console with a component video cable",
+                    "what one was plugged into is not a property of the title "
+                    "and is not in the container");
+            ctx->r[3] = XENOLITH_AV_PACK_COMPONENT;
+            return 1;
         case 977:
             report_the_display(base, (uint32_t)ctx->r[3]);
             return 1;
@@ -2346,15 +2383,44 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
          * describes something that never happens and sends a title down a path
          * it has never taken. What is answered instead is a console with
          * nothing turned on, which is a state a real one can be in, and it is
-         * said outright rather than passed off as recovered. */
-        assumed("a console with no settings turned on",
-                "what one was set to is not a property of the title and is not "
-                "in the container");
+         * said outright rather than passed off as recovered.
+         *
+         * Two settings are answered with a value rather than nothing, and both
+         * because a title's own startup says what it needs. One is asked for as
+         * category two, setting two, and bits eight to fifteen of the answer
+         * have to be three; a title that gets anything else shuts itself down.
+         * The other is asked for as category three, setting ten, and needs bit
+         * nine set. Neither number was invented here: each is what the check
+         * after the call compares against, read out of the title's own code.
+         * Every other setting is still answered with nothing, and a title that
+         * needs one will say so by stopping. */
+        uint32_t category = (uint32_t)ctx->r[3];
+        uint32_t setting = (uint32_t)ctx->r[4];
         uint32_t into = (uint32_t)ctx->r[5];
         uint32_t room = (uint32_t)ctx->r[6];
         uint32_t needed_at = (uint32_t)ctx->r[7];
+
+        uint32_t answer = 0;
+        if (category == 2 && setting == 2) {
+            /* Bits eight to fifteen are the ones the title masks off, and
+             * three is the value it accepts. */
+            answer = 0x00000300u;
+            assumed("a console set to show 768 lines",
+                    "the title refuses every other answer and the console it "
+                    "was recorded from is not here");
+        } else if (category == 3 && setting == 10) {
+            answer = 0x00000200u;
+            assumed("a console with the ninth bit of its display setting set",
+                    "the title refuses to start without it and the console it "
+                    "was recorded from is not here");
+        } else {
+            assumed("a console with no other settings turned on",
+                    "what one was set to is not a property of the title and is "
+                    "not in the container");
+        }
+
         if (into != 0 && room >= 4) {
-            xenolith_store32(base, into, 0);
+            xenolith_store32(base, into, answer);
         }
         if (needed_at != 0) {
             xenolith_store32(base, needed_at, 4);

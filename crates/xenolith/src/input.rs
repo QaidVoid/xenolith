@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_lift::{Imported, Imports};
-use xenolith_xex::{Container, Image, ImportKind, PageKind, Section, imports};
+use xenolith_xex::{
+    Container, Image, ImportKind, OptionalHeaderKey, OptionalHeaderValue, PageKind, Section,
+    imports,
+};
 
 use crate::keys;
 
@@ -32,6 +35,14 @@ pub(crate) struct Loaded {
     /// program rather than read again there, which would mean parsing the
     /// container twice.
     pub(crate) built_against: Option<u32>,
+    /// What the container declares the title is allowed to do, or nothing where
+    /// it did not say.
+    ///
+    /// A title asks whether it holds a numbered privilege, and the answer is a
+    /// bit in this word. It is read here for the same reason the kernel build
+    /// is: the boot program is where a title's startup finds it, and reading it
+    /// twice would mean parsing the container twice.
+    pub(crate) privileges: Option<u32>,
 }
 
 /// Where a subcommand reads its image from.
@@ -101,8 +112,10 @@ impl Source {
                 image: Image::new(base, bytes, sections),
                 imports: Ok(Imports::new()),
                 /* A bare image carries no import libraries, so nothing says
-                 * what it was built against. */
+                 * what it was built against, and no header directory, so
+                 * nothing says what it is allowed to do. */
                 built_against: None,
+                privileges: None,
             });
         }
 
@@ -155,10 +168,19 @@ impl Source {
             .find(|library| library.name == "xboxkrnl.exe")
             .map(|library| library.version.0);
 
+        /* What the title is allowed to do, from the system flags word in the
+         * optional header directory. A container that does not carry one says
+         * nothing, which is answered the same way as a word with every bit
+         * clear rather than being filled in from a guess. */
+        let privileges = container
+            .optional_header(OptionalHeaderKey(0x0003_0000))
+            .and_then(OptionalHeaderValue::inline);
+
         Ok(Loaded {
             image,
             imports: thunks,
             built_against,
+            privileges,
         })
     }
 }

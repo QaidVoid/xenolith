@@ -810,6 +810,19 @@ void xenolith_wipe_the_colours_after_a_copy(int wipe, uint32_t to);
  * watches them decides the hardware has stopped. */
 void xenolith_built_against(uint32_t build);
 
+/* Says what a title's own container declares it is allowed to do.
+ *
+ * A title asks whether it holds a numbered privilege, and the answer is a bit
+ * in the system flags word its executable carries. That word is in the
+ * container and nowhere else, so it is passed in rather than guessed at. A
+ * title told it holds nothing takes the path for a build that was not licensed
+ * to do what it does, which on the titles tried so far is to shut itself down
+ * before it draws anything.
+ *
+ * Nought means the container did not say, which is answered the same way as a
+ * word with the bit clear: nothing here invents a privilege. */
+void xenolith_privileges(uint32_t flags);
+
 /* Somewhere to put the vertices a shader goes and gets, and how many words of it
  * there is room for. Returns nothing where there is nothing to draw with. */
 uint32_t *xenolith_room_for_vertices(uint32_t *how_many);

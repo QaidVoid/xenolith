@@ -2170,6 +2170,148 @@ int main(void) {
     );
 }
 
+/// A privilege is answered from the flags the container declares.
+///
+/// A title asks whether it holds a numbered privilege before it does the thing,
+/// and the answer is a bit in the system flags word its own executable carries.
+/// Answering no to everything is not a safe default: the title tried here asks,
+/// is told no, and shuts itself down before it draws anything.
+///
+/// Both halves are checked. A bit the container sets is reported as held, and a
+/// bit it does not is reported as not held, so this cannot pass by answering yes
+/// to everything either.
+#[test]
+fn a_privilege_is_answered_from_the_declared_flags() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+static uint8_t *base_kept;
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    base_kept = xenolith_boot(path, 0);
+    if (base_kept == NULL) { return 2; }
+
+    /* Bits nine and ten set, which is what one title's container declares. */
+    xenolith_privileges(0x600u);
+
+    xenolith_context ctx = {0};
+    for (uint32_t bit = 0; bit < 32; bit++) {
+        ctx.r[3] = bit;
+        xenolith_import(&ctx, base_kept, "xboxkrnl.exe", 404,
+                        "XexCheckExecutablePrivilege");
+        uint64_t wanted = (bit == 9 || bit == 10) ? 1u : 0u;
+        if (ctx.r[3] != wanted) {
+            fprintf(stderr, "privilege %u was answered %llu where %llu was declared\n",
+                    bit, (unsigned long long)ctx.r[3], (unsigned long long)wanted);
+            return 3;
+        }
+    }
+    printf("every bit answered\n");
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("privileges", program) {
+        panic!("a privilege was not answered from the declared flags:\n{complaint}");
+    }
+}
+
+/// The two console settings a title's startup checks are answered with what it
+/// requires, and every other setting is still answered with nothing.
+///
+/// A setting is a property of the console rather than of the title, so the
+/// runtime has to choose an answer. Choosing nothing is not neutral: one title's
+/// startup reads two of them, and refuses to start for any answer but the one it
+/// compares against. Those two numbers were read out of that check.
+#[test]
+fn the_settings_a_startup_checks_are_answered_with_what_it_requires() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+static uint8_t *base_kept;
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static int ask(xenolith_context *ctx, uint32_t category, uint32_t setting,
+               uint32_t *answer) {
+    uint32_t into = 0x1000u;
+    uint32_t needed = 0x2000u;
+    xenolith_store32(base_kept, into, 0xdeadbeefu);
+    ctx->r[3] = category;
+    ctx->r[4] = setting;
+    ctx->r[5] = into;
+    ctx->r[6] = 4;
+    ctx->r[7] = needed;
+    xenolith_import(ctx, base_kept, "xboxkrnl.exe", 16, "ExGetXConfigSetting");
+    if (ctx->r[3] != 0u) {
+        return 0;
+    }
+    *answer = xenolith_load32(base_kept, into);
+    return 1;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    base_kept = xenolith_boot(path, 0);
+    if (base_kept == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    uint32_t answer = 0;
+
+    /* The display setting: bits eight to fifteen have to be three, which is
+     * what the title's own mask reads. */
+    if (!ask(&ctx, 2, 2, &answer)) { return 3; }
+    if (((answer >> 8) & 0xffu) != 3u) {
+        fprintf(stderr, "the display setting answered %#x, and the title wants 3 "
+                        "in bits eight to fifteen\n", answer);
+        return 4;
+    }
+
+    /* The setting whose ninth bit the title requires. */
+    if (!ask(&ctx, 3, 10, &answer)) { return 5; }
+    if (((answer >> 8) & 0x2u) == 0u) {
+        fprintf(stderr, "the ninth bit of the display answer is clear: %#x\n", answer);
+        return 6;
+    }
+
+    /* And anything else is still nothing, rather than the answer above. */
+    if (!ask(&ctx, 9, 9, &answer)) { return 7; }
+    if (answer != 0u) {
+        fprintf(stderr, "an unasked setting was answered %#x\n", answer);
+        return 8;
+    }
+
+    printf("settings answered\n");
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("settings", program) {
+        panic!("the settings a startup checks were not answered:\n{complaint}");
+    }
+}
+
 /// A run with no sound device says so once and carries on.
 ///
 /// A title hands over a frame and expects to be told it was taken, because that

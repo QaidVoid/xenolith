@@ -249,6 +249,11 @@ int main(int count, char **arguments) {
      * and nought says it did not. */
     xenolith_built_against(BUILT_AGAINST);
 
+    /* What the title is allowed to do, from the system flags word its container
+     * carries. A title asks whether it holds a numbered privilege before it
+     * does the thing, and one told it holds none shuts itself down. */
+    xenolith_privileges(PRIVILEGES);
+
     xenolith_function entered = xenolith_lookup(address);
     if (entered == 0) {
         fprintf(stderr, "xenolith: %#010x is not a lifted function\n", address);
@@ -275,7 +280,12 @@ int main(int count, char **arguments) {
 "#;
 
 /// Returns that program with the addresses this title uses.
-fn main_program(base: u32, entry: Option<u32>, built_against: u32) -> String {
+fn main_program(
+    base: u32,
+    entry: Option<u32>,
+    built_against: u32,
+    privileges: Option<u32>,
+) -> String {
     BOOT_PROGRAM
         .replace(
             "ENTRY_POINT",
@@ -283,6 +293,10 @@ fn main_program(base: u32, entry: Option<u32>, built_against: u32) -> String {
         )
         .replace("LOAD_ADDRESS", &format!("{base:#010x}u"))
         .replace("BUILT_AGAINST", &format!("{built_against:#010x}u"))
+        .replace(
+            "PRIVILEGES",
+            &privileges.map_or_else(|| "0".to_owned(), |flags| format!("{flags:#010x}u")),
+        )
 }
 
 /// Writes everything the build needs besides the units themselves.
@@ -296,6 +310,7 @@ fn write_support(
     referenced: &BTreeSet<u32>,
     emitted: &BTreeSet<u32>,
     built_against: u32,
+    privileges: Option<u32>,
 ) -> Result<()> {
     // Everything the emitted code names but did not get a body becomes a trap,
     // so the program links and says where it went rather than walking past the
@@ -341,7 +356,12 @@ fn write_support(
     write_into(
         out,
         "main.c",
-        &main_program(image.base_address(), image.entry_point(), built_against),
+        &main_program(
+            image.base_address(),
+            image.entry_point(),
+            built_against,
+            privileges,
+        ),
     )?;
 
     Ok(())
@@ -617,6 +637,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         &referenced,
         &emitted,
         built_against.unwrap_or(0),
+        loaded.privileges,
     )?;
     write_the_shader_library(&args.out);
     write_into(&args.out, "Makefile", BUILD_FILE)?;
