@@ -27,14 +27,13 @@ Measured against two retail titles, with
 | emitted C compiles | yes, all of it | yes, all of it |
 | helper entries emitted beside them | 57 | 47 |
 | runs its whole startup | reaches the renderer | no |
-| draws anything | issues hundreds of draws | no |
+| draws anything | issues draws with its own shaders | no |
 
 Both titles lift completely and both compile. What differs is how far they get
-when run, and the reason is the title rather than the translation: each stops in
-a failure state of its own, one by calling through a corrupted object and the
-other by asking for a kernel entry point nothing answers. Whether a frame is
-visible is not measured by anything here; what is measured is that the draws are
-issued with the title's own shaders.
+when run, and the reason is the title rather than the translation: each stops on
+a kernel entry point nothing answers. Whether a frame is visible is not measured
+by anything here; what is measured is that the draws are issued with the title's
+own shaders.
 
 ## Building and running
 

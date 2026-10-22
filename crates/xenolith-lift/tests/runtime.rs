@@ -575,6 +575,99 @@ int main(void) {
     }
 }
 
+/// An allocation that would end past the arena is refused rather than granted.
+///
+/// The bound used to be checked as `rounded > END - at`. Where `at` is already
+/// past the end, that subtraction wraps to something enormous and the test
+/// passes, so the caller is handed an address outside everything the runtime
+/// manages. One title asks for nearly four gigabytes, is granted an address past
+/// the end, and the fill it writes there reaches the image's own data section
+/// and overwrites a live object. The program then calls through a vtable slot
+/// holding the fill's own byte, and stops on an address that is not code.
+///
+/// Three asks are made, and each has to come back as no memory. A single grain
+/// that does not fit at the top, an ask that is one grain too many, and an ask
+/// larger than the whole arena.
+#[test]
+fn an_allocation_past_the_arena_is_refused() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Asks for `size` bytes at `alignment` and says whether it was granted. */
+static int ask_aligned(xenolith_context *ctx, uint8_t *base, uint32_t size,
+                       uint32_t alignment, uint32_t *got) {
+    xenolith_store32(base, 0x100, 0);
+    xenolith_store32(base, 0x104, size);
+    ctx->r[3] = 0x100;
+    ctx->r[4] = 0x104;
+    ctx->r[8] = alignment;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
+    if (ctx->r[3] != 0u) {
+        return 0;
+    }
+    *got = xenolith_load32(base, 0x100);
+    return 1;
+}
+
+static int ask(xenolith_context *ctx, uint8_t *base, uint32_t size, uint32_t *got) {
+    return ask_aligned(ctx, base, size, 0x10000u, got);
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    uint32_t got = 0;
+
+    /* An alignment the title chooses, and one a title can choose wrongly.
+     *
+     * Rounding the next grain up to it wraps, so the address the allocator
+     * computes is above the arena's end. The old bound was
+     * `rounded > END - at`, and with `at` above the end that subtraction wraps
+     * to something enormous, so the test passed and the address was handed out.
+     * One title asks for nearly four gigabytes with an alignment like this, is
+     * granted an address past everything, and the fill it writes there reaches
+     * the image's own data section and overwrites a live object. */
+    if (ask_aligned(&ctx, base, 0x10000u, 0x80000000u, &got)) {
+        fprintf(stderr, "an ask aligned past the end was granted at %#x\n", got);
+        return 3;
+    }
+
+    /* And after that refusal the arena still works, because a refusal must not
+     * leave the bookkeeping somewhere unusable. */
+    if (!ask(&ctx, base, 0x10000u, &got)) {
+        fprintf(stderr, "a grain was refused after a refusal\n");
+        return 4;
+    }
+    if (got == 0u || got >= 0x82000000u) {
+        fprintf(stderr, "a grain was granted at %#x, which is outside the arena\n", got);
+        return 5;
+    }
+    printf("refused past the end\n");
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("past_the_arena", program) {
+        panic!("an allocation past the arena was granted:\n{complaint}");
+    }
+}
+
 /// A wait given a length of time comes back when that length has passed.
 ///
 /// A title hands over a count of hundreds of nanoseconds, negative for a stretch

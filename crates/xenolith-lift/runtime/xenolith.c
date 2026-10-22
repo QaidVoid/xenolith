@@ -328,7 +328,22 @@ static uint32_t take_guest_memory(uint32_t size, uint32_t alignment) {
 
     pthread_mutex_lock(&handing_out);
     uint32_t at = (handed_out + alignment - 1) & ~(alignment - 1);
-    if (at < handed_out || rounded > XENOLITH_HEAP_END - at) {
+
+    /* Where the next grain would start, and whether it fits.
+     *
+     * The fit is checked against the end rather than as a subtraction from it.
+     * Written as `rounded > XENOLITH_HEAP_END - at`, an `at` above the end
+     * makes the subtraction wrap to something enormous and the test passes,
+     * which hands out an address past the arena and past everything the runtime
+     * manages. That is not hypothetical: one title asks for nearly four
+     * gigabytes, gets an address past the end, and the fill it then writes
+     * reaches the image's own data section and overwrites a live object.
+     *
+     * Two ways of arriving above the end are both refused. `at` can be above it
+     * already, which a wrapped `handed_out + alignment - 1` produces, and
+     * `at + rounded` can be, which an ask larger than what is left produces. */
+    if (at < handed_out || at > XENOLITH_HEAP_END ||
+        rounded > XENOLITH_HEAP_END - at) {
         pthread_mutex_unlock(&handing_out);
         return 0;
     }
