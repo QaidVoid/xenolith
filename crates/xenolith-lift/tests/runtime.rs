@@ -2405,6 +2405,108 @@ int main(void) {
     }
 }
 
+/// A raised exception is reported with what was raised, and the run stops.
+///
+/// A title reaching this has decided something is wrong and is handing over a
+/// record saying what. Nothing here can unwind a title's stack the way the
+/// console's dispatcher would, so the exception is not delivered. Pretending it
+/// was would leave the title running code written for a state it is not in,
+/// which is worse than stopping. What is done instead is reporting the code and
+/// the address, because that is the only thing that says why the title gave up.
+#[test]
+fn a_raised_exception_is_reported_and_the_run_stops() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* A record of three words: the code a C++ throw uses, the flags, and the
+     * address. */
+    xenolith_store32(base, 0x200, 0xe06d7363u);
+    xenolith_store32(base, 0x204, 1);
+    xenolith_store32(base, 0x208, 0x82123456u);
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.lr = 0x82392c98u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 310, "RtlRaiseException");
+
+    /* Reaching here means the exception was swallowed rather than reported. */
+    fprintf(stderr, "the run carried on past a raised exception\n");
+    return 3;
+}
+"#;
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("raised");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", SHADER_TABLE),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text).expect("writing a file");
+    }
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-O1"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the raised exception test did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .output()
+        .expect("running the check");
+    let complaint = String::from_utf8_lossy(&ran.stderr);
+
+    assert!(
+        complaint.contains("raised an exception 0xe06d7363"),
+        "the code that was raised should be named: {complaint}"
+    );
+    assert!(
+        complaint.contains("0x82123456"),
+        "the address in the record should be named: {complaint}"
+    );
+    assert_eq!(
+        ran.status.code(),
+        Some(3),
+        "a raised exception should stop the run: {complaint}"
+    );
+}
+
 /// A run with no sound device says so once and carries on.
 ///
 /// A title hands over a frame and expects to be told it was taken, because that

@@ -2810,6 +2810,29 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         pthread_mutex_unlock(lock);
         return 1;
     }
+    case 310: {
+        /* Raising a structured exception.
+         *
+         * A title reaching this has decided something is wrong and is handing
+         * over a record saying what. The record's first word is the code, and
+         * the two after it are the flags and the address. Nothing here can
+         * unwind a title's stack the way the console's dispatcher would, so the
+         * exception is not delivered: what is done instead is reporting what was
+         * raised, which is the only thing that says why the title gave up.
+         *
+         * A title that raises one is not in a state to carry on from, so this
+         * does not pretend the exception was handled. It says what happened and
+         * stops, which is what a fault means. */
+        uint32_t record = (uint32_t)ctx->r[3];
+        uint32_t code = record != 0 ? xenolith_load32(base, record) : 0;
+        uint32_t flags = record != 0 ? xenolith_load32(base, record + 4) : 0;
+        uint32_t at = record != 0 ? xenolith_load32(base, record + 8) : 0;
+        fprintf(stderr,
+                "xenolith: the title raised an exception %#010x with flags %#x at "
+                "%#010x, from %#010x\n",
+                code, flags, at, (uint32_t)ctx->lr);
+        exit(3);
+    }
     case 302:
         initialize_critical_section(ctx, base);
         return 1;
