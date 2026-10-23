@@ -599,6 +599,12 @@ static inline void xenolith_condition_unpack(xenolith_condition *cr, uint32_t pa
  */
 void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address);
 
+/* A title asking for a debugger, with the number saying why.
+ *
+ * A console with no debugger attached carries on past one, and so does this,
+ * after saying where it was asked for the first time each place asks. */
+void xenolith_break(xenolith_context *ctx, uint8_t *base, uint32_t address, uint32_t why);
+
 /* Where a target unknown when the code was emitted becomes a function.
  *
  * This is the single place an address is resolved at run time, so that a branch

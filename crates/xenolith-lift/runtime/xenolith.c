@@ -69,6 +69,7 @@ static void remember_where_the_image_was(const char *image);
 
 static void say_what_was_read_in_total(void);
 static void say_what_was_read_and_stop(int which);
+static void say_a_report(const char *format, ...);
 
 /* Ends a run the runtime has decided cannot go on, with the code that says why.
  *
@@ -157,6 +158,32 @@ static void wanted_but_not_lifted(uint32_t address, uint32_t from, const char *w
     fprintf(stderr, "xenolith: %s %#010x from %#010x, which is not a lifted function\n",
             what, address, from);
     stop_the_run(2);
+}
+
+/* A title asking for a debugger. There is none, so the run carries on, as a
+ * console's does; each place that asks is said once, because what a title
+ * printed just before asking is usually why. */
+void xenolith_break(xenolith_context *ctx, uint8_t *base, uint32_t address, uint32_t why) {
+    static uint32_t said[64];
+    static unsigned count;
+    static pthread_mutex_t saying = PTHREAD_MUTEX_INITIALIZER;
+
+    (void)ctx;
+    (void)base;
+    pthread_mutex_lock(&saying);
+    for (unsigned at = 0; at < count; at++) {
+        if (said[at] == address) {
+            pthread_mutex_unlock(&saying);
+            return;
+        }
+    }
+    if (count < sizeof said / sizeof *said) {
+        said[count++] = address;
+    }
+    pthread_mutex_unlock(&saying);
+    say_a_report("the title asked for a debugger at %#010x for reason %u, and with none "
+                 "there it carries on",
+                 address, why);
 }
 
 /* A trap leaves the function it was in, and there is nowhere for it to go. */

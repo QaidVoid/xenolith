@@ -501,6 +501,31 @@ fn a_reservation_retry_lifts() {
     assert_eq!(compiles("reservation", &emitted), Ok(()));
 }
 
+/// A trap that always fires against register nought asks for a debugger, and
+/// the run carries on past it; one against a register still traps.
+///
+/// A title prints a warning and then asks for a debugger with the number
+/// twenty two, and a console with none attached goes on. Stopping there ended
+/// one title's run a quarter of a second in, on a warning it would have printed
+/// and passed.
+#[test]
+fn a_request_for_a_debugger_carries_on() {
+    // twi 31, r0, 22 ; twi 31, r3, 0 ; blr
+    let words = [0x0fe0_0016, 0x0fe3_0000, 0x4e80_0020];
+
+    let emitted = lift_entry(&words).expect("traps should lift");
+
+    assert!(
+        emitted.contains("xenolith_break(ctx, base, 0x82000000u, 22u);"),
+        "the request for a debugger was not passed on: {emitted}"
+    );
+    assert!(
+        emitted.contains("xenolith_trap(ctx, base, 0x82000004u);"),
+        "a trap against a register no longer traps: {emitted}"
+    );
+    assert_eq!(compiles("debugger", &emitted), Ok(()));
+}
+
 /// A recorded result is compared in its low word.
 ///
 /// The console runs a title in the processor's thirty two bit mode, where a

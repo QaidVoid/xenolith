@@ -2182,6 +2182,17 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             if tests.is_empty() {
                 // Nothing it names can hold, so it never fires and there is
                 // nothing to write.
+            } else if rt & 0b1_1111 == 0b1_1111 && immediate && ra == 0 {
+                // One that always fires, against register nought and a number,
+                // is how a title asks for a debugger: the number says why. A
+                // console with none attached carries on past it, so the
+                // environment is told and the function goes on.
+                writeln!(
+                    out,
+                    "    xenolith_break(ctx, base, 0x{address:08x}u, {}u);",
+                    displacement & 0xffff
+                )
+                .ok()?;
             } else if rt & 0b1_1111 == 0b1_1111 {
                 writeln!(out, "    xenolith_trap(ctx, base, 0x{address:08x}u);").ok()?;
             } else {

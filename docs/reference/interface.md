@@ -253,6 +253,13 @@ A trap leaves the function it was in, so what happens next is not something
 emitted code can express. The environment decides. Implemented there, not
 here.
 
+## `xenolith_break`
+
+A title asking for a debugger, with the number saying why. A trap that always
+fires, against register nought and a number, is how a title spells that, and a
+console with no debugger attached carries on past it. So does this, after saying
+where it was asked for the first time each place asks.
+
 ## `xenolith_dispatch`
 
 Where a target unknown when the code was emitted becomes a function.
