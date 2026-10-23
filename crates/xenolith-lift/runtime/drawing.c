@@ -247,6 +247,21 @@ static void said_nothing_of_a_picture(uint32_t format) {
 
 #define XENOLITH_ALREADY_DIVIDED 0x100u
 
+/* How many samples a place keeps for each of its pixels, in the two bits above
+ * its row width: one, two or four. */
+#define XENOLITH_SAMPLES_SHIFT 16u
+
+/* How many times wider and taller a place's samples are than its pixels.
+ *
+ * The hardware keeps a place drawn with four samples a pixel as a grid twice as
+ * wide and twice as tall, and one with two samples as a grid twice as tall. A
+ * title reads that grid back as a picture of its own size: one draws at 640 by
+ * 360 with four samples and copies the result out as 1280 by 720. Drawn here at
+ * the size the title names, the whole frame lands in a quarter of what is
+ * copied, so everything is drawn onto the grid instead. */
+static uint32_t samples_across = 1;
+static uint32_t samples_down = 1;
+
 /* Where a title says which parts of a colour reach the surface. */
 #define XENOLITH_WHAT_IS_WRITTEN 0x2104u
 
@@ -330,6 +345,11 @@ static void say_how_a_position_moves(const uint8_t *base) {
     moved_how = how;
     drawn_in_mode = xenolith_load32(base, XENOLITH_REGISTERS + 0x2208u * 4u) & 7u;
     drawn_laid_out = xenolith_load32(base, XENOLITH_REGISTERS + 0x2000u * 4u);
+    {
+        uint32_t samples = (drawn_laid_out >> XENOLITH_SAMPLES_SHIFT) & 3u;
+        samples_across = samples == 2u ? 2u : 1u;
+        samples_down = samples != 0u ? 2u : 1u;
+    }
     drawn_onto = xenolith_load32(base, XENOLITH_REGISTERS + 0x2001u * 4u);
     drawn_depth_onto = xenolith_load32(base, XENOLITH_REGISTERS + 0x2002u * 4u);
     drawn_offset_by = xenolith_load32(base, XENOLITH_REGISTERS + 0x2080u * 4u);
@@ -384,6 +404,10 @@ static void say_how_a_position_moves(const uint8_t *base) {
                 base, XENOLITH_REGISTERS + (XENOLITH_VIEWPORT_SCALE_X + at * 2u + 1u) * 4u);
             memcpy(&offset[at], &held, sizeof offset[at]);
         }
+        scale[0] *= (float)samples_across;
+        offset[0] *= (float)samples_across;
+        scale[1] *= (float)samples_down;
+        offset[1] *= (float)samples_down;
         memcpy(moved_scale, scale, sizeof moved_scale);
         memcpy(moved_offset, offset, sizeof moved_offset);
         xenolith_look_at(scale, offset);
@@ -391,9 +415,23 @@ static void say_how_a_position_moves(const uint8_t *base) {
         return;
     }
 
-    /* Everything below leaves a position where the shader put it, so what is
-     * drawn into is looked at whole. */
-    xenolith_look_at(NULL, NULL);
+    /* Everything below leaves a position where the shader put it, and with the
+     * hardware told to do nothing to it, where the shader put it is a pixel:
+     * the parts the hardware would have applied are what turn a position
+     * between one and minus one into one. So what is looked at maps a position
+     * straight onto the pixel of that number. The console puts a pixel's middle
+     * on the whole number, where a host puts it half way between two, so half a
+     * pixel is added; and the samples grid is what is drawn onto.
+     *
+     * Read as between one and minus one instead, a rectangle a title draws over
+     * the whole of a place in pixels lands almost entirely off the edge, and
+     * the corner that is left is all that is drawn. */
+    {
+        const float onto_pixels[4] = {(float)samples_across, (float)samples_down, 1.0f, 1.0f};
+        const float half_a_pixel[4] = {0.5f * (float)samples_across,
+                                       0.5f * (float)samples_down, 0.0f, 0.0f};
+        xenolith_look_at(onto_pixels, half_a_pixel);
+    }
 
     if ((how & XENOLITH_ALREADY_DIVIDED) != 0) {
         /* The shader has divided its position through already, so what it put
@@ -1518,13 +1556,14 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
                 kept_top = (from >> 16) & XENOLITH_WINDOW_EDGE;
                 kept_right = to & XENOLITH_WINDOW_EDGE;
                 kept_bottom = (to >> 16) & XENOLITH_WINDOW_EDGE;
-                xenolith_clip_to(kept_left, kept_top, kept_right, kept_bottom);
             }
 
             /* What a shader reads from outside, taken from where a title
              * put it. Handed over before each draw because a title writes
              * these between draws as readily as before them. */
             say_how_a_position_moves(base);
+            xenolith_clip_to(kept_left * samples_across, kept_top * samples_down,
+                             kept_right * samples_across, kept_bottom * samples_down);
             xenolith_hand_over_constants(
                 base + XENOLITH_REGISTERS + XENOLITH_CONSTANT_REGISTER * 4,
                 base + XENOLITH_REGISTERS + XENOLITH_TRUTH_REGISTER * 4,
