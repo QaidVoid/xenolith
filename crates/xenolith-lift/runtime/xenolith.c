@@ -31,6 +31,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -739,6 +740,12 @@ struct object {
     FILE *file;
     char *directory;
     uint32_t gone_past;
+    /* What a list a title reads a few items at a time holds, every item the
+     * same size. How far the reading has gone is `gone_past`, as it is for a
+     * directory. */
+    uint8_t *items;
+    uint32_t item_count;
+    uint32_t item_size;
     /* How far into a file reading or writing is up to, which a title sets
      * before each read rather than relying on the host's own position. */
     long long at;
@@ -2361,12 +2368,58 @@ static void remember_where_the_image_was(const char *image) {
     title_directory[cut] = '\0';
 }
 
+/* Saved things a title has open.
+ *
+ * A title opens one under a name it chooses and then names the files inside it
+ * with that name in front, the way it puts a device's name in front of its own
+ * files. Each is a directory beside the image, so what a title saved is there
+ * the next time it runs.
+ */
+#define XENOLITH_CONTENT_OPEN 16u
+#define XENOLITH_CONTENT_NAME 32u
+
+static struct {
+    char name[XENOLITH_CONTENT_NAME];
+    char where[4096];
+} content_open[XENOLITH_CONTENT_OPEN];
+static pthread_mutex_t content_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Whether two names are one, compared the way a console compares them, which
+ * is without regard to case. */
+static int same_name(const char *one, const char *other) {
+    for (; *one != '\0' && *other != '\0'; one++, other++) {
+        char a = *one >= 'A' && *one <= 'Z' ? (char)(*one + 32) : *one;
+        char b = *other >= 'A' && *other <= 'Z' ? (char)(*other + 32) : *other;
+        if (a != b) {
+            return 0;
+        }
+    }
+    return *one == *other;
+}
+
+/* Writes where the saved thing open under a name is kept, and says whether one
+ * is open under it. */
+static int where_content_is_open(const char *name, char *out, size_t room) {
+    int found = 0;
+    pthread_mutex_lock(&content_lock);
+    for (uint32_t at = 0; at < XENOLITH_CONTENT_OPEN && !found; at++) {
+        if (content_open[at].name[0] != '\0' && same_name(content_open[at].name, name)
+            && strlen(content_open[at].where) < room) {
+            strcpy(out, content_open[at].where);
+            found = 1;
+        }
+    }
+    pthread_mutex_unlock(&content_lock);
+    return found;
+}
+
 /* Turns what a title calls a file into a path a host can open.
  *
  * The name arrives as a counted run of bytes inside a structure, with the
- * device and the path separated by a colon. The device is dropped: a console
- * keeps its own files and a title's saved ones on different devices, and what
- * that comes to here is one directory rather than two.
+ * device and the path separated by a colon. A device that is the name a saved
+ * thing was opened under stands for where that is kept. Any other is dropped:
+ * a console keeps its own files on more than one device, and what that comes
+ * to here is the one directory the image was loaded from.
  */
 static int host_path_of(uint8_t *base, uint32_t attributes, char *out, size_t room) {
     if (attributes == 0) {
@@ -2390,11 +2443,31 @@ static int host_path_of(uint8_t *base, uint32_t attributes, char *out, size_t ro
         }
     }
 
-    size_t used = strlen(title_directory);
+    char device[XENOLITH_CONTENT_NAME] = "";
+    size_t device_length = 0;
+    for (uint16_t at = 0; from > 0 && at + 1u < from; at++) {
+        char letter = (char)xenolith_load8(base, text + at);
+        if (letter == '\\' || letter == '/') {
+            device_length = 0;
+        } else if (device_length + 1 < sizeof device) {
+            device[device_length++] = letter;
+        }
+        device[device_length] = '\0';
+    }
+
+    size_t used;
+    if (device_length > 0 && where_content_is_open(device, out, room)) {
+        used = strlen(out);
+    } else {
+        used = strlen(title_directory);
+        if (used + 2 >= room) {
+            return 0;
+        }
+        memcpy(out, title_directory, used);
+    }
     if (used + 2 >= room) {
         return 0;
     }
-    memcpy(out, title_directory, used);
 
     char first = from < length ? (char)xenolith_load8(base, text + from) : '/';
     if (first != '/' && first != '\\') {
@@ -2989,21 +3062,289 @@ static uint32_t answer_a_message(uint32_t program, uint32_t message) {
 #define XENOLITH_ERROR_NO_MORE_FILES 18u
 #define XENOLITH_LARGEST_ITEM 0x200u
 
-/* Makes a list with nothing in it, writes the handle it is read through and
- * how much room a reading of `count` items takes, and says how that went. */
-static uint32_t make_an_empty_list(uint8_t *base, uint32_t count, uint32_t room_at,
-                                   uint32_t handle_at) {
+/* Makes a list of `item_count` items of `item_size` bytes each, taking the
+ * items over, writes the handle it is read through and how much room a reading
+ * of `count` items takes, and says how that went. */
+static uint32_t make_a_list(uint8_t *base, uint8_t *items, uint32_t item_count,
+                            uint32_t item_size, uint32_t count, uint32_t room_at,
+                            uint32_t handle_at) {
     uint32_t handle = take_object(OBJECT_ENUMERATOR);
-    if (handle == 0) {
+    struct object *list = object_of(handle);
+    if (list == NULL) {
+        free(items);
         return XENOLITH_ERROR_INVALID_PARAMETER;
     }
+    list->items = items;
+    list->item_count = items != NULL ? item_count : 0;
+    list->item_size = item_size;
     if (room_at != 0) {
-        xenolith_store32(base, room_at, count * XENOLITH_LARGEST_ITEM);
+        xenolith_store32(base, room_at, count * item_size);
     }
     if (handle_at != 0) {
         xenolith_store32(base, handle_at, handle);
     }
     return 0;
+}
+
+/* What a title says about a saved thing: the device, what kind it is, the name
+ * a person sees and the name it is kept under, in one block of this size. The
+ * name it is kept under starts at the offset given and is this long at most. */
+#define XENOLITH_CONTENT_DATA 0x134u
+#define XENOLITH_CONTENT_KIND 4u
+#define XENOLITH_CONTENT_FILE_NAME 0x108u
+#define XENOLITH_CONTENT_FILE_NAME_LENGTH 42u
+
+/* What opening, closing or deleting a saved thing says when it is not there,
+ * when it already is, and when a name is already in use. */
+#define XENOLITH_ERROR_PATH_NOT_FOUND 3u
+#define XENOLITH_ERROR_ALREADY_EXISTS 183u
+
+/* What opening a saved thing says it did: made it, or found it there. */
+#define XENOLITH_CONTENT_MADE 1u
+#define XENOLITH_CONTENT_FOUND 2u
+
+/* What kind of device the one a title saves to is. */
+#define XENOLITH_A_HARD_DRIVE 1u
+
+/* Where saved things are kept, beside the image. */
+static int where_content_is_kept(char *out, size_t room) {
+    int written = snprintf(out, room, "%s/content", title_directory);
+    return written > 0 && (size_t)written < room;
+}
+
+/* Where the saved thing a block describes is kept, and beside it what is said
+ * about it, with `suffix` after the name. A name with anything in it a host
+ * would read as a path is no name. */
+static int where_this_content_is(uint8_t *base, uint32_t data, const char *suffix, char *out,
+                                 size_t room) {
+    char name[XENOLITH_CONTENT_FILE_NAME_LENGTH + 1];
+    size_t length = 0;
+    for (; length < XENOLITH_CONTENT_FILE_NAME_LENGTH; length++) {
+        char letter = (char)xenolith_load8(base, data + XENOLITH_CONTENT_FILE_NAME + length);
+        if (letter == '\0') {
+            break;
+        }
+        if (letter == '/' || letter == '\\' || letter < ' ') {
+            return 0;
+        }
+        name[length] = letter;
+    }
+    name[length] = '\0';
+    if (length == 0 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        return 0;
+    }
+    int written = snprintf(out, room, "%s/content/%s%s", title_directory, name, suffix);
+    return written > 0 && (size_t)written < room;
+}
+
+/* Takes away a directory and everything in it. */
+static void take_away_everything_in(const char *path) {
+    DIR *listing = opendir(path);
+    if (listing != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(listing)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            char inside[4096];
+            int written = snprintf(inside, sizeof inside, "%s/%s", path, entry->d_name);
+            if (written <= 0 || (size_t)written >= sizeof inside) {
+                continue;
+            }
+            struct stat what;
+            if (lstat(inside, &what) == 0 && S_ISDIR(what.st_mode)) {
+                take_away_everything_in(inside);
+            } else {
+                unlink(inside);
+            }
+        }
+        closedir(listing);
+    }
+    rmdir(path);
+}
+
+/* Writes what a title said about a saved thing beside it, so a list of what was
+ * saved can hand it back as it was given. */
+static void keep_what_was_said(uint8_t *base, uint32_t data, const char *about) {
+    FILE *out = fopen(about, "wb");
+    if (out == NULL) {
+        return;
+    }
+    for (uint32_t at = 0; at < XENOLITH_CONTENT_DATA; at++) {
+        fputc(xenolith_load8(base, data + at), out);
+    }
+    fclose(out);
+}
+
+/* Opens a saved thing under the name a title chose, making it first where the
+ * low bits of the flags say to, and says which of the two happened.
+ *
+ * Those bits are the ones a file is opened with: one makes it and refuses one
+ * already there, two makes it afresh either way, three opens one already
+ * there, four opens it or makes it, and five empties one already there. */
+static uint32_t open_content(uint8_t *base, uint32_t root_at, uint32_t data, uint32_t flags,
+                             uint32_t *made) {
+    char root[XENOLITH_CONTENT_NAME];
+    size_t length = 0;
+    for (; root_at != 0 && length + 1 < sizeof root; length++) {
+        root[length] = (char)xenolith_load8(base, root_at + length);
+        if (root[length] == '\0') {
+            break;
+        }
+    }
+    root[length] = '\0';
+
+    char where[4096];
+    char about[4096];
+    if (length == 0 || data == 0 || !where_this_content_is(base, data, "", where, sizeof where)
+        || !where_this_content_is(base, data, ".about", about, sizeof about)) {
+        return XENOLITH_ERROR_INVALID_PARAMETER;
+    }
+    if (xenolith_load32(base, data) != XENOLITH_THE_ONE_DEVICE) {
+        return XENOLITH_ERROR_DEVICE_NOT_CONNECTED;
+    }
+
+    int there = access(where, F_OK) == 0;
+    int afresh = 0;
+    switch (flags & 0xfu) {
+    case 1:
+        if (there) {
+            return XENOLITH_ERROR_ALREADY_EXISTS;
+        }
+        break;
+    case 2:
+        afresh = there;
+        break;
+    case 3:
+        if (!there) {
+            return XENOLITH_ERROR_PATH_NOT_FOUND;
+        }
+        break;
+    case 4:
+        break;
+    case 5:
+        if (!there) {
+            return XENOLITH_ERROR_PATH_NOT_FOUND;
+        }
+        afresh = 1;
+        break;
+    default:
+        return XENOLITH_ERROR_INVALID_PARAMETER;
+    }
+
+    pthread_mutex_lock(&content_lock);
+    uint32_t free_at = XENOLITH_CONTENT_OPEN;
+    for (uint32_t at = 0; at < XENOLITH_CONTENT_OPEN; at++) {
+        if (content_open[at].name[0] == '\0') {
+            if (free_at == XENOLITH_CONTENT_OPEN) {
+                free_at = at;
+            }
+        } else if (same_name(content_open[at].name, root)) {
+            pthread_mutex_unlock(&content_lock);
+            return XENOLITH_ERROR_ALREADY_EXISTS;
+        }
+    }
+    if (free_at == XENOLITH_CONTENT_OPEN) {
+        pthread_mutex_unlock(&content_lock);
+        return XENOLITH_ERROR_INVALID_PARAMETER;
+    }
+
+    if (afresh) {
+        take_away_everything_in(where);
+    }
+    if (!there || afresh) {
+        make_the_way_to(where);
+        mkdir(where, 0777);
+        keep_what_was_said(base, data, about);
+    }
+    strcpy(content_open[free_at].name, root);
+    strcpy(content_open[free_at].where, where);
+    pthread_mutex_unlock(&content_lock);
+
+    *made = !there;
+    return XENOLITH_STATUS_SUCCESS;
+}
+
+/* Closes the saved thing open under a name. */
+static uint32_t close_content(uint8_t *base, uint32_t root_at) {
+    char root[XENOLITH_CONTENT_NAME];
+    size_t length = 0;
+    for (; root_at != 0 && length + 1 < sizeof root; length++) {
+        root[length] = (char)xenolith_load8(base, root_at + length);
+        if (root[length] == '\0') {
+            break;
+        }
+    }
+    root[length] = '\0';
+
+    uint32_t status = XENOLITH_ERROR_PATH_NOT_FOUND;
+    pthread_mutex_lock(&content_lock);
+    for (uint32_t at = 0; at < XENOLITH_CONTENT_OPEN; at++) {
+        if (content_open[at].name[0] != '\0' && same_name(content_open[at].name, root)) {
+            content_open[at].name[0] = '\0';
+            status = XENOLITH_STATUS_SUCCESS;
+        }
+    }
+    pthread_mutex_unlock(&content_lock);
+    return status;
+}
+
+/* A word as the console keeps it, most significant byte first. */
+static uint32_t word_at(const uint8_t *bytes) {
+    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8)
+           | bytes[3];
+}
+
+/* Orders two blocks a title said about saved things by the names they are
+ * kept under. */
+static int by_file_name(const void *one, const void *other) {
+    return memcmp((const uint8_t *)one + XENOLITH_CONTENT_FILE_NAME,
+                  (const uint8_t *)other + XENOLITH_CONTENT_FILE_NAME,
+                  XENOLITH_CONTENT_FILE_NAME_LENGTH);
+}
+
+/* Lists what was saved of one kind, as the blocks a title said about each,
+ * in the order of their names. */
+static uint32_t list_content(uint8_t *base, uint32_t device, uint32_t kind, uint32_t count,
+                             uint32_t room_at, uint32_t handle_at) {
+    char kept[4096];
+    uint8_t *items = NULL;
+    uint32_t found = 0;
+    DIR *listing = where_content_is_kept(kept, sizeof kept) ? opendir(kept) : NULL;
+    if (listing != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(listing)) != NULL) {
+            size_t length = strlen(entry->d_name);
+            if (length <= 6 || strcmp(entry->d_name + length - 6, ".about") != 0) {
+                continue;
+            }
+            char about[4096];
+            uint8_t said[XENOLITH_CONTENT_DATA];
+            int written = snprintf(about, sizeof about, "%s/%s", kept, entry->d_name);
+            FILE *in = written > 0 && (size_t)written < sizeof about ? fopen(about, "rb") : NULL;
+            if (in == NULL) {
+                continue;
+            }
+            size_t read = fread(said, 1, sizeof said, in);
+            fclose(in);
+            if (read != sizeof said || word_at(said + XENOLITH_CONTENT_KIND) != kind
+                || (device != 0 && word_at(said) != device)) {
+                continue;
+            }
+            uint8_t *more = realloc(items, (size_t)(found + 1) * sizeof said);
+            if (more == NULL) {
+                break;
+            }
+            items = more;
+            memcpy(items + (size_t)found * sizeof said, said, sizeof said);
+            found++;
+        }
+        closedir(listing);
+    }
+    if (found > 1) {
+        qsort(items, found, XENOLITH_CONTENT_DATA, by_file_name);
+    }
+    return make_a_list(base, items, found, XENOLITH_CONTENT_DATA, count, room_at, handle_at);
 }
 
 /* How much room one setting takes where profile settings are written. */
@@ -3236,15 +3577,132 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
              * items at the most an item takes. */
             uint32_t room_at = (uint32_t)ctx->r[9];
             uint32_t handle_at = (uint32_t)ctx->r[10];
-            ctx->r[3] = make_an_empty_list(base, (uint32_t)ctx->r[8], room_at, handle_at);
+            ctx->r[3] = make_a_list(base, NULL, 0, XENOLITH_LARGEST_ITEM, (uint32_t)ctx->r[8],
+                                    room_at, handle_at);
             return 1;
         }
         case 604: {
-            /* A list of what has been saved to a device, read the same way.
-             * Nothing has been saved, so it is empty too. */
-            uint32_t room_at = (uint32_t)ctx->r[6];
-            uint32_t handle_at = (uint32_t)ctx->r[7];
-            ctx->r[3] = make_an_empty_list(base, (uint32_t)ctx->r[5], room_at, handle_at);
+            /* A list of what has been saved to a device, of the kind the
+             * third argument names, read the same way. The fifth argument is
+             * how many items a reading takes, and the room for them and the
+             * handle go where the sixth and seventh say. */
+            ctx->r[3] = list_content(base, (uint32_t)ctx->r[4], (uint32_t)ctx->r[5],
+                                     (uint32_t)ctx->r[7], (uint32_t)ctx->r[8],
+                                     (uint32_t)ctx->r[9]);
+            return 1;
+        }
+        case 601: {
+            /* Opening a saved thing under a name, making it first where the
+             * flags say to: the name is the second argument, what the title
+             * says about it the third and the flags the fourth. Whether it was
+             * made or found goes where the fifth says, though only once the
+             * answer is given at once, and the licence where the sixth says,
+             * which for something a title saved is none at all. The ninth
+             * argument is the block to answer through where there is one. */
+            uint32_t made_at = (uint32_t)ctx->r[7];
+            uint32_t licence_at = (uint32_t)ctx->r[8];
+            uint32_t block = (uint32_t)xenolith_load64(base, (uint32_t)ctx->r[1] + XENOLITH_NINTH_SLOT);
+            uint32_t made = 0;
+            uint32_t status = open_content(base, (uint32_t)ctx->r[4], (uint32_t)ctx->r[5],
+                                           (uint32_t)ctx->r[6], &made);
+            if (made_at != 0) {
+                xenolith_store32(base, made_at,
+                                 block != 0 || status != 0 ? 0 : (made ? XENOLITH_CONTENT_MADE
+                                                                       : XENOLITH_CONTENT_FOUND));
+            }
+            if (licence_at != 0 && status == 0) {
+                xenolith_store32(base, licence_at, 0);
+            }
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
+            return 1;
+        }
+        case 602: {
+            /* Closing the saved thing open under the name in the first
+             * argument, through the block in the second where there is one. */
+            uint32_t block = (uint32_t)ctx->r[4];
+            uint32_t status = close_content(base, (uint32_t)ctx->r[3]);
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
+            return 1;
+        }
+        case 603: {
+            /* Deleting the saved thing the second argument describes, and what
+             * was said about it, through the block in the third. */
+            uint32_t data = (uint32_t)ctx->r[4];
+            uint32_t block = (uint32_t)ctx->r[5];
+            char where[4096];
+            char about[4096];
+            char picture[4096];
+            uint32_t status = XENOLITH_ERROR_INVALID_PARAMETER;
+            if (data != 0 && where_this_content_is(base, data, "", where, sizeof where)
+                && where_this_content_is(base, data, ".about", about, sizeof about)
+                && where_this_content_is(base, data, ".picture", picture, sizeof picture)) {
+                status = XENOLITH_ERROR_PATH_NOT_FOUND;
+                if (access(where, F_OK) == 0) {
+                    take_away_everything_in(where);
+                    unlink(about);
+                    unlink(picture);
+                    status = XENOLITH_STATUS_SUCCESS;
+                }
+            }
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
+            return 1;
+        }
+        case 606: {
+            /* What a device is: its number, that it is a hard drive, how big
+             * it is and how much of that is free, which are those of the
+             * host's own disk under the image, and its name. */
+            uint32_t device = (uint32_t)ctx->r[3];
+            uint32_t into = (uint32_t)ctx->r[4];
+            if (device != XENOLITH_THE_ONE_DEVICE) {
+                ctx->r[3] = XENOLITH_ERROR_DEVICE_NOT_CONNECTED;
+                return 1;
+            }
+            if (into != 0) {
+                struct statvfs disk;
+                uint64_t total = 0;
+                uint64_t free_bytes = 0;
+                if (statvfs(title_directory, &disk) == 0) {
+                    total = (uint64_t)disk.f_blocks * disk.f_frsize;
+                    free_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
+                }
+                static const char name[] = "Hard Drive";
+                xenolith_store32(base, into, device);
+                xenolith_store32(base, into + 4, XENOLITH_A_HARD_DRIVE);
+                xenolith_store64(base, into + 8, total);
+                xenolith_store64(base, into + 16, free_bytes);
+                for (uint32_t at = 0; at < 28; at++) {
+                    xenolith_store16(base, into + 24 + at * 2,
+                                     at < sizeof name - 1 ? (uint16_t)name[at] : 0);
+                }
+            }
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        case 608: {
+            /* The picture shown beside a saved thing, kept beside what was
+             * said about it: the first argument describes the thing, the
+             * second and third are the picture and its length, and the fourth
+             * is the block to answer through. */
+            uint32_t data = (uint32_t)ctx->r[3];
+            uint32_t picture = (uint32_t)ctx->r[4];
+            uint32_t length = (uint32_t)ctx->r[5];
+            uint32_t block = (uint32_t)ctx->r[6];
+            char where[4096];
+            char kept[4096];
+            uint32_t status = XENOLITH_ERROR_INVALID_PARAMETER;
+            if (data != 0 && where_this_content_is(base, data, "", where, sizeof where)
+                && where_this_content_is(base, data, ".picture", kept, sizeof kept)) {
+                status = XENOLITH_ERROR_PATH_NOT_FOUND;
+                FILE *out = access(where, F_OK) == 0 ? fopen(kept, "wb") : NULL;
+                if (out != NULL) {
+                    for (uint32_t at = 0; picture != 0 && at < length; at++) {
+                        fputc(xenolith_load8(base, picture + at), out);
+                    }
+                    fclose(out);
+                    status = XENOLITH_STATUS_SUCCESS;
+                }
+            }
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
             return 1;
         }
         case 715: {
@@ -3279,19 +3737,33 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             return 1;
         }
         case 592: {
-            /* Reading the next few items of a list. Every list here is empty,
-             * so the answer is that there are no more, with no items read,
-             * through the block a title hands over where it hands one. */
+            /* Reading the next few items of a list into the third argument,
+             * as many as the room the fourth gives holds, and saying how many
+             * where the fifth says, or in the block in the sixth. A list read
+             * to its end says there are no more. */
             struct object *list = object_of((uint32_t)ctx->r[3]);
+            uint32_t into = (uint32_t)ctx->r[5];
+            uint32_t room = (uint32_t)ctx->r[6];
             uint32_t read_at = (uint32_t)ctx->r[7];
             uint32_t block = (uint32_t)ctx->r[8];
-            uint32_t status = list != NULL && list->kind == OBJECT_ENUMERATOR
-                                  ? XENOLITH_ERROR_NO_MORE_FILES
-                                  : XENOLITH_ERROR_INVALID_PARAMETER;
-            if (read_at != 0) {
-                xenolith_store32(base, read_at, 0);
+            uint32_t status = XENOLITH_ERROR_INVALID_PARAMETER;
+            uint32_t read = 0;
+            if (list != NULL && list->kind == OBJECT_ENUMERATOR) {
+                uint32_t fits = list->item_size != 0 ? room / list->item_size : 0;
+                while (read < fits && list->gone_past < list->item_count && into != 0) {
+                    const uint8_t *item = list->items + (size_t)list->gone_past * list->item_size;
+                    for (uint32_t at = 0; at < list->item_size; at++) {
+                        xenolith_store8(base, into + read * list->item_size + at, item[at]);
+                    }
+                    list->gone_past++;
+                    read++;
+                }
+                status = read != 0 ? XENOLITH_STATUS_SUCCESS : XENOLITH_ERROR_NO_MORE_FILES;
             }
-            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
+            if (read_at != 0) {
+                xenolith_store32(base, read_at, read);
+            }
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, read) : status;
             return 1;
         }
         case 500:

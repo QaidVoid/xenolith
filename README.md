@@ -52,7 +52,8 @@ cd /tmp/lifted && make -j16 && ./lifted
 
 The lift writes C, the runtime it is written against, a `Makefile`, and the
 decoded image beside it. `make` links the units into one program. Run it where
-the image is.
+the image is. A title's files are read from the directory the image is in, and
+what it saves is kept in `content/` there.
 
 A key is needed to decode an encrypted container. It is read from `--key-file`,
 then `XENOLITH_XEX_KEY`, then `~/.config/xenolith/xex.key`. No key and no game
@@ -60,7 +61,7 @@ data is in this repository.
 
 ## What it does not do
 
-- **Play a game.** Title A shows its opening screens and goes no further yet.
+- **Play a game.** Title A reaches its menus and makes its saved data, and goes no further yet.
 - **Reproduce a console's settings.** A privilege, the video cable, two display
   settings, the region, the language and a signed in profile are answered from
   what a title's own startup requires, because what a console was set to is not

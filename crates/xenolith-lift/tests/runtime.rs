@@ -3901,6 +3901,145 @@ int main(void) {
     }
 }
 
+const SAVING_PROGRAM: &str = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void name_a_file(uint8_t *base, uint32_t at, const char *name) {
+    size_t length = strlen(name);
+    xenolith_store32(base, at + 4, at + 0x40);
+    xenolith_store16(base, at + 0x40, (uint16_t)length);
+    xenolith_store32(base, at + 0x44, at + 0x80);
+    for (size_t letter = 0; letter < length; letter++) {
+        base[at + 0x80 + letter] = (uint8_t)name[letter];
+    }
+}
+
+/* Opens the saved thing described at 0x6000 under the name at 0x5000. */
+static uint32_t open_it(xenolith_context *ctx, uint8_t *base, uint32_t flags) {
+    ctx->r[1] = 0x7000;
+    xenolith_store64(base, 0x7050, 0);
+    ctx->r[3] = 0;
+    ctx->r[4] = 0x5000;
+    ctx->r[5] = 0x6000;
+    ctx->r[6] = flags;
+    ctx->r[7] = 0x5100;
+    ctx->r[8] = 0x5104;
+    ctx->r[9] = 0;
+    ctx->r[10] = 0;
+    xenolith_import(ctx, base, "xam.xex", 601, "XamContentCreateEx");
+    return (uint32_t)ctx->r[3];
+}
+
+static uint32_t close_it(xenolith_context *ctx, uint8_t *base) {
+    ctx->r[3] = 0x5000;
+    ctx->r[4] = 0;
+    xenolith_import(ctx, base, "xam.xex", 602, "XamContentClose");
+    return (uint32_t)ctx->r[3];
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* A saved game on the one device, kept under SAVE0 and opened as save. */
+    xenolith_context ctx = {0};
+    memcpy(base + 0x5000, "save", 5);
+    xenolith_store32(base, 0x6000, 1);
+    xenolith_store32(base, 0x6004, 1);
+    memcpy(base + 0x6000 + 0x108, "SAVE0", 6);
+    if (open_it(&ctx, base, 1) != 0u || xenolith_load32(base, 0x5100) != 1u) { return 3; }
+
+    name_a_file(base, 0x1000, "save:\\progress.dat");
+    ctx.r[3] = 0x2000;
+    ctx.r[4] = 0x40000000u;
+    ctx.r[5] = 0x1000;
+    ctx.r[6] = 0x2100;
+    ctx.r[8] = 0;
+    ctx.r[10] = 3;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 210, "NtCreateFile");
+    if (ctx.r[3] != 0u) { return 4; }
+    memcpy(base + 0x3000, "pilot", 5);
+    xenolith_store64(base, 0x2400, 0);
+    ctx.r[3] = xenolith_load32(base, 0x2000);
+    ctx.r[4] = 0;
+    ctx.r[7] = 0x2500;
+    ctx.r[8] = 0x3000;
+    ctx.r[9] = 5;
+    ctx.r[10] = 0x2400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 255, "NtWriteFile");
+    FILE *kept = fopen("content/SAVE0/progress.dat", "rb");
+    if (ctx.r[3] != 0u || kept == NULL) {
+        fprintf(stderr, "the file was not written inside what was saved\n");
+        return 5;
+    }
+    fclose(kept);
+
+    if (close_it(&ctx, base) != 0u) { return 6; }
+    if (open_it(&ctx, base, 1) != 183u) { return 7; }
+    if (open_it(&ctx, base, 3) != 0u || xenolith_load32(base, 0x5100) != 2u) { return 8; }
+    close_it(&ctx, base);
+
+    /* Listed as it was described, and then no more. */
+    ctx.r[3] = 0;
+    ctx.r[4] = 1;
+    ctx.r[5] = 1;
+    ctx.r[6] = 0;
+    ctx.r[7] = 4;
+    ctx.r[8] = 0x5200;
+    ctx.r[9] = 0x5204;
+    xenolith_import(&ctx, base, "xam.xex", 604, "XamContentCreateEnumerator");
+    if (ctx.r[3] != 0u || xenolith_load32(base, 0x5200) != 4u * 0x134u) { return 9; }
+    for (int reading = 0; reading < 2; reading++) {
+        ctx.r[3] = xenolith_load32(base, 0x5204);
+        ctx.r[4] = 0;
+        ctx.r[5] = 0x8000;
+        ctx.r[6] = xenolith_load32(base, 0x5200);
+        ctx.r[7] = 0x5208;
+        ctx.r[8] = 0;
+        xenolith_import(&ctx, base, "xam.xex", 592, "XamEnumerate");
+        uint32_t want = reading == 0 ? 0u : 18u;
+        uint32_t count = reading == 0 ? 1u : 0u;
+        if (ctx.r[3] != want || xenolith_load32(base, 0x5208) != count) { return 10 + reading; }
+    }
+    if (memcmp(base + 0x8000 + 0x108, "SAVE0", 6) != 0) { return 12; }
+
+    ctx.r[3] = 0;
+    ctx.r[4] = 0x6000;
+    ctx.r[5] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 603, "XamContentDelete");
+    if (ctx.r[3] != 0u || open_it(&ctx, base, 3) != 3u) { return 13; }
+    return 0;
+}
+"#;
+
+/// A saved thing is made, written into, found again, listed and deleted.
+///
+/// A title opens what it saves under a name of its own and names the files
+/// inside with that name in front. What it made has to be where it looks the
+/// next time, and in the list of what was saved, or every run starts afresh.
+#[test]
+fn saved_data_is_made_written_listed_and_deleted() {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("saving");
+    let _ = std::fs::remove_dir_all(directory.join("content"));
+    if let Err(complaint) = runs("saving", SAVING_PROGRAM) {
+        panic!("saving did not work:\n{complaint}");
+    }
+}
+
 /// The profile signed in plays without the network, so it holds no privilege
 /// of an Xbox Live account, and a slot with no profile in it says so.
 #[test]
