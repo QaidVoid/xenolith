@@ -3428,8 +3428,26 @@ static int open_a_window(void) {
             say_no_frame_will_be_shown("the window the desktop made took no drawing");
             return 0;
         }
+
+        /* A desktop drawn by another device than the one chosen here makes a
+         * window that device will not draw into. The older way still can,
+         * because the display server underneath copies each frame across, so
+         * that is tried before giving up. */
+        VkBool32 will = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(drawing.adapter, drawing.family, screen.surface,
+                                             &will);
+        if (will) {
+            screen.the_desktops_own_way = 1;
+            return finish_opening_a_window();
+        }
+#ifdef XENOLITH_WITH_X11
+        vkDestroySurfaceKHR(drawing.instance, screen.surface, NULL);
+        screen.surface = VK_NULL_HANDLE;
+        stop_talking_to_the_desktop();
+#else
         screen.the_desktops_own_way = 1;
         return finish_opening_a_window();
+#endif
     }
 #endif
 
