@@ -694,6 +694,14 @@ const TABLE_RUN: usize = 4;
 /// than as code, so a table and the instructions it names share a section. What
 /// separates them is that the run has to name addresses, and an instruction
 /// names one only when its immediate happens to be one.
+///
+/// A table is as often a list of records as a list of addresses: a name, the
+/// function that answers to it, and something more, over and over. There the
+/// addresses are not in a row but one to a record, at the same place in each.
+/// So a run is looked for at every spacing up to [`TABLE_STRIDE`] bytes, and a
+/// run at a wider spacing is held to the same length as one in a row. One title
+/// keeps the handlers for its commands this way, and the ones that touch no
+/// stack were found by nothing else, so calling one stopped the run.
 fn scan_for_tables(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32> {
     let starts: BTreeSet<u32> = walked.keys().copied().collect();
     let claimed = claimed_instructions(walked);
@@ -701,30 +709,42 @@ fn scan_for_tables(image: &Image, walked: &BTreeMap<u32, Vec<Block>>) -> Vec<u32
 
     for section in image.sections() {
         let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
-        let mut run: Vec<u32> = Vec::new();
-        let mut at = section.start;
+        let words = (end.saturating_sub(section.start) / INSTRUCTION_SIZE) as usize;
+        let named: Vec<Option<u32>> = (0..words)
+            .map(|word| {
+                let at = section.start + u32::try_from(word).unwrap_or(0) * INSTRUCTION_SIZE;
+                image
+                    .u32(at)
+                    .ok()
+                    .filter(|target| names_code(image, *target))
+            })
+            .collect();
 
-        while at < end {
-            let target = image.u32(at).ok().filter(|word| names_code(image, *word));
-
-            match target {
-                Some(target) => run.push(target),
-                None => {
-                    claim_run(&mut found, &mut run, &starts, &claimed, TABLE_RUN);
+        for stride in 1..=(TABLE_STRIDE / INSTRUCTION_SIZE) as usize {
+            for phase in 0..stride {
+                let mut run: Vec<u32> = Vec::new();
+                for target in named.iter().skip(phase).step_by(stride) {
+                    match target {
+                        Some(target) => run.push(*target),
+                        None => claim_run(&mut found, &mut run, &starts, &claimed, TABLE_RUN),
+                    }
                 }
+                claim_run(&mut found, &mut run, &starts, &claimed, TABLE_RUN);
             }
-
-            let Some(next) = at.checked_add(INSTRUCTION_SIZE) else {
-                break;
-            };
-            at = next;
         }
-
-        claim_run(&mut found, &mut run, &starts, &claimed, TABLE_RUN);
     }
 
+    found.sort_unstable();
+    found.dedup();
     found
 }
+
+/// The widest spacing between the addresses of a table of records, in bytes.
+///
+/// Eight words, which holds a record of a name, a handler and six words more.
+/// Wider records are rarer, and a wider spacing lets a run of four reach across
+/// more data that happens to hold addresses.
+const TABLE_STRIDE: u32 = 32;
 
 /// Returns every instruction address inside a block that was already walked.
 fn claimed_instructions(walked: &BTreeMap<u32, Vec<Block>>) -> BTreeSet<u32> {
@@ -1527,6 +1547,37 @@ mod tests {
             program.function_at(0x8200_0008).map(|one| one.origin),
             Some(Origin::Tabled)
         );
+    }
+
+    /// A list of records naming one function each, at the same place in every
+    /// record, is a table too.
+    #[test]
+    fn a_table_of_records_names_functions() {
+        let mut words = vec![encode::blr(), 0, encode::addi(3, 4, 1), encode::blr()];
+        for _ in 0..4 {
+            words.extend([0x1234_5678, 0x8200_0008, 0, 0x0000_0010]);
+        }
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0008).map(|one| one.origin),
+            Some(Origin::Tabled)
+        );
+    }
+
+    /// Three records are not a table, however regular, for the same reason
+    /// three addresses in a row are not.
+    #[test]
+    fn three_records_are_not_a_table() {
+        let mut words = vec![encode::blr(), 0, encode::addi(3, 4, 1), encode::blr()];
+        for _ in 0..3 {
+            words.extend([0x1234_5678, 0x8200_0008, 0, 0x0000_0010]);
+        }
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Tabled), 0);
     }
 
     /// A run of addresses that lands inside a function already walked names

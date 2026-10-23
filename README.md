@@ -20,9 +20,9 @@ Measured against two retail titles, with
 
 | | title A | title B |
 |---|---|---|
-| functions discovered | 21,671 | 35,894 |
-| executable words claimed | 859,562 (97.154%) | 2,675,836 (98.981%) |
-| functions lifted to C | 21,671 (100%) | 35,894 (100%) |
+| functions discovered | 21,703 | 35,964 |
+| executable words claimed | 859,593 (97.158%) | 2,675,920 (98.984%) |
+| functions lifted to C | 21,703 (100%) | 35,964 (100%) |
 | of those, import thunks | 241 | 189 |
 | emitted C compiles | yes, all of it | yes, all of it |
 | helper entries emitted beside them | 57 | 47 |
