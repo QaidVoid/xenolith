@@ -4232,6 +4232,7 @@ fn a_draw_with_real_shaders_puts_something_on_the_surface() {
 
 #include "xenolith.h"
 #include <stdio.h>
+#include <time.h>
 
 xenolith_function xenolith_lookup(uint32_t address) {
     (void)address;
@@ -4298,6 +4299,41 @@ int main(void) {
     if (!xenolith_end_a_frame()) { return 5; }
     if (!xenolith_keep_a_frame("frame.ppm")) { return 6; }
     printf("drawn\n");
+
+    /* And copied out the way a title copies a frame: a draw made while the mode
+     * says copy, after the registers say where to and how big. What was drawn
+     * has to arrive there, and the rectangle the copy is asked for with must
+     * not be drawn. */
+    uint32_t into = 0x03000000u;
+    xenolith_store32(base, 0x7fc80000u + 0x2208u * 4u, 6u);
+    xenolith_store32(base, 0x7fc80000u + 0x2318u * 4u, 0x00100000u);
+    xenolith_store32(base, 0x7fc80000u + 0x2319u * 4u, into);
+    xenolith_store32(base, 0x7fc80000u + 0x231au * 4u, (720u << 16) | 1280u);
+    xenolith_store32(base, 0x7fc80000u + 0x231bu * 4u, 6u << 7);
+    uint32_t ring = 0x02000000u;
+    xenolith_store32(base, ring, (3u << 30) | (0x36u << 8));
+    xenolith_store32(base, ring + 4u, (3u << 16) | 8u);
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02100000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+    xenolith_store32(base, 0x7fc80714u, 2u);
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, 0x02100000u) == 2u) { break; }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    uint32_t lit = 0;
+    for (uint32_t word = 0; word < 1280u * 720u; word += 7u) {
+        lit += xenolith_load32(base, into + word * 4u) != 0u;
+    }
+    if (lit == 0) {
+        fprintf(stderr, "nothing that was drawn arrived where the copy was to go\n");
+        return 7;
+    }
+    printf("copied\n");
     return 0;
 }
 "#;
@@ -4336,6 +4372,10 @@ int main(void) {
     if said.contains("no device") {
         return;
     }
+    assert!(
+        said.contains("copied"),
+        "the frame was not copied out: {said}"
+    );
     let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
     assert!(picture.starts_with(b"P6\n"), "the frame is not a picture");
     /* Something other than black somewhere in it, which is what says a draw

@@ -1333,8 +1333,70 @@ static void take_the_shader_in_hand(uint8_t *base, uint32_t which_kind, uint32_t
  * Kept apart from the walk because it is the one command whose effect is a
  * whole subsystem's worth of work, and reading it inline buries the walk.
  */
+/* The registers a copy out of the hardware is described by, by the console's
+ * numbering: the mode that says a draw is a copy, what to copy and whether to
+ * wipe it, where to, how wide and tall, what shape the copy takes, and what
+ * the wipes start again as. */
+#define XENOLITH_EDRAM_MODE 0x2208u
+#define XENOLITH_EDRAM_COPIES 6u
+#define XENOLITH_COPY_CONTROL 0x2318u
+#define XENOLITH_COPY_DEST_BASE 0x2319u
+#define XENOLITH_COPY_DEST_PITCH 0x231au
+#define XENOLITH_COPY_DEST_INFO 0x231bu
+#define XENOLITH_DEPTH_CLEAR 0x231du
+#define XENOLITH_COLOUR_CLEAR 0x231eu
+
+/* Which of what was drawn a copy takes when it takes how far away things are
+ * rather than a colour. */
+#define XENOLITH_COPY_FROM_HOW_FAR 4u
+
+static uint32_t a_register(const uint8_t *base, uint32_t which) {
+    return xenolith_load32(base, XENOLITH_REGISTERS + which * 4u);
+}
+
+/* Carries out a copy out of the hardware, which a title asks for as a draw.
+ *
+ * The draw is a rectangle over what is to be copied, made while the mode says
+ * copy rather than draw, and drawing it as a rectangle puts a flat shape over
+ * the frame where the copy should have gone. So it is not drawn. What it asks
+ * for is done instead: what was drawn is finished and handed back to the
+ * address the title names, in the shape it names, and wiped afterwards if the
+ * title said to, and any picture already made of that memory is forgotten so
+ * the next draw that reads it sees the copy.
+ */
+static void copy_what_was_drawn(uint8_t *base) {
+    uint32_t control = a_register(base, XENOLITH_COPY_CONTROL);
+    uint32_t into = a_register(base, XENOLITH_COPY_DEST_BASE);
+    uint32_t size = a_register(base, XENOLITH_COPY_DEST_PITCH);
+    uint32_t info = a_register(base, XENOLITH_COPY_DEST_INFO);
+    uint32_t across = size & 0x3fffu;
+    uint32_t down = (size >> 16) & 0x3fffu;
+    uint32_t format = (info >> 7) & 0x3fu;
+    int from_how_far = (control & 7u) == XENOLITH_COPY_FROM_HOW_FAR;
+
+    finish_the_frame();
+    if (into != 0 && across != 0 && down != 0) {
+        xenolith_hand_back_what_was_drawn(base, into, across, down,
+                                          format == XENOLITH_PICTURE_IN_FLOATS, from_how_far,
+                                          format == XENOLITH_PICTURE_HOW_FAR_AS_A_FLOAT);
+        xenolith_forget_pictures_at(into, across * down * 4u);
+    }
+
+    uint32_t depth = a_register(base, XENOLITH_DEPTH_CLEAR);
+    xenolith_wipe_the_colours_after_a_copy((control >> 8) & 1u,
+                                           a_register(base, XENOLITH_COLOUR_CLEAR));
+    xenolith_wipe_how_far_after_a_copy((control >> 9) & 1u,
+                                       (float)(depth >> 8) / 16777215.0f);
+}
+
 static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
                                     uint32_t follows, uint32_t opcode, uint32_t header) {
+        if ((opcode == XENOLITH_PACKET_DRAW || opcode == XENOLITH_PACKET_DRAW_INDEXED)
+            && (a_register(base, XENOLITH_EDRAM_MODE) & 7u) == XENOLITH_EDRAM_COPIES) {
+            copy_what_was_drawn(base);
+            return;
+        }
+
         /* A draw, with whatever pair of shaders was last handed over.
          *
          * That is how a title says which to use: it hands them over and

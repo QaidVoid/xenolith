@@ -3713,10 +3713,23 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
          * A title reaching this has finished a frame's worth of work. What was
          * drawn in it is finished first, which reads it back and is what makes
          * the next frame start clean, and then it is shown if there is anywhere
-         * to show it. Where there is not, the counting is all this comes to. */
+         * to show it. Where there is not, the counting is all this comes to.
+         *
+         * What is shown is the picture the title names, which is the copy it
+         * made out of the hardware into its front buffer. The second argument
+         * describes that buffer the way a picture is described to a shader,
+         * and the address is the top of its second word. The drawing surface
+         * holds whatever was drawn after the copy, so it is shown only where
+         * no copy was made to the place named. */
         graphics.frames++;
         finish_the_frame();
-        xenolith_show_the_frame();
+        {
+            uint32_t described = (uint32_t)ctx->r[4];
+            uint32_t front = described != 0 ? xenolith_load32(base, described + 4) & ~0xfffu : 0;
+            if (!xenolith_show_what_was_copied_to(front)) {
+                xenolith_show_the_frame();
+            }
+        }
         /* What was drawn, written where a run asks for it. A frame is read back
          * the same way whatever it holds, so this is the only way to see
          * whether a title drew anything rather than only that it asked to. */
