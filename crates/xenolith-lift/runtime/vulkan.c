@@ -573,7 +573,12 @@ static int make_somewhere_to_draw(void) {
  * given back at the start of the next frame.
  */
 #define XENOLITH_VERTEX_ROOM (64u * 1024u * 1024u)
-#define XENOLITH_CONSTANT_ROOM (XENOLITH_CONSTANT_BYTES * XENOLITH_SAYINGS)
+/* How many draws one frame's constants have room for. Each draw takes the
+ * whole file, which is a little over eight kilobytes. A thousand, the number of
+ * shaders a run keeps, ran out on one title's first screens and left the draws
+ * past it out of the frame. */
+#define XENOLITH_DRAWS_A_FRAME 4096u
+#define XENOLITH_CONSTANT_ROOM (XENOLITH_CONSTANT_BYTES * XENOLITH_DRAWS_A_FRAME)
 
 /* Where a title's shader constants live in the graphics registers.
  *
