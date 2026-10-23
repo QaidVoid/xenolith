@@ -3316,6 +3316,22 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         case 551:
             say_who_is_signed_in(ctx, base, ordinal);
             return 1;
+        case 530: {
+            /* Whether the profile in a slot holds a privilege, written where
+             * the third argument says. Every privilege a title can ask about
+             * is one an Xbox Live account grants, and the profile here plays
+             * without the network, so it holds none of them. */
+            uint32_t held_at = (uint32_t)ctx->r[5];
+            if (!is_the_profile((uint32_t)ctx->r[3])) {
+                ctx->r[3] = XENOLITH_ERROR_NO_SUCH_USER;
+                return 1;
+            }
+            if (held_at != 0) {
+                xenolith_store32(base, held_at, 0);
+            }
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
         case 971:
             /* Which cable the console's video output is going through. The
              * title's startup asks, and refuses to start for four of the eight

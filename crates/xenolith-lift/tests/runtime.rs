@@ -3901,6 +3901,66 @@ int main(void) {
     }
 }
 
+/// The profile signed in plays without the network, so it holds no privilege
+/// of an Xbox Live account, and a slot with no profile in it says so.
+#[test]
+fn a_profile_without_the_network_holds_no_privilege() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 528, "XamUserGetSigninState");
+    if (ctx.r[3] == 0u) {
+        fprintf(stderr, "nobody is signed in\n");
+        return 3;
+    }
+
+    /* Multiplayer sessions, which the title asks about before its menus. */
+    xenolith_store32(base, 0x200, 0xffffffffu);
+    ctx.r[3] = 0;
+    ctx.r[4] = 254;
+    ctx.r[5] = 0x200;
+    xenolith_import(&ctx, base, "xam.xex", 530, "XamUserCheckPrivilege");
+    if (ctx.r[3] != 0u || xenolith_load32(base, 0x200) != 0u) {
+        fprintf(stderr, "the privilege came back as %#llx holding %#x\n",
+                (unsigned long long)ctx.r[3], xenolith_load32(base, 0x200));
+        return 4;
+    }
+
+    ctx.r[3] = 1;
+    ctx.r[4] = 254;
+    ctx.r[5] = 0x200;
+    xenolith_import(&ctx, base, "xam.xex", 530, "XamUserCheckPrivilege");
+    if (ctx.r[3] != 0x525u) {
+        fprintf(stderr, "an empty slot came back as %#llx\n", (unsigned long long)ctx.r[3]);
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("privilege", program) {
+        panic!("a privilege was not answered as an offline profile holds it:\n{complaint}");
+    }
+}
+
 /// A privilege is answered from the flags the container declares.
 ///
 /// A title asks whether it holds a numbered privilege before it does the thing,
