@@ -302,6 +302,9 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* What reading past the end of a file reports. */
 #define XENOLITH_STATUS_END_OF_FILE 0xC0000011u
 
+/* How large a context for the sound decoder is: sixteen words. */
+#define XENOLITH_SOUND_CONTEXT 64u
+
 /* What a call given an argument it cannot use reports. */
 #define XENOLITH_STATUS_INVALID_PARAMETER 0xC000000Du
 
@@ -344,6 +347,10 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* Where a call's ninth argument sits above the stack pointer, the eight
  * registers reaching only as far as the eighth. */
 #define XENOLITH_NINTH_ARGUMENT 0x54u
+
+/* Where the doubleword slot the ninth argument takes begins, of which the word
+ * above is the low half. */
+#define XENOLITH_NINTH_SLOT 0x50u
 
 /* A title asking for a directory rather than a file says so here. */
 #define XENOLITH_WANTS_A_DIRECTORY 0x00000001u
@@ -3370,8 +3377,191 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
 }
 
 /* What a title asks of the kernel about memory, time and the machine. */
+/* Where a title's arguments to a formatting call come from, one at a time.
+ *
+ * Each takes a doubleword, and a word is the low half of it. Those passed in
+ * registers come first, then the ones the caller left on its stack, which sit
+ * a doubleword apart from the slot of the first argument. A call handed a list
+ * already made walks that list the same way, from where it points. */
+struct arguments {
+    const xenolith_context *ctx;
+    uint8_t *base;
+    uint32_t next_register;
+    uint32_t in_memory;
+};
+
+static uint64_t next_argument(struct arguments *from) {
+    if (from->next_register != 0 && from->next_register <= 10u) {
+        return from->ctx->r[from->next_register++];
+    }
+    uint64_t taken = xenolith_load64(from->base, from->in_memory);
+    from->in_memory += 8u;
+    return taken;
+}
+
+/* Formats text the way the console's own library does, into a title's memory.
+ *
+ * Each conversion is handed to the host's own formatting with its flags, width
+ * and precision, and its argument taken from the title: a word for the whole
+ * numbers and characters, a doubleword for the long ones and the fractions,
+ * and an address for the strings, which are read out of the title's memory as
+ * bytes or as wide characters. At most `room` bytes are written. What comes
+ * back is how many were, or minus one where the text did not fit, in which case
+ * nothing ends it, which is what the console's version does. */
+static int32_t format_for_a_title(uint8_t *base, uint32_t into, uint32_t room, uint32_t format,
+                                  struct arguments *from) {
+    uint32_t written = 0;
+    int fits = 1;
+    char spec[32];
+    char piece[512];
+
+    for (uint32_t at = format;; at++) {
+        char letter = (char)xenolith_load8(base, at);
+        if (letter == '\0') {
+            break;
+        }
+        size_t used = 0;
+        if (letter != '%') {
+            piece[0] = letter;
+            used = 1;
+        } else {
+            size_t length = 0;
+            spec[length++] = '%';
+            int wide_size = 0;
+            int wide_text = 0;
+            for (;;) {
+                char next = (char)xenolith_load8(base, ++at);
+                if (next == '\0') {
+                    at--;
+                    break;
+                }
+                if (next == '*') {
+                    int counted = (int)(int32_t)next_argument(from);
+                    length += (size_t)snprintf(spec + length, sizeof spec - length, "%d", counted);
+                    continue;
+                }
+                if (next == 'l') {
+                    wide_size++;
+                    wide_text = 1;
+                    continue;
+                }
+                if (next == 'h' || next == 'z' || next == 't' || next == 'j') {
+                    continue;
+                }
+                if (next == 'I' && xenolith_load8(base, at + 1) == '6'
+                    && xenolith_load8(base, at + 2) == '4') {
+                    at += 2;
+                    wide_size = 2;
+                    continue;
+                }
+                if (length + 3 < sizeof spec) {
+                    spec[length++] = next;
+                }
+                if (strchr("diouxXcCsSpfFeEgGaA%n", next) != NULL) {
+                    break;
+                }
+            }
+            spec[length] = '\0';
+            char kind = spec[length - 1];
+            if (kind == '%') {
+                piece[0] = '%';
+                used = 1;
+            } else if (kind == 'n') {
+                next_argument(from);
+            } else if (kind == 's' || kind == 'S') {
+                uint32_t text = (uint32_t)next_argument(from);
+                int wide = kind == 'S' || wide_text;
+                char held[256];
+                size_t taken = 0;
+                for (; text != 0 && taken + 1 < sizeof held; taken++) {
+                    uint32_t one = wide ? xenolith_load16(base, text + (uint32_t)taken * 2u)
+                                        : xenolith_load8(base, text + (uint32_t)taken);
+                    if (one == 0) {
+                        break;
+                    }
+                    held[taken] = one < 0x80u ? (char)one : '?';
+                }
+                held[taken] = '\0';
+                spec[length - 1] = 's';
+                used = (size_t)snprintf(piece, sizeof piece, spec, text == 0 ? "(null)" : held);
+            } else if (strchr("fFeEgGaA", kind) != NULL) {
+                uint64_t bits = next_argument(from);
+                double value;
+                memcpy(&value, &bits, sizeof value);
+                used = (size_t)snprintf(piece, sizeof piece, spec, value);
+            } else if (kind == 'c' || kind == 'C') {
+                spec[length - 1] = 'c';
+                used = (size_t)snprintf(piece, sizeof piece, spec,
+                                        (int)(uint8_t)next_argument(from));
+            } else if (kind == 'p') {
+                spec[length - 1] = 'X';
+                used = (size_t)snprintf(piece, sizeof piece, spec,
+                                        (unsigned)(uint32_t)next_argument(from));
+            } else {
+                uint64_t value = next_argument(from);
+                char shown[40];
+                memcpy(shown, spec, length - 1);
+                int signed_kind = kind == 'd' || kind == 'i';
+                if (wide_size >= 2) {
+                    snprintf(shown + length - 1, sizeof shown - (length - 1), "ll%c", kind);
+                    used = signed_kind ? (size_t)snprintf(piece, sizeof piece, shown,
+                                                          (long long)value)
+                                       : (size_t)snprintf(piece, sizeof piece, shown,
+                                                          (unsigned long long)value);
+                } else {
+                    snprintf(shown + length - 1, sizeof shown - (length - 1), "%c", kind);
+                    used = signed_kind
+                               ? (size_t)snprintf(piece, sizeof piece, shown,
+                                                  (int)(int32_t)value)
+                               : (size_t)snprintf(piece, sizeof piece, shown,
+                                                  (unsigned)(uint32_t)value);
+                }
+            }
+        }
+        if (used > sizeof piece - 1) {
+            used = sizeof piece - 1;
+        }
+        for (size_t k = 0; k < used; k++) {
+            if (written >= room) {
+                fits = 0;
+                break;
+            }
+            xenolith_store8(base, into + written++, (uint8_t)piece[k]);
+        }
+        if (!fits) {
+            break;
+        }
+    }
+    if (!fits) {
+        return -1;
+    }
+    if (written < room) {
+        xenolith_store8(base, into + written, 0);
+    }
+    return (int32_t)written;
+}
+
 static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, uint32_t ordinal) {
     switch (ordinal) {
+    case 315: {
+        /* Formatting text with no limit on its length. The arguments after the
+         * format are in the registers after it, and then on the caller's
+         * stack, from the slot the ninth argument takes. */
+        struct arguments from = {ctx, base, 5, (uint32_t)ctx->r[1] + XENOLITH_NINTH_SLOT};
+        int32_t made = format_for_a_title(base, (uint32_t)ctx->r[3], 0x7fffffffu,
+                                          (uint32_t)ctx->r[4], &from);
+        ctx->r[3] = (uint64_t)(int64_t)made;
+        return 1;
+    }
+    case 333: {
+        /* Formatting text into a buffer of a given size, from a list of
+         * arguments the caller has already laid out. */
+        struct arguments from = {ctx, base, 0, (uint32_t)ctx->r[6]};
+        int32_t made = format_for_a_title(base, (uint32_t)ctx->r[3], (uint32_t)ctx->r[4],
+                                          (uint32_t)ctx->r[5], &from);
+        ctx->r[3] = (uint64_t)(int64_t)made;
+        return 1;
+    }
     case 198: {
         /* How much memory there is and how much is left.
          *
@@ -3727,6 +3917,35 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         return 1;
     case 228:
         query_directory(ctx, base);
+        return 1;
+    case 548: {
+        /* Making a context for the hardware that decodes compressed sound.
+         *
+         * A context is a block of memory the title fills in with where its
+         * compressed sound is and where the decoded sound should go, and the
+         * hardware reads and updates it. Nothing here decodes that kind of
+         * sound, so the block is made and handed over, the title fills it in,
+         * and nothing ever plays: that is said once rather than left for a
+         * title to fall silent without a word. */
+        static int said;
+        if (!said) {
+            said = 1;
+            say_a_report("compressed sound is not decoded here, so a title's music and "
+                         "voices are not heard");
+        }
+        uint32_t into = (uint32_t)ctx->r[3];
+        uint32_t context = take_guest_memory(XENOLITH_SOUND_CONTEXT, 0);
+        if (into == 0 || context == 0) {
+            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+            return 1;
+        }
+        xenolith_store32(base, into, context);
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 550:
+        /* Letting a context go. Memory here is never given back. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 499: {
         /* Registering a client that will hand sound over.
@@ -4145,6 +4364,7 @@ void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
                 "from %#010llx\n",
                 library, ordinal, name ? name : "unnamed",
                 (unsigned long long)ctx->lr);
+        say_who_called(base, (uint32_t)ctx->r[1]);
         stop_the_run(3);
     }
 

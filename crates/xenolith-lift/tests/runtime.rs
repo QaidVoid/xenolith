@@ -2989,6 +2989,98 @@ int main(void) {
     }
 }
 
+/// Text is formatted from a title's own arguments, as its library would.
+///
+/// The arguments of a call that takes a variable number of them sit a
+/// doubleword apart, in registers and then on the stack, and a list made in
+/// advance is laid out the same way. A formatted line that runs past the room
+/// it was given comes back as minus one.
+#[test]
+fn text_is_formatted_from_a_titles_arguments() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void put(uint8_t *base, uint32_t at, const char *text) {
+    for (size_t k = 0; k <= strlen(text); k++) {
+        xenolith_store8(base, at + (uint32_t)k, (uint8_t)text[k]);
+    }
+}
+
+static int says(uint8_t *base, uint32_t at, const char *wanted) {
+    for (size_t k = 0; k <= strlen(wanted); k++) {
+        if (xenolith_load8(base, at + (uint32_t)k) != (uint8_t)wanted[k]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    put(base, 0x1000, "%s=%d %04x");
+    put(base, 0x1100, "seven");
+    ctx.r[1] = 0x8000;
+    ctx.r[3] = 0x2000;
+    ctx.r[4] = 0x1000;
+    ctx.r[5] = 0x1100;
+    ctx.r[6] = (uint64_t)(int64_t)-7;
+    ctx.r[7] = 0xbeef;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 315, "sprintf");
+    if (!says(base, 0x2000, "seven=-7 beef") || ctx.r[3] != 13u) {
+        fprintf(stderr, "sprintf made the wrong text or count\n");
+        return 3;
+    }
+
+    /* A list made in advance: a word, then an address, a doubleword apart. */
+    put(base, 0x1200, "x%dy %s");
+    put(base, 0x1300, "hi");
+    xenolith_store64(base, 0x1400, 7u);
+    xenolith_store64(base, 0x1408, 0x1300u);
+    ctx.r[3] = 0x3000;
+    ctx.r[4] = 64;
+    ctx.r[5] = 0x1200;
+    ctx.r[6] = 0x1400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 333, "_vsnprintf");
+    if (!says(base, 0x3000, "x7y hi") || ctx.r[3] != 6u) {
+        fprintf(stderr, "_vsnprintf made the wrong text or count\n");
+        return 4;
+    }
+    ctx.r[3] = 0x3100;
+    ctx.r[4] = 3;
+    ctx.r[5] = 0x1200;
+    ctx.r[6] = 0x1400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 333, "_vsnprintf");
+    if ((int32_t)ctx.r[3] != -1) {
+        fprintf(stderr, "text past its room came back as %lld\n", (long long)ctx.r[3]);
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("formatting", program) {
+        panic!("text was not formatted from a title's arguments:\n{complaint}");
+    }
+}
+
 /// A privilege is answered from the flags the container declares.
 ///
 /// A title asks whether it holds a numbered privilege before it does the thing,
