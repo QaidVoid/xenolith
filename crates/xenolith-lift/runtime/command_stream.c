@@ -346,27 +346,37 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
              * value goes where it was asked for as soon as this is reached.
              * Nothing waits, because there is nothing to wait for.
              *
-             * A byte order this does not know is reported rather than written
-             * in, because writing a word the wrong way round gives a title a
-             * number it compares against the one it asked for and never
-             * matches, which is the same as not writing it at all except that
-             * it looks like it worked. */
+             * The graphics hardware writes memory in the opposite byte order to
+             * the processor, after swapping the value the way the low two bits
+             * of the address say. So what the processor reads back is the value
+             * as it stands for a swap of every byte, the value with its halves
+             * exchanged for a swap within each half, the value with the bytes of
+             * each half exchanged for a swap of the halves, and the value with
+             * every byte reversed for no swap at all. A title that asks for no
+             * swap reads the word back the other way round itself, and a word
+             * not written at all is one it waits on for ever. */
             if (opcode == XENOLITH_PACKET_REPORT && follows >= 3) {
                 uint32_t where = xenolith_load32(base, stream + (at + 2) * 4);
                 uint32_t what = xenolith_load32(base, stream + (at + 3) * 4);
-                uint32_t order = where & 3u;
-
-                if (order == 2u) {
-                    xenolith_store32(base, where & ~3u, what);
-                } else {
-                    static int said_about_order;
-                    if (!said_about_order) {
-                        said_about_order = 1;
-                        say_a_report("a report at %#010x asks for byte order %u, and "
-                                     "only 2 is written",
-                                     where & ~3u, order);
-                    }
+                uint32_t swapped_halves = (what << 16) | (what >> 16);
+                uint32_t swapped_in_halves =
+                    ((what & 0x00ff00ffu) << 8) | ((what >> 8) & 0x00ff00ffu);
+                uint32_t read_back;
+                switch (where & 3u) {
+                case 0:
+                    read_back = (swapped_in_halves << 16) | (swapped_in_halves >> 16);
+                    break;
+                case 1:
+                    read_back = swapped_halves;
+                    break;
+                case 2:
+                    read_back = what;
+                    break;
+                default:
+                    read_back = swapped_in_halves;
+                    break;
                 }
+                xenolith_store32(base, where & ~3u, read_back);
                 break;
             }
 
