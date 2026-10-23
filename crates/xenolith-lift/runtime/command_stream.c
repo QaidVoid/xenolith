@@ -32,6 +32,53 @@
 #define XENOLITH_PACKET_BUFFER 0x3fu
 #define XENOLITH_PACKET_SHADER 0x2bu
 #define XENOLITH_PACKET_SHADER_FROM_MEMORY 0x27u
+#define XENOLITH_PACKET_WAIT 0x3cu
+#define XENOLITH_PACKET_WRITE_IF 0x45u
+
+/* The register saying whether the processor's view of memory has caught up
+ * with the hardware's, whose top bit a title sets to ask and waits to see
+ * clear. */
+#define XENOLITH_COHERENT_STATUS 0x0a31u
+#define XENOLITH_STILL_CATCHING_UP 0x80000000u
+
+/* What a wait or a conditional write compares: a register, or a word of
+ * memory in the byte order the low two bits of its address say. */
+static uint32_t the_value_looked_at(uint8_t *base, uint32_t how, uint32_t where) {
+    if (how & 0x10u) {
+        return as_the_processor_reads(xenolith_load32(base, where & ~3u), where);
+    }
+    if (where == XENOLITH_COHERENT_STATUS) {
+        /* Memory here is one view, so it has always caught up the moment it is
+         * asked. */
+        set_register(base, where, register_says(base, where) & ~XENOLITH_STILL_CATCHING_UP);
+    }
+    return register_says(base, where);
+}
+
+/* Whether a value, masked, stands as the low three bits of `how` ask against
+ * a reference: never, below, at most, equal, not equal, at least, above, or
+ * always. */
+static int it_holds(uint32_t how, uint32_t value, uint32_t against, uint32_t mask) {
+    uint32_t masked = value & mask;
+    switch (how & 7u) {
+    case 0:
+        return 0;
+    case 1:
+        return masked < against;
+    case 2:
+        return masked <= against;
+    case 3:
+        return masked == against;
+    case 4:
+        return masked != against;
+    case 5:
+        return masked >= against;
+    case 6:
+        return masked > against;
+    default:
+        return 1;
+    }
+}
 #define XENOLITH_PACKET_CHANGE_PART 0x21u
 #define XENOLITH_PACKET_TELL_THE_TITLE 0x54u
 #define XENOLITH_PACKET_LOAD 0x2fu
@@ -272,13 +319,72 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
                 break;
             }
 
+            /* Waiting for a register or a word of memory to stand as asked.
+             *
+             * The hardware stops reading here until it does, and a title
+             * relies on that: it hands over a run of commands whose end it has
+             * not written yet, with a wait in front of the end for a word it
+             * changes once it has, and goes on writing. Read straight through,
+             * what lies past the wait is whatever that memory held before, and
+             * every command after it is read out of step. So this waits too,
+             * as long as it takes, and says so once a wait has gone on long
+             * enough to look like one that will not end. */
+            if (opcode == XENOLITH_PACKET_WAIT && follows >= 5) {
+                uint32_t how = xenolith_load32(base, stream + (at + 1) * 4);
+                uint32_t where = xenolith_load32(base, stream + (at + 2) * 4);
+                uint32_t against = xenolith_load32(base, stream + (at + 3) * 4);
+                uint32_t mask = xenolith_load32(base, stream + (at + 4) * 4);
+                unsigned long waited = 0;
+                while (!it_holds(how, the_value_looked_at(base, how, where), against, mask)) {
+                    struct timespec briefly = {0, 100000};
+                    nanosleep(&briefly, NULL);
+                    if (++waited == 20000u) {
+                        say_a_report("the commands at %#010x have waited two seconds for %s "
+                                     "%#x to stand against %#x, and wait on",
+                                     stream + at * 4, (how & 0x10u) ? "memory at" : "register",
+                                     where & ~3u, against);
+                    }
+                }
+                break;
+            }
+
+            /* Writing a register or a word of memory if another stands as
+             * asked, which a title uses to write a table one entry at a time
+             * only while the hardware is where it expects. */
+            if (opcode == XENOLITH_PACKET_WRITE_IF && follows >= 6) {
+                uint32_t how = xenolith_load32(base, stream + (at + 1) * 4);
+                uint32_t where = xenolith_load32(base, stream + (at + 2) * 4);
+                uint32_t against = xenolith_load32(base, stream + (at + 3) * 4);
+                uint32_t mask = xenolith_load32(base, stream + (at + 4) * 4);
+                uint32_t written_where = xenolith_load32(base, stream + (at + 5) * 4);
+                uint32_t written = xenolith_load32(base, stream + (at + 6) * 4);
+                if (it_holds(how, the_value_looked_at(base, how, where), against, mask)) {
+                    if (how & 0x100u) {
+                        xenolith_store32(base, written_where & ~3u,
+                                         as_the_processor_reads(written, written_where));
+                    } else {
+                        set_register(base, written_where, written);
+                        read_so_far.registers++;
+                    }
+                }
+                break;
+            }
+
             /* Telling the title the hardware has reached this point.
              *
              * A title queues work to be run when its commands are reached and
              * writes this where it wants to be told. Nothing it queues
-             * afterwards happens until that shows up. */
+             * afterwards happens until that shows up. The word after the
+             * header names the processors to tell, a bit apiece, and each is
+             * told in turn. */
             if (opcode == XENOLITH_PACKET_TELL_THE_TITLE) {
-                raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_REACHED);
+                uint32_t processors = follows >= 1 ? xenolith_load32(base, stream + (at + 1) * 4)
+                                                   : 1u;
+                for (uint32_t processor = 0; processor < XENOLITH_PROCESSORS; processor++) {
+                    if ((processors >> processor) & 1u) {
+                        raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_REACHED, processor);
+                    }
+                }
                 break;
             }
 
@@ -366,36 +472,14 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
              * value goes where it was asked for as soon as this is reached.
              * Nothing waits, because there is nothing to wait for.
              *
-             * The graphics hardware writes memory in the opposite byte order to
-             * the processor, after swapping the value the way the low two bits
-             * of the address say. So what the processor reads back is the value
-             * as it stands for a swap of every byte, the value with its halves
-             * exchanged for a swap within each half, the value with the bytes of
-             * each half exchanged for a swap of the halves, and the value with
-             * every byte reversed for no swap at all. A title that asks for no
-             * swap reads the word back the other way round itself, and a word
-             * not written at all is one it waits on for ever. */
+             * The word goes in the byte order the low two bits of the address
+             * say. A title that asks for no swap reads the word back the other
+             * way round itself, and a word not written at all is one it waits on
+             * for ever. */
             if (opcode == XENOLITH_PACKET_REPORT && follows >= 3) {
                 uint32_t where = xenolith_load32(base, stream + (at + 2) * 4);
                 uint32_t what = xenolith_load32(base, stream + (at + 3) * 4);
-                uint32_t swapped_halves = (what << 16) | (what >> 16);
-                uint32_t swapped_in_halves =
-                    ((what & 0x00ff00ffu) << 8) | ((what >> 8) & 0x00ff00ffu);
-                uint32_t read_back;
-                switch (where & 3u) {
-                case 0:
-                    read_back = (swapped_in_halves << 16) | (swapped_in_halves >> 16);
-                    break;
-                case 1:
-                    read_back = swapped_halves;
-                    break;
-                case 2:
-                    read_back = what;
-                    break;
-                default:
-                    read_back = swapped_in_halves;
-                    break;
-                }
+                uint32_t read_back = as_the_processor_reads(what, where);
                 xenolith_store32(base, where & ~3u, read_back);
                 break;
             }

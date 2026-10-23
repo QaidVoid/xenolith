@@ -2915,6 +2915,80 @@ int main(void) {
     }
 }
 
+/// Writing a scratch register copies it to memory where the mask says.
+///
+/// A title marks how far through its commands the hardware has got by writing
+/// a scratch register at the end of each run of them, and waits for the copy in
+/// memory. One that only lands in the register file leaves the title watching
+/// a word that never moves until it decides the hardware has hung.
+#[test]
+fn a_scratch_register_is_copied_to_memory() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Three register packets: where the copies go, which registers are
+     * copied (the first two, with the byte order the processor reads), and
+     * then the second scratch register and the third. */
+    uint32_t ring = 0x01000000u;
+    uint32_t copies = 0x04000000u;
+    xenolith_store32(base, ring, 0x01ddu);
+    xenolith_store32(base, ring + 4u, copies);
+    xenolith_store32(base, ring + 8u, 0x01dcu);
+    xenolith_store32(base, ring + 12u, 0x00020003u);
+    xenolith_store32(base, ring + 16u, 0x0579u);
+    xenolith_store32(base, ring + 20u, 0x12345678u);
+    xenolith_store32(base, ring + 24u, 0x057au);
+    xenolith_store32(base, ring + 28u, 0x9abcdef0u);
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02000000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+    xenolith_store32(base, 0x7fc80714u, 8u);
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, 0x02000000u) == 8u) { break; }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    if (xenolith_load32(base, copies + 4u) != 0x12345678u) {
+        fprintf(stderr, "the second scratch register was not copied: %#x\n",
+                xenolith_load32(base, copies + 4u));
+        return 3;
+    }
+    if (xenolith_load32(base, copies + 8u) != 0u) {
+        fprintf(stderr, "a scratch register the mask leaves out was copied\n");
+        return 4;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("scratch", program) {
+        panic!("a scratch register was not copied to memory:\n{complaint}");
+    }
+}
+
 /// A privilege is answered from the flags the container declares.
 ///
 /// A title asks whether it holds a numbered privilege before it does the thing,

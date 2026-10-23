@@ -1813,19 +1813,6 @@ static struct {
  */
 #define XENOLITH_RING_WRITE_POINTER 0x7fc80714u
 
-/* How far back the block a title asks for progress in begins.
- *
- * A title names where the read pointer should be written and, beside it, how
- * big a block that sits in. The size arrives as a power of two and comes out at
- * sixty four bytes, and the address named is sixty bytes into it, so the block
- * starts sixty bytes earlier. The word at the front of it is a count of how far
- * the hardware has worked through what it was given: a title sets it behind
- * where it wants to get to and waits for it to catch up.
- *
- * Both numbers are read out of what a title passes rather than assumed.
- */
-#define XENOLITH_PROGRESS_BEHIND 60u
-
 /* Where a title reads whether there is finished work to account for.
  *
  * Another of the same block of registers. A title checks the lowest bit of it
@@ -1842,6 +1829,11 @@ static struct {
  */
 #define XENOLITH_INTERRUPT_RETIRE 0u
 #define XENOLITH_INTERRUPT_REACHED 1u
+
+/* Which processor the end of a frame is said on. The packet that says commands
+ * were reached names its own processors; this one has no packet, and the
+ * third processor is the one the console says it on. */
+#define XENOLITH_FRAMES_INTERRUPT_PROCESSOR 2u
 
 /* Reports the hardware as having consumed whatever the title has written.
  *
@@ -1869,11 +1861,15 @@ static struct {
  * claim about timing rather than about anything drawn: the frame it reports is
  * one where nothing was rendered.
  */
-static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source) {
+static pthread_mutex_t one_interrupt = PTHREAD_MUTEX_INITIALIZER;
+
+static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source,
+                                        uint32_t processor) {
     static _Thread_local xenolith_context state;
     static _Thread_local uint32_t stack;
+    static _Thread_local uint32_t blocks[XENOLITH_PROCESSORS];
 
-    if (graphics.callback == 0) {
+    if (graphics.callback == 0 || processor >= XENOLITH_PROCESSORS) {
         return;
     }
 
@@ -1886,6 +1882,16 @@ static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source) {
     if (stack == 0) {
         stack = take_thread_stack();
     }
+    /* The block every thread reaches through r13, saying which processor the
+     * handler runs on. That is not incidental: the handler clears the bit for
+     * its own processor in a word the hardware waits on before it goes on, so a
+     * handler on the wrong processor leaves the hardware waiting for ever. */
+    if (blocks[processor] == 0) {
+        blocks[processor] = take_processor_block(base);
+        xenolith_store8(base, blocks[processor] + XENOLITH_PROCESSOR_NUMBER,
+                        (uint8_t)processor);
+    }
+    state.r[13] = blocks[processor];
     state.r[1] = stack - 64;
     /* Which interrupt this is, and what the title asked to be handed back.
      *
@@ -1898,7 +1904,12 @@ static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source) {
      * have to be raised, and which is which is read out of the title. */
     state.r[3] = source;
     state.r[4] = graphics.callback_argument;
+    /* One handler at a time, as on the processor it runs on: the end of a frame
+     * is said from a thread of its own while the commands may say they were
+     * reached, and the handler is not written to be entered twice at once. */
+    pthread_mutex_lock(&one_interrupt);
     body(&state, base);
+    pthread_mutex_unlock(&one_interrupt);
 }
 
 /* Where the block of registers sits, and how many there are.
@@ -1928,13 +1939,59 @@ static uint32_t register_says(const uint8_t *base, uint32_t index) {
     return xenolith_load32(base, XENOLITH_REGISTERS + index * 4);
 }
 
+/* What the processor reads back of a word the graphics hardware wrote to
+ * memory, given the swap the hardware was told to make first.
+ *
+ * The hardware writes memory in the opposite byte order to the processor, after
+ * swapping the value as the two bits say. So a swap of every byte reads back as
+ * the value itself, a swap within each half as the halves exchanged, a swap of
+ * the halves as the bytes of each half exchanged, and no swap at all as every
+ * byte reversed. */
+static uint32_t as_the_processor_reads(uint32_t value, uint32_t order) {
+    uint32_t swapped_in_halves = ((value & 0x00ff00ffu) << 8) | ((value >> 8) & 0x00ff00ffu);
+    switch (order & 3u) {
+    case 0:
+        return (swapped_in_halves << 16) | (swapped_in_halves >> 16);
+    case 1:
+        return (value << 16) | (value >> 16);
+    case 2:
+        return value;
+    default:
+        return swapped_in_halves;
+    }
+}
+
+/* The scratch registers, and the two saying which of them the hardware copies
+ * to memory when written, and where. */
+#define XENOLITH_SCRATCH_FIRST 0x0578u
+#define XENOLITH_SCRATCH_COUNT 8u
+#define XENOLITH_SCRATCH_MASK 0x01dcu
+#define XENOLITH_SCRATCH_ADDRESS 0x01ddu
+
 /* Writes a graphics register, or nothing where the index names none.
  *
  * A packet naming a register past the end is a packet this has no reading of,
- * and writing it somewhere else would be worse than not writing it. */
+ * and writing it somewhere else would be worse than not writing it.
+ *
+ * Writing one of the eight scratch registers also writes it to memory, where
+ * the mask says to: a word apiece from the address the title named, in the
+ * byte order the top of the mask says. That is how a title is told how far
+ * through its commands the hardware has got. It writes a scratch register at
+ * the end of each run of commands and waits for the copy in memory to arrive,
+ * and a register that only lands in the register file leaves it waiting for
+ * ever on a word that never moves. */
 static void set_register(uint8_t *base, uint32_t index, uint32_t value) {
     if (index < XENOLITH_REGISTER_COUNT) {
         xenolith_store32(base, XENOLITH_REGISTERS + index * 4, value);
+    }
+    if (index >= XENOLITH_SCRATCH_FIRST && index < XENOLITH_SCRATCH_FIRST + XENOLITH_SCRATCH_COUNT) {
+        uint32_t which = index - XENOLITH_SCRATCH_FIRST;
+        uint32_t mask = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_SCRATCH_MASK * 4);
+        uint32_t where = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_SCRATCH_ADDRESS * 4);
+        if ((mask >> which) & 1u && where != 0) {
+            xenolith_store32(base, (where & ~3u) + which * 4u,
+                             as_the_processor_reads(value, mask >> 16));
+        }
     }
 }
 
@@ -1964,6 +2021,41 @@ static void consume_the_ring(uint8_t *base, uint32_t written) {
                                   written - consumed, 0);
 }
 
+/* Says that the display finished a frame, sixty times a second, on a thread of
+ * its own.
+ *
+ * Before saying so, the bit a title checks before it will retire anything is
+ * set. It reads that out of a graphics register, and what it means is that
+ * there is finished work to account for. Everything written here is finished
+ * the moment it is written, so the bit is always the truth of this runtime even
+ * though it is never the truth of any hardware.
+ *
+ * Not on the thread reading the commands. A title's commands wait for what the
+ * end of a frame does, such as showing the next picture, and a reader waiting
+ * there cannot be the one to say the frame ended. That the commands reached a
+ * point is said when they reach it, by the packet that asks for it: a title
+ * puts what to run in a scratch register just before that packet and a marker
+ * back afterwards, and told at any other moment it calls the marker as though
+ * it were what to run. */
+static void *count_the_frames(void *given) {
+    uint8_t *base = given;
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (;;) {
+        next.tv_nsec += 16666667L;
+        if (next.tv_nsec >= 1000000000L) {
+            next.tv_sec += 1;
+            next.tv_nsec -= 1000000000L;
+        }
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL) == EINTR) {
+        }
+        xenolith_store32(base, XENOLITH_GRAPHICS_COMPLETED, 1);
+        raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_RETIRE,
+                                     XENOLITH_FRAMES_INTERRUPT_PROCESSOR);
+    }
+    return NULL;
+}
+
 static void *drain_the_ring(void *given) {
     uint8_t *base = given;
     unsigned ticks = 0;
@@ -1979,14 +2071,6 @@ static void *drain_the_ring(void *given) {
         consume_the_ring(base, written);
         xenolith_store32(base, graphics.read_back_at, consumed);
 
-        /* And how far it has worked through what it was given, which is all of
-         * it. A title sets this behind where it wants to get to and waits, so
-         * leaving it still is the same as saying the hardware stopped. */
-        if (graphics.read_back_at > XENOLITH_PROGRESS_BEHIND) {
-            uint32_t head = graphics.read_back_at - XENOLITH_PROGRESS_BEHIND;
-            xenolith_store32(base, head, xenolith_load32(base, head) + 1);
-        }
-
         /* A display finishes a frame sixty times a second. This one finishes
          * nothing, at the same rate.
          *
@@ -2001,12 +2085,6 @@ static void *drain_the_ring(void *given) {
         if (read_so_far.packets != reported_at && ++ticks % 600 == 0) {
             reported_at = read_so_far.packets;
             say_what_was_read();
-        }
-
-        if (++ticks % 160 == 0) {
-            xenolith_store32(base, XENOLITH_GRAPHICS_COMPLETED, 1);
-            raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_RETIRE);
-            raise_the_graphics_interrupt(base, XENOLITH_INTERRUPT_REACHED);
         }
 
         struct timespec briefly = {0, 100000};
@@ -3885,15 +3963,32 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 451:
+        /* Where the commands are written, which starts them again from the
+         * front. */
         graphics.ring_at = (uint32_t)ctx->r[3];
         graphics.ring_size = 1u << ((uint32_t)ctx->r[4] & 0x1f);
+        consumed = 0;
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 438: {
+        /* Where to say how far the commands have been read, and the start of
+         * the reading. A title says where more than once, as it sets the
+         * hardware up again, and the reading is started only the first time:
+         * a second reader walks the same commands as the first, from the same
+         * count of how far both have got, so every draw and every copy is
+         * carried out twice and the count races between them. */
         graphics.read_back_at = (uint32_t)ctx->r[3];
-        pthread_t draining;
-        if (pthread_create(&draining, NULL, drain_the_ring, base) == 0) {
-            pthread_detach(draining);
+        static int reading;
+        if (!reading) {
+            reading = 1;
+            pthread_t draining;
+            if (pthread_create(&draining, NULL, drain_the_ring, base) == 0) {
+                pthread_detach(draining);
+            }
+            pthread_t counting;
+            if (pthread_create(&counting, NULL, count_the_frames, base) == 0) {
+                pthread_detach(counting);
+            }
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
