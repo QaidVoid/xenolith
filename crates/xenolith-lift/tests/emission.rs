@@ -495,33 +495,39 @@ fn a_reservation_retry_lifts() {
     // record bit. Treating it as one appended a comparison that overwrote the
     // outcome of the store, and the retry then never stopped retrying.
     assert!(
-        !emitted.contains("ctx->cr[0].eq = ctx->r[10] == 0;"),
+        !emitted.contains("ctx->cr[0].eq = (uint32_t)ctx->r[10] == 0;"),
         "the store's outcome was overwritten by a comparison: {emitted}"
     );
     assert_eq!(compiles("reservation", &emitted), Ok(()));
 }
 
-/// A recorded result is compared at the width the register holds. The console
-/// is a 64-bit PowerPC and its dot forms compare the whole register, so casting
-/// down to 32 bits would report a positive result for a negative one.
+/// A recorded result is compared in its low word.
+///
+/// The console runs a title in the processor's thirty two bit mode, where a
+/// record compares the low word with zero. Its compiler relies on that: words
+/// are loaded without their sign extended, and sums of them are recorded with
+/// whatever a borrow left in the high half. Comparing the whole register sent
+/// one title's loop past the remainder it was counting down to and round again
+/// for ever. The differential checks the same against a thirty two bit
+/// processor.
 #[test]
-fn a_recorded_result_is_compared_at_the_register_width() {
+fn a_recorded_result_is_compared_in_its_low_word() {
     // add. r3, r4, r5
     let words = [0x7c64_2a15, 0x4e80_0020];
 
     let emitted = lift_entry(&words).expect("a recording add should lift");
 
     assert!(
-        emitted.contains("ctx->cr[0].lt = (int64_t)ctx->r[3] < 0;"),
-        "the sign was not taken from the whole register: {emitted}"
+        emitted.contains("ctx->cr[0].lt = (int32_t)ctx->r[3] < 0;"),
+        "the sign was not taken from the low word: {emitted}"
     );
     assert!(
-        emitted.contains("ctx->cr[0].eq = ctx->r[3] == 0;"),
-        "the equality did not compare the whole register: {emitted}"
+        emitted.contains("ctx->cr[0].eq = (uint32_t)ctx->r[3] == 0;"),
+        "the equality did not compare the low word: {emitted}"
     );
     assert!(
-        !emitted.contains("(int32_t)(uint32_t)ctx->r[3] < 0"),
-        "the comparison was narrowed to 32 bits: {emitted}"
+        !emitted.contains("(int64_t)ctx->r[3] < 0"),
+        "the comparison read the whole register: {emitted}"
     );
     assert_eq!(compiles("record-width", &emitted), Ok(()));
 }
@@ -829,11 +835,11 @@ fn a_wide_shift_records_the_register_it_wrote() {
         "the rotate did not write r3: {emitted}"
     );
     assert!(
-        emitted.contains("ctx->cr[0].lt = (int64_t)ctx->r[3] < 0;"),
+        emitted.contains("ctx->cr[0].lt = (int32_t)ctx->r[3] < 0;"),
         "the record compared the source rather than the destination: {emitted}"
     );
     assert!(
-        !emitted.contains("ctx->cr[0].lt = (int64_t)ctx->r[4] < 0;"),
+        !emitted.contains("ctx->cr[0].lt = (int32_t)ctx->r[4] < 0;"),
         "the record compared the source register: {emitted}"
     );
     assert_eq!(compiles("wide-record", &emitted), Ok(()));

@@ -44,9 +44,16 @@ fi
 # So it runs here when the tools answer, and is left alone when they do not. The
 # point is not to require them. It is that having them and not using them is the
 # case where the gate quietly stops checking the thing it is strongest at.
+#
+# A console runs a title in the processor's thirty two bit mode, so the
+# condition and the carry are checked against a thirty two bit processor as
+# well, and its tools are needed beside the sixty four bit ones.
 if command -v powerpc64-linux-gnu-gcc >/dev/null 2>&1 &&
-   command -v qemu-ppc64 >/dev/null 2>&1; then
+   command -v qemu-ppc64 >/dev/null 2>&1 &&
+   command -v powerpc-linux-gnu-gcc >/dev/null 2>&1 &&
+   command -v qemu-ppc >/dev/null 2>&1; then
     run differential env XENOLITH_PPC_TOOLCHAIN=powerpc64-linux-gnu- \
+        XENOLITH_PPC32_TOOLCHAIN=powerpc-linux-gnu- \
         cargo test --release -p xenolith-lift --test execution -- --include-ignored
 else
     printf 'check: differential skipped, because this machine has no cross toolchain\n'

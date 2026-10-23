@@ -484,6 +484,178 @@ fn on_hardware(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> Result<Vec<Stat
     parse(&String::from_utf8_lossy(&ran.stdout))
 }
 
+/// What a word instruction left behind on a processor that is thirty two bits
+/// wide: the low words of the watched registers, the condition register, and
+/// the bits of the exception register this project models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WordState {
+    registers: [u32; WATCHED_COUNT],
+    condition: u32,
+    exception: u32,
+}
+
+/// Returns the tool prefix for a thirty two bit cross compiler, if it works.
+fn word_prefix() -> Option<String> {
+    let prefix = std::env::var("XENOLITH_PPC32_TOOLCHAIN").ok()?;
+    Command::new(format!("{prefix}gcc"))
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|_| prefix)
+}
+
+/// Returns the thirty two bit emulator, if one is installed.
+fn word_emulator() -> Option<String> {
+    let name = std::env::var("XENOLITH_PPC32_EMULATOR").unwrap_or_else(|_| "qemu-ppc".to_owned());
+    Command::new(&name)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|_| name)
+}
+
+/// Writes the assembly that executes each word encoding on a thirty two bit
+/// processor, from the low words of the same seeds.
+fn word_assembly(words: &[u32], seeds: usize) -> String {
+    let mut out = String::from("\t.globl run\n\t.type run,@function\nrun:\n");
+    let _ = writeln!(
+        out,
+        "\tstw 30, -8(1)\n\tstw 31, -4(1)\n\tmr 30, 3\n\tmr 31, 4"
+    );
+    for seed in 0..seeds {
+        let base = seed * WATCHED.len() * 8;
+        for word in words {
+            for (at, register) in WATCHED.iter().enumerate() {
+                // A seed is a big endian doubleword, so its low word is the
+                // second four bytes.
+                let offset = base + at * 8 + 4;
+                let _ = writeln!(out, "\tlwz {register}, {offset}(30)");
+            }
+            let _ = writeln!(out, "\tli 0, 0\n\tmtxer 0\n\tmtcr 0");
+            let _ = writeln!(out, "\t.long {word}");
+            for (at, register) in WATCHED.iter().enumerate() {
+                let _ = writeln!(out, "\tstw {register}, {}({OUTPUT_REGISTER})", at * 4);
+            }
+            let cr_at = WATCHED.len() * 4;
+            let _ = writeln!(out, "\tmfcr 0\n\tstw 0, {cr_at}({OUTPUT_REGISTER})");
+            let _ = writeln!(out, "\tmfxer 0\n\tstw 0, {}({OUTPUT_REGISTER})", cr_at + 4);
+            let _ = writeln!(
+                out,
+                "\taddi {OUTPUT_REGISTER}, {OUTPUT_REGISTER}, {}",
+                cr_at + 8
+            );
+        }
+    }
+    let _ = writeln!(out, "\tlwz 30, -8(1)\n\tlwz 31, -4(1)\n\tblr");
+    out
+}
+
+/// The driver for the thirty two bit run, which prints each run's words.
+const WORD_DRIVER: &str = r#"
+#include <stdio.h>
+#include <stdint.h>
+
+void run(const uint64_t *seeds, uint32_t *out);
+
+int main(void) {
+    static const uint64_t seeds[SEED_WORDS] = SEED_VALUES;
+    static uint32_t out[RESULT_WORDS];
+    run(seeds, out);
+    for (int i = 0; i < RESULT_COUNT; i++) {
+        const uint32_t *r = out + i * RESULT_SLOTS;
+        for (int w = 0; w < RESULT_SLOTS; w++) {
+            printf(w == 0 ? "%08x" : " %08x", (unsigned)r[w]);
+        }
+        printf("\n");
+    }
+    return 0;
+}
+"#;
+
+/// Runs each word encoding on an emulated thirty two bit processor, once per
+/// seed.
+///
+/// A console runs a title in the processor's thirty two bit mode. The
+/// registers stay sixty four bits wide and so does the arithmetic, which is
+/// what the run above checks, but a record compares the low word with zero and
+/// a carry is the one out of the low word. A processor that is thirty two bits
+/// wide computes exactly that, so what it leaves in the condition register and
+/// the carry is what a console would have.
+fn in_word_mode(words: &[u32], seeds: &[[u64; WATCHED_COUNT]]) -> Result<Vec<WordState>, String> {
+    let prefix = word_prefix().ok_or_else(|| {
+        "XENOLITH_PPC32_TOOLCHAIN names no working thirty two bit ppc toolchain".to_owned()
+    })?;
+    let emulator =
+        word_emulator().ok_or_else(|| "no thirty two bit ppc user mode emulator".to_owned())?;
+
+    let directory = workspace("execution-word")?;
+    std::fs::write(directory.join("run.s"), word_assembly(words, seeds.len()))
+        .map_err(|error| format!("writing the assembly: {error}"))?;
+    let flat: Vec<String> = seeds
+        .iter()
+        .flat_map(|seed| seed.iter().map(|value| format!("{value}ull")))
+        .collect();
+    let slots = WATCHED.len() + 2;
+    let count = words.len() * seeds.len();
+    let driver = WORD_DRIVER
+        .replace("SEED_WORDS", &flat.len().to_string())
+        .replace("SEED_VALUES", &format!("{{{}}}", flat.join(", ")))
+        .replace("RESULT_WORDS", &(count * slots).to_string())
+        .replace("RESULT_SLOTS", &slots.to_string())
+        .replace("RESULT_COUNT", &count.to_string());
+    std::fs::write(directory.join("driver.c"), driver)
+        .map_err(|error| format!("writing the driver: {error}"))?;
+
+    let built = Command::new(format!("{prefix}gcc"))
+        .args(["-static", "-O1", "-o"])
+        .arg(directory.join("guest"))
+        .arg(directory.join("driver.c"))
+        .arg(directory.join("run.s"))
+        .output()
+        .map_err(|error| format!("running the cross compiler: {error}"))?;
+    if !built.status.success() {
+        return Err(format!(
+            "the word guest did not build:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        ));
+    }
+    let ran = Command::new(&emulator)
+        .arg(directory.join("guest"))
+        .output()
+        .map_err(|error| format!("running the emulator: {error}"))?;
+    if !ran.status.success() {
+        return Err(format!(
+            "the word guest did not run:\n{}",
+            String::from_utf8_lossy(&ran.stderr)
+        ));
+    }
+
+    let mut states = Vec::new();
+    for line in String::from_utf8_lossy(&ran.stdout).lines() {
+        let fields: Vec<u32> = line
+            .split_whitespace()
+            .filter_map(|field| u32::from_str_radix(field, 16).ok())
+            .collect();
+        let (Some(words), Some(&condition), Some(&exception)) = (
+            fields.get(..WATCHED_COUNT),
+            fields.get(WATCHED_COUNT),
+            fields.get(WATCHED_COUNT + 1),
+        ) else {
+            return Err(format!("could not read {line:?}"));
+        };
+        let mut registers = [0u32; WATCHED_COUNT];
+        registers.copy_from_slice(words);
+        states.push(WordState {
+            registers,
+            condition,
+            exception: exception & u32::try_from(EXCEPTION_MODELLED).unwrap_or(0),
+        });
+    }
+    Ok(states)
+}
+
 /// Reads the state each side printed.
 fn parse(text: &str) -> Result<Vec<State>, String> {
     let mut states = Vec::new();
@@ -810,6 +982,36 @@ const fn extended(target: u32, first: u32, second: u32, code: u32, record: u32) 
 
 /// The instructions this harness runs, paired with what they are.
 fn subjects() -> Vec<(u32, &'static str)> {
+    integer_subjects()
+        .into_iter()
+        .chain(memory_subjects())
+        .chain(vector_subjects())
+        .collect()
+}
+
+/// The instructions a thirty two bit processor has too, whose condition and
+/// carry a console computes the way such a processor does.
+fn word_subjects() -> Vec<(u32, &'static str)> {
+    const DOUBLEWORD: [&str; 10] = [
+        "mulld",
+        "divd",
+        "divdu",
+        "tdi never",
+        "td never",
+        "sld",
+        "srd",
+        "srad",
+        "extsw",
+        "cntlzd",
+    ];
+    integer_subjects()
+        .into_iter()
+        .filter(|(_, name)| !DOUBLEWORD.contains(name))
+        .collect()
+}
+
+/// The integer instructions, which reach no memory.
+fn integer_subjects() -> Vec<(u32, &'static str)> {
     let (a, b, c, _d) = (WATCHED[0], WATCHED[1], WATCHED[2], WATCHED[3]);
 
     vec![
@@ -871,9 +1073,15 @@ fn subjects() -> Vec<(u32, &'static str)> {
         (extended(b, a, 0, 26, 0), "cntlzw"),
         (extended(b, a, 0, 58, 0), "cntlzd"),
         (extended(b, a, 4, 824, 0), "srawi"),
-        // The record bit, which compares the result against zero.
+        // The record bit, which compares the low word of the result against
+        // zero. Moving a register whose low word is negative and whose high
+        // half is clear records it as negative, which comparing the whole
+        // register gets backwards.
         (extended(a, b, c, 266, 1), "add."),
+        (extended(a, b, c, 40, 1), "subf."),
         (extended(b, a, c, 28, 1), "and."),
+        (extended(a, b, a, 444, 1), "mr."),
+        ((13 << 26) | (a << 21) | (b << 16) | 0xfffc, "addic."),
         // Immediate forms.
         ((14 << 26) | (a << 21) | (b << 16) | 0x0064, "addi"),
         ((15 << 26) | (a << 21) | (b << 16) | 0x0064, "addis"),
@@ -926,10 +1134,6 @@ fn subjects() -> Vec<(u32, &'static str)> {
         (extended(6 << 2, b, c, 0, 0), "cmp"),
         (extended(6 << 2, b, c, 32, 0), "cmpl"),
     ]
-    .into_iter()
-    .chain(memory_subjects())
-    .chain(vector_subjects())
-    .collect()
 }
 
 /// The instructions that reach memory, addressed through the register holding
@@ -1226,8 +1430,45 @@ fn the_model_computes_what_the_hardware_computes() {
         .partition(|(word, _)| xenolith_lift::code_for(Instruction::decode(*word), 0).is_some());
     let words: Vec<u32> = subjects.iter().map(|(word, _)| *word).collect();
 
-    let hardware = honest::or_fail(on_hardware(&words, &SEEDS), "running on hardware");
+    let mut hardware = honest::or_fail(on_hardware(&words, &SEEDS), "running on hardware");
     let model = honest::or_fail(on_the_model(&words, &SEEDS), "running through the model");
+
+    // The condition and the carry a console computes, from a processor that is
+    // thirty two bits wide, in place of the ones the sixty four bit run left.
+    // The low words of what both runs computed have to agree, or the two
+    // processors are not running the same thing.
+    let word_names: Vec<&str> = word_subjects().iter().map(|(_, name)| *name).collect();
+    let in_words: Vec<usize> = (0..words.len())
+        .filter(|at| word_names.contains(&subjects[*at].1))
+        .collect();
+    let word_encodings: Vec<u32> = in_words.iter().map(|at| words[*at]).collect();
+    let word_runs = honest::or_fail(
+        in_word_mode(&word_encodings, &SEEDS),
+        "running on a thirty two bit processor",
+    );
+    assert_eq!(
+        word_runs.len(),
+        word_encodings.len() * SEEDS.len(),
+        "the thirty two bit processor did not report a result for every run"
+    );
+    for (run, word_state) in word_runs.iter().enumerate() {
+        let seed = run / word_encodings.len();
+        let subject = in_words[run % word_encodings.len()];
+        let state = &mut hardware[seed * words.len() + subject];
+        let low: Vec<u32> = state
+            .registers
+            .iter()
+            .map(|value| u32::try_from(value & 0xffff_ffff).unwrap_or(0))
+            .collect();
+        assert_eq!(
+            low.as_slice(),
+            word_state.registers.as_slice(),
+            "{} computed different low words on the two processors",
+            subjects[subject].1
+        );
+        state.condition = (state.condition & 0x0fff_ffff) | (word_state.condition & 0xf000_0000);
+        state.exception = u64::from(word_state.exception);
+    }
 
     assert_eq!(
         hardware.len(),

@@ -44,6 +44,7 @@ export XENOLITH_LIFT_IMAGE=${XENOLITH_LIFT_IMAGE-$corpus/pes6-recomp/pes6_extrac
 export XENOLITH_LIFT_CORPUS=${XENOLITH_LIFT_CORPUS-$corpus/pes6-recomp/pes6_ppc}
 export XENOLITH_PPC_BINUTILS=${XENOLITH_PPC_BINUTILS-powerpc64-linux-gnu-}
 export XENOLITH_PPC_TOOLCHAIN=${XENOLITH_PPC_TOOLCHAIN-powerpc64-linux-gnu-}
+export XENOLITH_PPC32_TOOLCHAIN=${XENOLITH_PPC32_TOOLCHAIN-powerpc-linux-gnu-}
 
 # The operand comparison reads a raw image rather than a container. The corpus
 # already keeps one beside the code it was built from, so nothing is copied and

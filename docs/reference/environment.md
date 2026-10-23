@@ -109,12 +109,15 @@ toolchain, or an emulator read paths from these and skip when they are unset, so
 | `XENOLITH_PPC_CODE` | a code section to compare operands over |
 | `XENOLITH_PPC_TOOLCHAIN` | a big endian ppc64 toolchain prefix |
 | `XENOLITH_PPC_EMULATOR` | a user mode emulator, `qemu-ppc64` by default |
+| `XENOLITH_PPC32_TOOLCHAIN` | a big endian thirty two bit ppc toolchain prefix, for the condition and the carry a console computes |
+| `XENOLITH_PPC32_EMULATOR` | a thirty two bit user mode emulator, `qemu-ppc` by default |
 
 Run these with `--release`. In a debug build they take minutes.
 
 ```sh
 XENOLITH_PPC_TOOLCHAIN=/opt/bootlin/powerpc64-power8-glibc/bin/powerpc64-buildroot-linux-gnu- \
 XENOLITH_PPC_EMULATOR=qemu-ppc64 \
+XENOLITH_PPC32_TOOLCHAIN=powerpc-linux-gnu- \
   cargo test --release -p xenolith-lift --test execution -- --include-ignored
 ```
 

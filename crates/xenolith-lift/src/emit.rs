@@ -146,20 +146,25 @@ const CARRY_IN: &str = "((ctx->xer >> 29) & 1)";
 /// So the two additions are done in turn and either one carrying counts. Found
 /// by running a real function whose `subfc` of a value from itself should have
 /// carried and did not.
+///
+/// The carry is the one out of the low word, because a console runs a title in
+/// the processor's thirty two bit mode: the registers are sixty four bits wide
+/// and the sum is too, but what carries is the word. The three terms are added
+/// as words in a wider type, so the carry is the bit above them.
 fn carry_sum(out: &mut String, left: &str, right: &str, carry: &str, rt: u32) -> std::fmt::Result {
     writeln!(
         out,
-        "    {{ uint64_t left = {left}; uint64_t right = {right};"
+        "    {{ uint64_t left = {left}; uint64_t right = {right}; uint64_t in = {carry};"
     )?;
     writeln!(
         out,
-        "    uint64_t mid = left + right; uint64_t sum = mid + ({carry});"
+        "    uint64_t word = (uint64_t)(uint32_t)left + (uint32_t)right + in;"
     )?;
     writeln!(
         out,
-        "    ctx->xer = (ctx->xer & ~0x20000000ull) | ((mid < left || sum < mid) ? 0x20000000ull : 0);"
+        "    ctx->xer = (ctx->xer & ~0x20000000ull) | ((word >> 32) != 0 ? 0x20000000ull : 0);"
     )?;
-    writeln!(out, "    ctx->r[{rt}] = sum; }}")
+    writeln!(out, "    ctx->r[{rt}] = left + right + in; }}")
 }
 
 /// Writes a word rotate, which is not the thirty two bit operation it looks
@@ -1630,7 +1635,11 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             );
             let _ = writeln!(
                 out,
-                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (sum < left ? 0x20000000ull : 0ull);"
+                "    uint32_t word = (uint32_t)left + (uint32_t)(int32_t)({displacement});"
+            );
+            let _ = writeln!(
+                out,
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (word < (uint32_t)left ? 0x20000000ull : 0ull);"
             );
             let _ = writeln!(out, "    ctx->r[{rt}] = sum; }}");
         }
@@ -1654,7 +1663,7 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
             );
             let _ = writeln!(
                 out,
-                "    ctx->xer = (ctx->xer & ~0x20000000ull) | (from >= ctx->r[{ra}] ? 0x20000000ull : 0ull);"
+                "    ctx->xer = (ctx->xer & ~0x20000000ull) | ((uint32_t)from >= (uint32_t)ctx->r[{ra}] ? 0x20000000ull : 0ull);"
             );
             let _ = writeln!(out, "    ctx->r[{rt}] = from - ctx->r[{ra}]; }}");
         }
@@ -2595,12 +2604,19 @@ fn code_of(instruction: Instruction, address: u32) -> Option<String> {
         _ => out.push_str(&vector_code(instruction)?),
     }
 
+    // A record compares the low word of the result with zero, not the whole
+    // register. A console runs a title in the processor's thirty two bit mode,
+    // where that is what the record bit means, and the title's compiler relies
+    // on it: it loads words without extending their sign and records sums of
+    // them, so the high half holds whatever borrow a subtraction left there.
+    // Compared whole, one title's loop that counts a remainder down to nothing
+    // never sees it reach nothing and spins for ever.
     if records {
         let _ = writeln!(
             out,
-            "    ctx->cr[0].lt = (int64_t)ctx->r[{recorded}] < 0;\n    \
-             ctx->cr[0].gt = (int64_t)ctx->r[{recorded}] > 0;\n    \
-             ctx->cr[0].eq = ctx->r[{recorded}] == 0;\n    \
+            "    ctx->cr[0].lt = (int32_t)ctx->r[{recorded}] < 0;\n    \
+             ctx->cr[0].gt = (int32_t)ctx->r[{recorded}] > 0;\n    \
+             ctx->cr[0].eq = (uint32_t)ctx->r[{recorded}] == 0;\n    \
              ctx->cr[0].so = (uint8_t)(ctx->xer >> 31) & 1;"
         );
     }
@@ -2877,8 +2893,10 @@ fn condition_of(instruction: Instruction) -> String {
     if bo & 0b0_0100 == 0 {
         // Bit three says the branch wants the count to have reached zero
         // rather than not to have.
+        // The count is a word in the thirty two bit mode a title runs in, so
+        // reaching zero is its low word reaching zero.
         let wanted = if bo & 0b0_0010 == 0 { "!=" } else { "==" };
-        tests.push(format!("(--ctx->ctr {wanted} 0)"));
+        tests.push(format!("((uint32_t)--ctx->ctr {wanted} 0)"));
     }
     // Bit four says the branch is taken whatever the condition register holds.
     if bo & 0b1_0000 == 0 {
