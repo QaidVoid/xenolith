@@ -1177,7 +1177,8 @@ fn cases_of(runtime: &str, name: &str) -> BTreeSet<u32> {
     found
 }
 
-/// A file beside the program opens, reads, and reports how long it is.
+/// A file beside the program opens, reads, reports how long it is, and reads
+/// again from where a title moves to.
 ///
 /// A title names its files with a prefix of its own and never with a path a
 /// host would recognise, so what is being checked is the mapping from the one
@@ -1250,16 +1251,19 @@ int main(void) {
         return 5;
     }
 
-    /* How long it is, which a title asks before making room to read it. */
+    /* How long it is, which a title asks before making room to read it, in
+     * the layout it asks for straight after opening: four times, then the
+     * length it takes up and the length it holds. */
     ctx.r[3] = handle;
     ctx.r[4] = 0x2200;
     ctx.r[5] = 0x2300;
-    ctx.r[7] = 1;           /* how long the file is */
+    ctx.r[6] = 0x38;
+    ctx.r[7] = 34;
     xenolith_import(&ctx, base, "xboxkrnl.exe", 232, "NtQueryInformationFile");
-    uint64_t length = xenolith_load64(base, 0x2300);
-    if (length != 6u) {
-        fprintf(stderr, "the file was reported as %llu bytes long\n",
-                (unsigned long long)length);
+    uint64_t length = xenolith_load64(base, 0x2300 + 40);
+    if (ctx.r[3] != 0u || length != 6u) {
+        fprintf(stderr, "the file was reported as %llu bytes long, with %#llx\n",
+                (unsigned long long)length, (unsigned long long)ctx.r[3]);
         return 6;
     }
 
@@ -1279,6 +1283,44 @@ int main(void) {
     if (memcmp(base + 0x3000, "abcdef", 6) != 0) {
         fprintf(stderr, "the bytes read were not the ones in the file\n");
         return 8;
+    }
+
+    /* Moving back to the third byte, then reading without naming a place,
+     * which reads from where the move left it. */
+    xenolith_store64(base, 0x2600, 2);
+    ctx.r[3] = handle;
+    ctx.r[4] = 0x2200;
+    ctx.r[5] = 0x2600;
+    ctx.r[6] = 8;
+    ctx.r[7] = 14;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 247, "NtSetInformationFile");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "moving failed with %#llx\n", (unsigned long long)ctx.r[3]);
+        return 9;
+    }
+    ctx.r[3] = handle;
+    ctx.r[4] = 0;
+    ctx.r[7] = 0x2500;
+    ctx.r[8] = 0x3100;
+    ctx.r[9] = 4;
+    ctx.r[10] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 240, "NtReadFile");
+    if (ctx.r[3] != 0u || memcmp(base + 0x3100, "cdef", 4) != 0) {
+        fprintf(stderr, "reading after a move did not start where the move left it\n");
+        return 10;
+    }
+
+    /* A question this does not answer is refused, not answered with nothing. */
+    ctx.r[3] = handle;
+    ctx.r[4] = 0x2200;
+    ctx.r[5] = 0x2300;
+    ctx.r[6] = 0x38;
+    ctx.r[7] = 1;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 232, "NtQueryInformationFile");
+    if (ctx.r[3] != 0xC0000003u) {
+        fprintf(stderr, "an unanswered question came back as %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 11;
     }
     return 0;
 }

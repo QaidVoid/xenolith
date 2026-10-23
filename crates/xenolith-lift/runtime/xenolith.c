@@ -41,6 +41,7 @@
 static void read_file(xenolith_context *ctx, uint8_t *base);
 static void write_file(xenolith_context *ctx, uint8_t *base);
 static void query_file(xenolith_context *ctx, uint8_t *base);
+static void set_file(xenolith_context *ctx, uint8_t *base);
 static void query_directory(xenolith_context *ctx, uint8_t *base);
 static void open_file(xenolith_context *ctx, uint8_t *base, int may_make);
 static void remember_where_the_image_was(const char *image);
@@ -255,6 +256,18 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 
 /* What reading past the end of a file reports. */
 #define XENOLITH_STATUS_END_OF_FILE 0xC0000011u
+
+/* What asking about a file for something this does not answer reports. */
+#define XENOLITH_STATUS_INVALID_INFO_CLASS 0xC0000003u
+
+/* The kinds of thing a title asks about a file, by the kernel's numbers. */
+#define XENOLITH_FILE_STANDARD 5u
+#define XENOLITH_FILE_POSITION 14u
+#define XENOLITH_FILE_NETWORK_OPEN 34u
+
+/* What a file is, as the last word of what is said about one: an ordinary file
+ * with nothing special about it. */
+#define XENOLITH_FILE_ATTRIBUTE_NORMAL 0x80u
 
 /* The place a title names when it means the end of a file rather than a number
  * of bytes into it. The number is the console's. */
@@ -1990,11 +2003,19 @@ static void write_file(xenolith_context *ctx, uint8_t *base) {
  *
  * A title asks before it reads, to know how much room to make. Answering with
  * nothing makes every file look empty.
+ *
+ * Three kinds of question are answered, each in the kernel's own layout: the
+ * standard one, which holds the length at its second word pair; where reading is
+ * up to; and the one asked of a file just opened, which holds four times, the
+ * length twice and what the file is. The times are nought because nothing here
+ * keeps them. Anything else is refused rather than answered with a success that
+ * wrote nothing.
  */
 static void query_file(xenolith_context *ctx, uint8_t *base) {
     struct object *found = object_of((uint32_t)ctx->r[3]);
     uint32_t status_at = (uint32_t)ctx->r[4];
     uint32_t into = (uint32_t)ctx->r[5];
+    uint32_t room = (uint32_t)ctx->r[6];
     uint32_t kind = (uint32_t)ctx->r[7];
 
     if (found == NULL || found->file == NULL) {
@@ -2003,28 +2024,68 @@ static void query_file(xenolith_context *ctx, uint8_t *base) {
         return;
     }
 
-    /* The two things a title asks for are answered: how long the file is, and
-     * where reading it is up to. Anything else says nothing rather than a
-     * number that would be invented. */
-    if (kind == 1) {
-        long here = ftell(found->file);
-        fseek(found->file, 0, SEEK_END);
-        long length = ftell(found->file);
-        fseek(found->file, here, SEEK_SET);
-        if (into != 0) {
-            xenolith_store64(base, into, (uint64_t)(length < 0 ? 0 : length));
+    long here = ftell(found->file);
+    fseek(found->file, 0, SEEK_END);
+    long ends = ftell(found->file);
+    fseek(found->file, here, SEEK_SET);
+    uint64_t length = (uint64_t)(ends < 0 ? 0 : ends);
+
+    uint32_t said;
+    if (kind == XENOLITH_FILE_STANDARD && room >= 24) {
+        xenolith_store64(base, into, length);
+        xenolith_store64(base, into + 8, length);
+        xenolith_store32(base, into + 16, 1);
+        xenolith_store32(base, into + 20, 0);
+        said = 24;
+    } else if (kind == XENOLITH_FILE_POSITION && room >= 8) {
+        xenolith_store64(base, into, (uint64_t)found->at);
+        said = 8;
+    } else if (kind == XENOLITH_FILE_NETWORK_OPEN && room >= 56) {
+        for (uint32_t time = 0; time < 4; time++) {
+            xenolith_store64(base, into + time * 8, 0);
         }
-    } else if (kind == 2) {
-        if (into != 0) {
-            xenolith_store64(base, into, (uint64_t)found->at);
-        }
+        xenolith_store64(base, into + 32, length);
+        xenolith_store64(base, into + 40, length);
+        xenolith_store32(base, into + 48, XENOLITH_FILE_ATTRIBUTE_NORMAL);
+        xenolith_store32(base, into + 52, 0);
+        said = 56;
     } else {
-        report_io(base, status_at, XENOLITH_STATUS_SUCCESS, 0);
-        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        report_io(base, status_at, XENOLITH_STATUS_INVALID_INFO_CLASS, 0);
+        ctx->r[3] = XENOLITH_STATUS_INVALID_INFO_CLASS;
         return;
     }
 
-    report_io(base, status_at, XENOLITH_STATUS_SUCCESS, 8);
+    report_io(base, status_at, XENOLITH_STATUS_SUCCESS, said);
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
+/* Moving where reading a file is up to.
+ *
+ * Where reading is up to is the one thing a title sets. A read that names no
+ * place starts from there, so a title that seeks and then reads without naming
+ * one reads from the front of the file when the seek is not kept. Anything else
+ * is refused rather than reported as done.
+ */
+static void set_file(xenolith_context *ctx, uint8_t *base) {
+    struct object *found = object_of((uint32_t)ctx->r[3]);
+    uint32_t status_at = (uint32_t)ctx->r[4];
+    uint32_t from = (uint32_t)ctx->r[5];
+    uint32_t room = (uint32_t)ctx->r[6];
+    uint32_t kind = (uint32_t)ctx->r[7];
+
+    if (found == NULL || found->file == NULL) {
+        report_io(base, status_at, XENOLITH_STATUS_NOT_FOUND, 0);
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return;
+    }
+    if (kind != XENOLITH_FILE_POSITION || room < 8) {
+        report_io(base, status_at, XENOLITH_STATUS_INVALID_INFO_CLASS, 0);
+        ctx->r[3] = XENOLITH_STATUS_INVALID_INFO_CLASS;
+        return;
+    }
+
+    found->at = (long long)xenolith_load64(base, from);
+    report_io(base, status_at, XENOLITH_STATUS_SUCCESS, 0);
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
 
@@ -2938,6 +2999,9 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
     }
     case 232:
         query_file(ctx, base);
+        return 1;
+    case 247:
+        set_file(ctx, base);
         return 1;
     case 228:
         query_directory(ctx, base);
