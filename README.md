@@ -34,9 +34,9 @@ Measured against two retail titles, with
 Both titles lift completely, both compile, both reach the renderer and draw
 with their own translated shaders, and both keep running until they are
 stopped. Title A copies its frames out of the graphics hardware and hands them
-to the display, and those copies are what is shown. They are not yet the right
-picture: the shapes a title draws arrive, but what it draws into, what it reads
-back as pictures and how it composes a frame are only partly modelled.
+to the display, and its opening logos and notices come out as the title drew
+them. It has not been run past those, and nothing decodes its compressed sound,
+so its music and voices are not heard.
 
 Whether a frame is right is not measured by anything here. The runtime reports
 what it drew, and `XENOLITH_FRAMES` writes out what was shown so it can be
@@ -60,8 +60,7 @@ data is in this repository.
 
 ## What it does not do
 
-- **Play a game.** Title A runs and shows frames, but they are not yet the
-  picture the title drew.
+- **Play a game.** Title A shows its opening screens and goes no further yet.
 - **Reproduce a console's settings.** A privilege, the video cable, two display
   settings, the region, the language and a signed in profile are answered from
   what a title's own startup requires, because what a console was set to is not
