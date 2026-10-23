@@ -1309,6 +1309,25 @@ static void time_to_fields(xenolith_context *ctx, uint8_t *base) {
  * against four of them. Three is the component cable. */
 #define XENOLITH_AV_PACK_COMPONENT 3u
 
+/* Listeners a title asked for, which never have anything to say.
+ *
+ * A title is given a number rather than a handle to nothing, because a number it
+ * can pass back is what its own code expects, and asking whether an idle
+ * listener has anything is a question with a real answer: no. */
+static uint32_t listeners_handed_out = 0x100;
+
+static uint32_t take_a_listener(void) {
+    return listeners_handed_out++;
+}
+
+/* What a title registered as a sound client, if it registered one.
+ *
+ * Kept so that a registration can be answered and forgotten. Nothing here calls
+ * the callback: the device is fed from the runtime's own thread, which is the
+ * only way sound reaches a host device from here. */
+static uint32_t sound_client;
+static uint32_t sound_client_callback;
+
 /* What a title told the graphics hardware, kept because it is the only record
  * of it.
  *
@@ -2097,6 +2116,112 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
              * started would send a title looking for one. */
             ctx->r[3] = XENOLITH_STATUS_NO_NETWORK;
             return 1;
+        case 400: {
+            /* What a controller can do.
+             *
+             * The title names a port and asks what it is. What is answered is a
+             * pad with the two sticks, the two triggers and the buttons a
+             * console pad has, because that is what the desktop's keyboard is
+             * standing in for. The structure is the console's own: a size, then
+             * a bit per capability. */
+            uint32_t into = (uint32_t)ctx->r[5];
+            uint32_t port = (uint32_t)ctx->r[3];
+            if (port > 3u) {
+                ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+                return 1;
+            }
+            if (into != 0) {
+                xenolith_store32(base, into, 4);
+                /* Everything a console pad has: the four directions, four face
+                 * buttons, two shoulder buttons, two triggers, the two sticks
+                 * pressed, and the two analogue sticks. */
+                xenolith_store32(base, into + 4, 0x0000000fu);
+                xenolith_store32(base, into + 8, 0x0000ffffu);
+            }
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        case 401: {
+            /* What a controller is holding now.
+             *
+             * The console's structure is a packet number, the buttons, the two
+             * triggers and the two sticks. What is written is what the host is
+             * holding, read the same way a window's keys are. */
+            uint32_t port = (uint32_t)ctx->r[3];
+            uint32_t into = (uint32_t)ctx->r[4];
+            if (port > 3u) {
+                ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+                return 1;
+            }
+            uint16_t buttons = 0;
+            int16_t thumbs[4] = {0, 0, 0, 0};
+            if (into != 0) {
+                xenolith_what_is_held(&buttons, thumbs);
+                xenolith_store32(base, into, 1);
+                xenolith_store16(base, into + 4, buttons);
+                xenolith_store8(base, into + 6, (uint8_t)(thumbs[2] >> 8));
+                xenolith_store8(base, into + 7, (uint8_t)(thumbs[3] >> 8));
+                xenolith_store16(base, into + 8, (uint16_t)thumbs[0]);
+                xenolith_store16(base, into + 10, (uint16_t)thumbs[1]);
+            }
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        case 408: {
+            /* The next thing a controller did, if anything did.
+             *
+             * A title that polls this in a loop is asking for events, and what
+             * it is told when there are none is that there are none rather than
+             * that it failed. Reporting nothing as an error sends a title down
+             * its error path on every frame it is idle, which is most of them.
+             *
+             * The event structure is the console's: the packet number, the
+             * buttons, the kind, and the repeats. Nothing here raises an event,
+             * so the count of them is nought. */
+            uint32_t into = (uint32_t)ctx->r[4];
+            uint32_t count_at = (uint32_t)ctx->r[3];
+            if (into != 0) {
+                xenolith_store32(base, into, 1);
+                xenolith_store32(base, into + 4, 0);
+                xenolith_store32(base, into + 8, 0);
+                xenolith_store32(base, into + 12, 0);
+            }
+            if (count_at != 0) {
+                xenolith_store32(base, count_at, 0);
+            }
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        case 651: {
+            /* Whether an idle listener has anything to say.
+             *
+             * It does not, and saying so is a real answer rather than a
+             * refusal: a title that polls this every frame is told there is
+             * nothing this frame, which is what an idle console says too. The
+             * count of notifications is written as nought.
+             *
+             * Nothing is written past the count, because the shape of what
+             * follows depends on which notification it would have been and there
+             * is none. */
+            uint32_t count_at = (uint32_t)ctx->r[5];
+            if (count_at != 0) {
+                xenolith_store32(base, count_at, 0);
+            }
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        case 650: {
+            /* Registering to be told about system notifications.
+             *
+             * A title makes a listener and asks it, once a frame, whether
+             * anything happened. Nothing here notifies anything, so what is
+             * returned is a handle that names a listener which never has
+             * anything to say. Answering failure instead sends the title down a
+             * path for a console that cannot be listened to, which is a
+             * different fault from an idle one. */
+            ctx->r[3] = take_a_listener();
+            return 1;
+        }
         case 642:
             ctx->r[3] = XENOLITH_SYSTEM_VERSION;
             return 1;
@@ -2270,6 +2395,142 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         ctx->r[3] = wait_until(waited, limited ? &until : NULL);
         return 1;
     }
+    case 116: {
+        /* Making a semaphore. The console keeps one in a structure the title
+         * owns, and nothing here uses that structure: what is kept is the
+         * runtime's own object, named by the handle the title hands over. So
+         * the structure is cleared and the handle stands for it.
+         *
+         * The count and the limit are what the title asked for and are not
+         * needed, because nothing here is limited: a semaphore released more
+         * times than its limit says would be a fault on the console, and
+         * counting releases is not something a title here depends on. */
+        uint32_t at = (uint32_t)ctx->r[3];
+        uint32_t count = (uint32_t)ctx->r[4];
+        uint32_t limit = (uint32_t)ctx->r[5];
+        (void)count;
+        (void)limit;
+        if (at != 0) {
+            for (uint32_t word = 0; word < 8; word++) {
+                xenolith_store32(base, at + word * 4, 0);
+            }
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 133:
+        /* Raising the interrupt level to the one that defers work. Nothing here
+         * interrupts a thread, so there is nothing to raise and the level the
+         * title was at is what it is told, which is what the console returns. */
+        ctx->r[3] = 0;
+        return 1;
+    case 179:
+        /* Putting the interrupt level back. Nothing was raised, so there is
+         * nothing to put back. */
+        return 1;
+    case 146:
+        /* Resuming a thread. Threads here run from the moment they are made, so
+         * one that is resumed is already running and there is nothing to do. */
+        ctx->r[3] = 0;
+        return 1;
+    case 252:
+        /* Suspending a thread.
+         *
+         * Answering without stopping anything is a lie a title believes: it
+         * suspends a worker and carries on expecting that worker not to run,
+         * and two threads doing the same work is a fault that looks like a
+         * data race. There is no way to stop a thread this runtime made without
+         * a signal for it to look at, and adding one is a change to how threads
+         * are run rather than to this switch. So this says it cannot, which
+         * stops the run where the title wanted it rather than letting it go on
+         * with a worker it thinks is stopped. */
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return 1;
+    case 90: {
+        /* Waiting for a stretch of time, or until an object is signalled.
+         *
+         * A title uses this to pace itself, so it has to actually wait rather
+         * than return: a run that returned at once would spin through a title's
+         * frame loop as fast as the host allows and every timing the title
+         * measured would be wrong. The length is in hundreds of nanoseconds and
+         * negative for a stretch from now. */
+        uint32_t how = (uint32_t)ctx->r[3];
+        struct timespec until;
+        int limited = give_up_at(base, (uint32_t)ctx->r[4], &until);
+        if (!limited) {
+            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            return 1;
+        }
+        /* Only the wait for a stretch is honoured. A wait for a moment on the
+         * console's clock is a title naming a time, and what it means is the
+         * same wait, so both end at the same place. */
+        while (clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &until, NULL) == EINTR) {
+        }
+        /* The console reports a timeout when the wait ran out rather than an
+         * object being signalled, and a title branches on the two differently. */
+        ctx->r[3] = how == 1 ? XENOLITH_STATUS_TIMEOUT : XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 250:
+        /* Setting a timer to fire after a stretch, once or repeatedly.
+         *
+         * Firing one means a thread that waits on the timer and then signals
+         * whatever the title registered, and nothing here has that. Answering
+         * success without firing is the worst of the three: a title waits for a
+         * timer that never goes and the run stops there with nothing said.
+         *
+         * So this says it could not, which a title handles as a timer it does
+         * not have and carries on without. That is a real answer rather than a
+         * pretend success, and it is what the title was seen to do with it. */
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return 1;
+    case 231: {
+        /* Asking about a file by name, without opening it.
+         *
+         * The title passes a record holding a pointer to a counted string, and
+         * somewhere to put what it asks about. What is answered is whether the
+         * file is there: the console fills in a structure of sizes and times,
+         * and nothing here has a shape for that to fill in, so a file that is
+         * found is answered as found with the structure left as the title
+         * cleared it, and one that is not is answered as not found.
+         *
+         * Answering "found" for everything would be worse than saying nothing: a
+         * title that checks for a file and is told it is there goes on to open
+         * it, and the open fails a moment later somewhere less informative. */
+        uint32_t asked = (uint32_t)ctx->r[3];
+        char path[4096];
+        /* The name sits where host_path_of looks for it, four bytes into the
+         * record, because the record's first word is its own length. */
+        if (asked == 0 || !host_path_of(base, asked, path, sizeof path)) {
+            ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
+            return 1;
+        }
+        ctx->r[3] = access(path, F_OK) == 0 ? XENOLITH_STATUS_SUCCESS
+                                            : XENOLITH_STATUS_NO_SUCH_FILE;
+        return 1;
+    }
+    case 309:
+        /* Turning a status into the one a title's own error handling uses.
+         *
+         * The console's two numberings agree on success and disagree on
+         * everything else, and a title compares the answer against values of its
+         * own. Answering the status unchanged would be wrong for every failure
+         * and right only for success, so success is the one case handled: a
+         * failure is passed through as the error it already is rather than
+         * mapped to a number nothing here has a table for. */
+        ctx->r[3] = (uint32_t)ctx->r[3] == XENOLITH_STATUS_SUCCESS ? 0u : (uint32_t)ctx->r[3];
+        return 1;
+    case 215:
+        /* Making a timer. A title makes one to be woken later or at an interval,
+         * and nothing here delivers a wakeup to one, so what is made is an
+         * object the title can name and nothing more.
+         *
+         * Answering success without making one leaves a title holding a handle
+         * to nothing, and the wait that follows returns at once for ever. So a
+         * real object is made, which a wait can be given and which nothing ever
+         * signals. */
+        create_waitable(ctx, base, OBJECT_EVENT);
+        return 1;
     case 253: {
         struct object *found = object_of((uint32_t)ctx->r[3]);
         if (found == NULL) {
@@ -2444,6 +2705,7 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
         return 1;
     }
     case 189:
+    case 220:
         /* Giving memory back. Nothing here takes it back, which is written
          * down where the memory is handed out. Reporting a failure would be a
          * different lie and a louder one. */
@@ -2548,6 +2810,16 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
          * carrying on, so this reports the state a working console is in. */
         ctx->r[3] = 1;
         return 1;
+    case 476:
+        /* Shutting the graphics hardware down.
+         *
+         * Nothing here is hardware, so there is nothing to shut down, and a
+         * title calling this is finishing with the display rather than starting
+         * it. Answering failure would be the one wrong answer: a title that
+         * shuts the display down and is told it could not goes looking for a
+         * fault to report, which is not what happened. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
     default:
         return 0;
     }
@@ -2587,6 +2859,33 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         return 1;
     case 228:
         query_directory(ctx, base);
+        return 1;
+    case 499: {
+        /* Registering a client that will hand sound over.
+         *
+         * The title passes a small record holding a handle of its own and a
+         * callback the hardware would call to ask for the next frame. Nothing
+         * here asks: the device is fed from the runtime's own thread once a
+         * title starts handing frames over, which is what this title does
+         * anyway. So the record is kept and the callback is not called, and the
+         * registration itself succeeded.
+         *
+         * The record is not read past its first two words, because those are
+         * the only two a title was seen to fill. */
+        uint32_t at = (uint32_t)ctx->r[3];
+        if (at != 0) {
+            sound_client = xenolith_load32(base, at);
+            sound_client_callback = xenolith_load32(base, at + 4);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    }
+    case 500:
+        /* Unregistering one. There is nothing to stop, so the registration is
+         * forgotten and the answer is that it succeeded. */
+        sound_client = 0;
+        sound_client_callback = 0;
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 501: {
         /* Handing over a frame of sound. The frame is six channels of the

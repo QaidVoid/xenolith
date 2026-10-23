@@ -2436,7 +2436,7 @@ int main(void) {
     /* An ordinal nothing answers, called from an address of the title's own. */
     xenolith_context ctx = {0};
     ctx.lr = 0x82119448u;
-    xenolith_import(&ctx, base, "xboxkrnl.exe", 476, "VdShutdownEngines");
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 82, "KeBugCheck");
 
     fprintf(stderr, "the run carried on past an import nothing answers\n");
     return 3;
@@ -2484,7 +2484,7 @@ int main(void) {
     let complaint = String::from_utf8_lossy(&ran.stderr);
 
     assert!(
-        complaint.contains("VdShutdownEngines"),
+        complaint.contains("KeBugCheck"),
         "the import should be named: {complaint}"
     );
     assert!(
