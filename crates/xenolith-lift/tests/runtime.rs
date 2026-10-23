@@ -2761,6 +2761,80 @@ int main(void) {
     }
 }
 
+/// A shader kept in memory is taken in hand like one carried in a packet.
+///
+/// One title hands over nearly all of its shaders by naming where they are
+/// rather than carrying their words, and while that packet was passed over
+/// every draw used the one pair it did carry. With no shader table built in,
+/// what shows that a shader was taken is the runtime saying it has nothing
+/// made of it.
+#[test]
+fn a_shader_kept_in_memory_is_taken_in_hand() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Five words of a vertex shader, and a packet naming them: opcode 0x27,
+     * two words following, the address with the kind in its low bits, and the
+     * count. */
+    uint32_t shader = 0x03000000u;
+    for (uint32_t k = 0; k < 5; k++) {
+        xenolith_store32(base, shader + k * 4u, 0x11110000u + k);
+    }
+    uint32_t ring = 0x01000000u;
+    xenolith_store32(base, ring, (3u << 30) | (1u << 16) | (0x27u << 8));
+    xenolith_store32(base, ring + 4u, shader | 0u);
+    xenolith_store32(base, ring + 8u, 5u);
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02000000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+    xenolith_store32(base, 0x7fc80714u, 3u);
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, 0x02000000u) == 3u) { break; }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("shader_in_memory", program) {
+        panic!("a shader kept in memory did not run:\n{complaint}");
+    }
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("shader_in_memory");
+    let ran = Command::new(directory.join("program"))
+        .current_dir(&directory)
+        .output()
+        .unwrap_or_else(|error| panic!("running the check: {error}"));
+    let complaint = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        complaint.contains("a shader of 5 words was handed over"),
+        "a shader kept in memory was not taken in hand:\n{complaint}"
+    );
+}
+
 /// A privilege is answered from the flags the container declares.
 ///
 /// A title asks whether it holds a numbered privilege before it does the thing,

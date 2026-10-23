@@ -31,6 +31,7 @@
 /* The opcodes a command packet carries that this reads. */
 #define XENOLITH_PACKET_BUFFER 0x3fu
 #define XENOLITH_PACKET_SHADER 0x2bu
+#define XENOLITH_PACKET_SHADER_FROM_MEMORY 0x27u
 #define XENOLITH_PACKET_CHANGE_PART 0x21u
 #define XENOLITH_PACKET_TELL_THE_TITLE 0x54u
 #define XENOLITH_PACKET_LOAD 0x2fu
@@ -249,6 +250,25 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
                     break;
                 }
                 take_the_shader_in_hand(base, which_kind, stream + (at + 3) * 4, how_many);
+                break;
+            }
+
+            /* A shader kept in memory rather than carried in the packet: the
+             * kind it is in the low two bits of the address, and how many words
+             * it runs to in the low half of the word after.
+             *
+             * Passed over, the shaders a title hands over this way are never
+             * the ones drawn with: every draw after it uses whatever was last
+             * handed over in a packet, and one title hands over nearly all of
+             * its shaders this way, so its whole frame was drawn with the one
+             * pair it carried in packets. */
+            if (opcode == XENOLITH_PACKET_SHADER_FROM_MEMORY && follows >= 2) {
+                uint32_t named = xenolith_load32(base, stream + (at + 1) * 4);
+                uint32_t how_many = xenolith_load32(base, stream + (at + 2) * 4) & 0xffffu;
+                read_so_far.shaders++;
+                if (how_many != 0 && (named & ~3u) != 0) {
+                    take_the_shader_in_hand(base, named & 3u, named & ~3u, how_many);
+                }
                 break;
             }
 
