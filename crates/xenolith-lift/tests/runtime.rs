@@ -3362,6 +3362,81 @@ int main(void) {
     }
 }
 
+/// A registered sound client is asked for frames at the console's rate.
+///
+/// The console's sound hardware calls the client each time it is ready for
+/// another frame, and a title's sound engine runs from that call. One title
+/// registers a client and hands over nothing until it is asked, and everything
+/// it paces by its sound waited with it, so it sat on one screen for minutes.
+#[test]
+fn a_sound_client_is_asked_for_frames() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+static volatile unsigned asked;
+static volatile uint64_t handed;
+
+static void the_titles_callback(xenolith_context *ctx, uint8_t *base) {
+    (void)base;
+    handed = ctx->r[3];
+    asked++;
+}
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    return address == 0x82001000u ? the_titles_callback : 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* The record: what to call, then what to hand it. */
+    xenolith_store32(base, 0x200, 0x82001000u);
+    xenolith_store32(base, 0x204, 0x1234u);
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0x300;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 499, "XAudioRegisterRenderDriverClient");
+    if (ctx.r[3] != 0u || xenolith_load32(base, 0x300) == 0u) {
+        fprintf(stderr, "the registration was not answered with a number\n");
+        return 3;
+    }
+
+    struct timespec a_tenth = {0, 100000000L};
+    nanosleep(&a_tenth, NULL);
+    if (asked < 10u || handed != 0x1234u) {
+        fprintf(stderr, "asked %u times, handed %#llx\n", asked, (unsigned long long)handed);
+        return 4;
+    }
+
+    ctx.r[3] = xenolith_load32(base, 0x300);
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 500, "XAudioUnregisterRenderDriverClient");
+    nanosleep(&a_tenth, NULL);
+    unsigned after = asked;
+    nanosleep(&a_tenth, NULL);
+    if (asked != after) {
+        fprintf(stderr, "an unregistered client was still asked\n");
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("sound_client", program) {
+        panic!("a sound client was not asked for frames:\n{complaint}");
+    }
+}
+
 /// A privilege is answered from the flags the container declares.
 ///
 /// A title asks whether it holds a numbered privilege before it does the thing,

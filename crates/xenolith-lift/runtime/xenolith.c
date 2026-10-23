@@ -1792,13 +1792,55 @@ static void say_what_was_read_and_stop(int which) {
     _exit(3);
 }
 
-/* What a title registered as a sound client, if it registered one.
- *
- * Kept so that a registration can be answered and forgotten. Nothing here calls
- * the callback: the device is fed from the runtime's own thread, which is the
- * only way sound reaches a host device from here. */
+/* What a title registered as a sound client, if it registered one: what to
+ * call to ask for the next frame of sound, and what to hand it. */
 static uint32_t sound_client;
 static uint32_t sound_client_callback;
+
+/* The number a registered client is known by, and how often a frame is asked
+ * for: one frame is two hundred and fifty six samples, and the console plays
+ * forty eight thousand a second. */
+#define XENOLITH_SOUND_DRIVER 0x41550000u
+#define XENOLITH_NANOSECONDS_A_FRAME_OF_SOUND 5333333L
+
+/* Asks the title for a frame of sound as often as the console would.
+ *
+ * The console's sound hardware calls the client a title registered each time
+ * it is ready for another frame, and the title's own sound engine runs from
+ * that call: it wakes the thread that mixes, which hands the frame back. A
+ * title that is never asked never mixes, and everything it paces by its sound
+ * waits with it, a film that keeps to its soundtrack among them. So a thread of
+ * its own asks at the console's rate, for as long as a client is registered. */
+static void *ask_for_sound(void *given) {
+    uint8_t *base = given;
+    static xenolith_context state;
+    state.r[1] = take_thread_stack() - 64;
+    state.r[13] = take_processor_block(base);
+
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (;;) {
+        next.tv_nsec += XENOLITH_NANOSECONDS_A_FRAME_OF_SOUND;
+        if (next.tv_nsec >= 1000000000L) {
+            next.tv_sec += 1;
+            next.tv_nsec -= 1000000000L;
+        }
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL) == EINTR) {
+        }
+        uint32_t callback = __atomic_load_n(&sound_client_callback, __ATOMIC_ACQUIRE);
+        if (callback == 0) {
+            continue;
+        }
+        xenolith_function body = xenolith_lookup(callback);
+        if (body == NULL) {
+            wanted_but_not_lifted(callback, 0, "asked for sound at");
+            return NULL;
+        }
+        state.r[3] = __atomic_load_n(&sound_client, __ATOMIC_ACQUIRE);
+        body(&state, base);
+    }
+    return NULL;
+}
 
 /* What a title told the graphics hardware, kept because it is the only record
  * of it.
@@ -4019,28 +4061,36 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
     case 499: {
         /* Registering a client that will hand sound over.
          *
-         * The title passes a small record holding a handle of its own and a
-         * callback the hardware would call to ask for the next frame. Nothing
-         * here asks: the device is fed from the runtime's own thread once a
-         * title starts handing frames over, which is what this title does
-         * anyway. So the record is kept and the callback is not called, and the
-         * registration itself succeeded.
-         *
-         * The record is not read past its first two words, because those are
-         * the only two a title was seen to fill. */
+         * The title passes a small record holding the callback the hardware
+         * calls to ask for the next frame and what to hand it, in that order,
+         * and somewhere to write the number the client will be known by. The
+         * asking starts here, on a thread of its own, and runs at the
+         * console's rate from then on. */
         uint32_t at = (uint32_t)ctx->r[3];
+        uint32_t known_as = (uint32_t)ctx->r[4];
         if (at != 0) {
-            sound_client = xenolith_load32(base, at);
-            sound_client_callback = xenolith_load32(base, at + 4);
+            __atomic_store_n(&sound_client, xenolith_load32(base, at + 4), __ATOMIC_RELEASE);
+            __atomic_store_n(&sound_client_callback, xenolith_load32(base, at),
+                             __ATOMIC_RELEASE);
+        }
+        if (known_as != 0) {
+            xenolith_store32(base, known_as, XENOLITH_SOUND_DRIVER);
+        }
+        static int asking;
+        if (!asking) {
+            asking = 1;
+            pthread_t thread;
+            if (pthread_create(&thread, NULL, ask_for_sound, base) == 0) {
+                pthread_detach(thread);
+            }
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
     case 500:
-        /* Unregistering one. There is nothing to stop, so the registration is
-         * forgotten and the answer is that it succeeded. */
-        sound_client = 0;
-        sound_client_callback = 0;
+        /* Unregistering one, which stops it being asked. */
+        __atomic_store_n(&sound_client_callback, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&sound_client, 0, __ATOMIC_RELEASE);
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 501: {
