@@ -2835,6 +2835,86 @@ int main(void) {
     );
 }
 
+/// The first listener for the system hears how the console started.
+///
+/// A console tells a title, as it starts, that the system's own screens came
+/// up and went away and that who is signed in changed. One title waits for
+/// that before it leaves its first screen, and a listener that never has
+/// anything to say left it drawing black for as long as it ran. A second
+/// listener hears nothing, since nothing has happened since.
+#[test]
+fn the_first_listener_hears_how_the_console_started() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static int hear(xenolith_context *ctx, uint8_t *base, uint32_t listener, uint32_t *said,
+                uint32_t *about) {
+    xenolith_store32(base, 0x300, 0xdeadu);
+    xenolith_store32(base, 0x304, 0xdeadu);
+    ctx->r[3] = listener;
+    ctx->r[4] = 0;
+    ctx->r[5] = 0x300;
+    ctx->r[6] = 0x304;
+    xenolith_import(ctx, base, "xam.xex", 651, "XNotifyGetNext");
+    *said = xenolith_load32(base, 0x300);
+    *about = xenolith_load32(base, 0x304);
+    return (int)ctx->r[3];
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 1;
+    xenolith_import(&ctx, base, "xam.xex", 650, "XamNotifyCreateListener");
+    uint32_t first = (uint32_t)ctx.r[3];
+    ctx.r[3] = 1;
+    xenolith_import(&ctx, base, "xam.xex", 650, "XamNotifyCreateListener");
+    uint32_t second = (uint32_t)ctx.r[3];
+    if (first == 0 || second == 0 || first == second) { return 3; }
+
+    const uint32_t said_wanted[4] = {9u, 9u, 10u, 10u};
+    const uint32_t about_wanted[4] = {1u, 0u, 1u, 1u};
+    uint32_t said, about;
+    for (int at = 0; at < 4; at++) {
+        if (!hear(&ctx, base, first, &said, &about) || said != said_wanted[at]
+            || about != about_wanted[at]) {
+            fprintf(stderr, "notice %d was %#x about %#x\n", at, said, about);
+            return 4;
+        }
+    }
+    if (hear(&ctx, base, first, &said, &about)) {
+        fprintf(stderr, "a fifth notice was heard\n");
+        return 5;
+    }
+    if (hear(&ctx, base, second, &said, &about)) {
+        fprintf(stderr, "the second listener heard %#x\n", said);
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("listeners", program) {
+        panic!("the first listener did not hear how the console started:\n{complaint}");
+    }
+}
+
 /// A privilege is answered from the flags the container declares.
 ///
 /// A title asks whether it holds a numbered privilege before it does the thing,

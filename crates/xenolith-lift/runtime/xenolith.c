@@ -1650,15 +1650,76 @@ static void time_to_fields(xenolith_context *ctx, uint8_t *base) {
 /* What asking about a slot nobody is signed in to reports. */
 #define XENOLITH_ERROR_NO_SUCH_USER 0x525u
 
-/* Listeners a title asked for, which never have anything to say.
+/* Listeners a title asked for, and what each has still to say.
  *
- * A title is given a number rather than a handle to nothing, because a number it
- * can pass back is what its own code expects, and asking whether an idle
- * listener has anything is a question with a real answer: no. */
-static uint32_t listeners_handed_out = 0x100;
+ * A console tells a title a few things as it starts: that the system's own
+ * screens came up and went away again, and that who is signed in changed,
+ * twice. A title waits for those before it leaves the screen it starts on, and
+ * one that is never told sits on a black screen drawing it for as long as it
+ * runs. So the first listener that asks to hear about the system is given them,
+ * and nothing after that is ever said, because nothing here changes. */
+#define XENOLITH_LISTENERS 16u
+#define XENOLITH_NOTICES_HELD 8u
+#define XENOLITH_FIRST_LISTENER 0x100u
+#define XENOLITH_HEARS_THE_SYSTEM 1u
+#define XENOLITH_SYSTEM_SCREENS 0x9u
+#define XENOLITH_SIGNED_IN_CHANGED 0xau
 
-static uint32_t take_a_listener(void) {
-    return listeners_handed_out++;
+static struct {
+    uint32_t said[XENOLITH_NOTICES_HELD];
+    uint32_t about[XENOLITH_NOTICES_HELD];
+    uint32_t held;
+} listeners[XENOLITH_LISTENERS];
+static uint32_t listeners_handed_out;
+static int told_how_it_started;
+static pthread_mutex_t listening = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t take_a_listener(uint64_t hears) {
+    pthread_mutex_lock(&listening);
+    if (listeners_handed_out >= XENOLITH_LISTENERS) {
+        pthread_mutex_unlock(&listening);
+        return 0;
+    }
+    uint32_t which = listeners_handed_out++;
+    if (!told_how_it_started && (hears & XENOLITH_HEARS_THE_SYSTEM) != 0) {
+        told_how_it_started = 1;
+        const uint32_t said[4] = {XENOLITH_SYSTEM_SCREENS, XENOLITH_SYSTEM_SCREENS,
+                                  XENOLITH_SIGNED_IN_CHANGED, XENOLITH_SIGNED_IN_CHANGED};
+        const uint32_t about[4] = {1, 0, 1, 1};
+        for (uint32_t at = 0; at < 4; at++) {
+            listeners[which].said[at] = said[at];
+            listeners[which].about[at] = about[at];
+        }
+        listeners[which].held = 4;
+    }
+    pthread_mutex_unlock(&listening);
+    return XENOLITH_FIRST_LISTENER + which;
+}
+
+/* Takes the next thing a listener has to say, or the next of the kind a title
+ * asked for where it names one, and says whether there was one. */
+static int hear_from(uint32_t listener, uint32_t only, uint32_t *said, uint32_t *about) {
+    uint32_t which = listener - XENOLITH_FIRST_LISTENER;
+    int heard = 0;
+    pthread_mutex_lock(&listening);
+    if (which < listeners_handed_out) {
+        for (uint32_t at = 0; at < listeners[which].held; at++) {
+            if (only != 0 && listeners[which].said[at] != only) {
+                continue;
+            }
+            *said = listeners[which].said[at];
+            *about = listeners[which].about[at];
+            for (uint32_t later = at + 1; later < listeners[which].held; later++) {
+                listeners[which].said[later - 1] = listeners[which].said[later];
+                listeners[which].about[later - 1] = listeners[which].about[later];
+            }
+            listeners[which].held--;
+            heard = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&listening);
+    return heard;
 }
 
 /* Says what the run read, and stops, when something outside it asks.
@@ -2776,33 +2837,28 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             return 1;
         }
         case 651: {
-            /* Whether an idle listener has anything to say.
-             *
-             * It does not, and saying so is a real answer rather than a
-             * refusal: a title that polls this every frame is told there is
-             * nothing this frame, which is what an idle console says too. The
-             * count of notifications is written as nought.
-             *
-             * Nothing is written past the count, because the shape of what
-             * follows depends on which notification it would have been and there
-             * is none. */
-            uint32_t count_at = (uint32_t)ctx->r[5];
-            if (count_at != 0) {
-                xenolith_store32(base, count_at, 0);
+            /* Whether a listener has anything to say, and if it has, what and
+             * about what. A title polls this every frame and is told either
+             * the next thing, or that there is nothing this frame, which is
+             * what an idle console says too. */
+            uint32_t said = 0;
+            uint32_t about = 0;
+            int heard = hear_from((uint32_t)ctx->r[3], (uint32_t)ctx->r[4], &said, &about);
+            uint32_t said_at = (uint32_t)ctx->r[5];
+            uint32_t about_at = (uint32_t)ctx->r[6];
+            if (said_at != 0) {
+                xenolith_store32(base, said_at, said);
             }
-            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+            if (heard && about_at != 0) {
+                xenolith_store32(base, about_at, about);
+            }
+            ctx->r[3] = (uint64_t)heard;
             return 1;
         }
         case 650: {
-            /* Registering to be told about system notifications.
-             *
-             * A title makes a listener and asks it, once a frame, whether
-             * anything happened. Nothing here notifies anything, so what is
-             * returned is a handle that names a listener which never has
-             * anything to say. Answering failure instead sends the title down a
-             * path for a console that cannot be listened to, which is a
-             * different fault from an idle one. */
-            ctx->r[3] = take_a_listener();
+            /* Registering to be told about system notifications, of the kinds
+             * the first argument names a bit apiece. */
+            ctx->r[3] = take_a_listener(ctx->r[3]);
             return 1;
         }
         case 642:
