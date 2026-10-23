@@ -2675,9 +2675,10 @@ int main(void) {
 /// counted from the front of that block rather than from the front of the
 /// register file, so a load written without the block's own start puts every
 /// constant eight thousand registers short of where the shader looks for it, and
-/// the shader computes from nought.
+/// the shader computes from nought. A packet carrying the words itself names
+/// its block the same way.
 #[test]
-fn a_load_fills_the_block_it_names() {
+fn a_load_and_a_set_fill_the_blocks_they_name() {
     let program = r#"
 /* Asked for before anything is included, because a strict C compiler hides the
  * declarations this needs otherwise. */
@@ -2713,6 +2714,11 @@ int main(void) {
     xenolith_store32(base, ring + 4, value_at);
     xenolith_store32(base, ring + 8, 3u);          /* constant 3 */
     xenolith_store32(base, ring + 12, 1u);         /* one word */
+    /* And a packet carrying two words for fetch constants 5 and 6. */
+    xenolith_store32(base, ring + 16, (3u << 30) | (2u << 16) | (0x2du << 8));
+    xenolith_store32(base, ring + 20, (1u << 16) | 5u);
+    xenolith_store32(base, ring + 24, 0xaaaa0001u);
+    xenolith_store32(base, ring + 28, 0xaaaa0002u);
 
     xenolith_context ctx = {0};
     ctx.r[3] = ring;
@@ -2721,10 +2727,11 @@ int main(void) {
     ctx.r[3] = 0x02000000u + 60u;
     xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
 
-    xenolith_store32(base, 0x7fc80714u, 4u);
+    xenolith_store32(base, 0x7fc80714u, 8u);
 
     for (int waited = 0; waited < 2000; waited++) {
-        if (xenolith_load32(base, 0x7fc80000u + 0x4003u * 4u) == 0x3f800000u) {
+        if (xenolith_load32(base, 0x7fc80000u + 0x4003u * 4u) == 0x3f800000u
+            && xenolith_load32(base, 0x7fc80000u + 0x4806u * 4u) == 0xaaaa0002u) {
             /* And nothing was written to the front of the file, which is where
              * a load written without the block's start would have put it. */
             if (xenolith_load32(base, 0x7fc80000u + 3u * 4u) != 0u) {
@@ -2737,8 +2744,9 @@ int main(void) {
         struct timespec once = {0, 1000000};
         nanosleep(&once, NULL);
     }
-    fprintf(stderr, "constant 3 holds %#x, and the front holds %#x\n",
+    fprintf(stderr, "constant 3 holds %#x, fetch 6 %#x, and the front holds %#x\n",
             xenolith_load32(base, 0x7fc80000u + 0x4003u * 4u),
+            xenolith_load32(base, 0x7fc80000u + 0x4806u * 4u),
             xenolith_load32(base, 0x7fc80000u + 3u * 4u));
     return 4;
 }
@@ -4040,6 +4048,58 @@ fn saved_data_is_made_written_listed_and_deleted() {
     }
 }
 
+/// Physical memory reads the same through each place it can be reached from.
+///
+/// A title that knows where something is in physical memory reaches it through
+/// one of the views high in the address space rather than through the address
+/// it was handed, and finds nothing there unless the two are one memory. The
+/// highest view is a page out from the others.
+#[test]
+fn physical_memory_reads_the_same_through_each_view() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_store32(base, 0x00200000u, 0x11223344u);
+    if (xenolith_load32(base, 0xa0200000u) != 0x11223344u
+        || xenolith_load32(base, 0xc0200000u) != 0x11223344u) {
+        fprintf(stderr, "a word written was not there through the views\n");
+        return 3;
+    }
+    xenolith_store32(base, 0xc0300000u, 0x55667788u);
+    if (xenolith_load32(base, 0x00300000u) != 0x55667788u) {
+        fprintf(stderr, "a word written through a view was not there\n");
+        return 4;
+    }
+    xenolith_store32(base, 0x00201000u, 0x99aabbccu);
+    if (xenolith_load32(base, 0xe0200000u) != 0x99aabbccu) {
+        fprintf(stderr, "the highest view is not a page out\n");
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("physical_views", program) {
+        panic!("physical memory was not the same through its views:\n{complaint}");
+    }
+}
+
 /// The profile signed in plays without the network, so it holds no privilege
 /// of an Xbox Live account, and a slot with no profile in it says so.
 #[test]
@@ -4839,11 +4899,13 @@ int main(void) {
     }
 }
 
-/// A button a run is told to hold can be held for a span of seconds.
+/// A button a run is told to hold can be held for a span of seconds, or of
+/// frames shown.
 ///
 /// A title's first screen waits for a button to go down while it is up, and a
 /// button held from the start of the run went down before the screen was
-/// there, so the screen never saw it pressed.
+/// there, so the screen never saw it pressed. How fast frames come varies from
+/// run to run, so a span of frames is what lands a press on a given screen.
 #[test]
 fn a_held_button_can_be_given_a_span() {
     let program = r#"
@@ -4879,6 +4941,17 @@ int main(void) {
     if (buttons != 0x1000u) {
         fprintf(stderr, "later %#x was held\n", buttons);
         return 4;
+    }
+
+    /* And a span counted in frames shown, held once two have been. */
+    for (unsigned shown = 0; shown < 4; shown++) {
+        xenolith_what_is_held(&buttons, thumbs);
+        uint16_t wanted = shown == 2 ? 0x3000u : 0x1000u;
+        if (buttons != wanted) {
+            fprintf(stderr, "after %u frames %#x was held\n", shown, buttons);
+            return 5;
+        }
+        xenolith_show_the_frame();
     }
     return 0;
 }
@@ -4925,7 +4998,8 @@ int main(void) {
     );
     let ran = Command::new(&program_path)
         .current_dir(&directory)
-        .env("XENOLITH_HOLD", "0x0010@0-0.3,0x1000@0.3")
+        .env("XENOLITH_HOLD", "0x0010@0-0.3,0x1000@0.3,0x2000@2f-3f")
+        .env("XENOLITH_NO_WINDOW", "1")
         .output()
         .expect("running the check");
     assert!(

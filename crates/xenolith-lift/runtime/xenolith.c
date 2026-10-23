@@ -23,6 +23,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -68,6 +69,26 @@ static void remember_where_the_image_was(const char *image);
  */
 #define XENOLITH_A_LITTLE_PAST_THE_END ((size_t)4096)
 
+/* The console's physical memory, and the places it can be reached from.
+ *
+ * The first half gigabyte of addresses is that memory as it is, and the last
+ * three eighths of the space are it again, three times over: a title that
+ * knows where something is in physical memory reaches it through one of these
+ * rather than through the address it was handed. The highest is a page out
+ * from the others, as a title's own working out of a physical address from one
+ * of them says. Each is the same memory here, so a word written through one is
+ * the word read through another. */
+#define XENOLITH_PHYSICAL ((size_t)0x20000000u)
+static const struct {
+    uint32_t at;
+    uint32_t from;
+} physical_views[] = {
+    {0x00000000u, 0x0000u},
+    {0xa0000000u, 0x0000u},
+    {0xc0000000u, 0x0000u},
+    {0xe0000000u, 0x1000u},
+};
+
 static void say_what_was_read_in_total(void);
 static void say_what_was_read_and_stop(int which);
 static void say_a_report(const char *format, ...);
@@ -106,6 +127,29 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (base == MAP_FAILED) {
         fprintf(stderr, "xenolith: could not map the guest address space\n");
+        return NULL;
+    }
+
+    /* Physical memory, made once and put in each place it is reached from.
+     * The name is only how it is made, and is taken away again at once. */
+    char name[64];
+    snprintf(name, sizeof name, "/xenolith-%ld", (long)getpid());
+    int memory = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (memory < 0) {
+        fprintf(stderr, "xenolith: could not make the guest's physical memory\n");
+        return NULL;
+    }
+    shm_unlink(name);
+    int made = ftruncate(memory, (off_t)(XENOLITH_PHYSICAL + 0x1000u)) == 0;
+    for (size_t view = 0; made && view < sizeof physical_views / sizeof *physical_views;
+         view++) {
+        made = mmap((uint8_t *)base + physical_views[view].at, XENOLITH_PHYSICAL,
+                    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, memory,
+                    (off_t)physical_views[view].from) != MAP_FAILED;
+    }
+    close(memory);
+    if (!made) {
+        fprintf(stderr, "xenolith: could not map the guest's physical memory\n");
         return NULL;
     }
 

@@ -77,7 +77,7 @@ on without them.
 | `XENOLITH_NO_WINDOW` | open no window at all, so a run that is being measured shows nothing |
 | `DISPLAY` | the display to open a window on, where the host speaks X11 |
 | `WAYLAND_DISPLAY` | the desktop to open a window on, where the host speaks Wayland. This is tried before `DISPLAY`, which is used instead where the device drawing will not draw into the desktop's window, as on a machine whose desktop runs on another device |
-| `XENOLITH_HOLD` | a controller number to report as held, for a run with no window; `0x10@40-41` holds it from the fortieth second to the forty first, and several are given apart by commas |
+| `XENOLITH_HOLD` | a controller number to report as held, for a run with no window; `0x10@40-41` holds it from the fortieth second to the forty first, `0x10@9000f-9010f` from the nine thousandth frame shown to the nine thousand and tenth, and several are given apart by commas |
 
 A host with no way to show a frame prints one line beginning `no frame will be
 shown, because`, names what was missing, and says the run carries on. A host with

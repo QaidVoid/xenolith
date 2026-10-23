@@ -82,6 +82,7 @@ static int it_holds(uint32_t how, uint32_t value, uint32_t against, uint32_t mas
 #define XENOLITH_PACKET_CHANGE_PART 0x21u
 #define XENOLITH_PACKET_TELL_THE_TITLE 0x54u
 #define XENOLITH_PACKET_LOAD 0x2fu
+#define XENOLITH_PACKET_SET_CONSTANT 0x2du
 #define XENOLITH_PACKET_REPORT 0x58u
 #define XENOLITH_PACKET_DRAW 0x36u
 #define XENOLITH_PACKET_DRAW_INDEXED 0x22u
@@ -94,6 +95,41 @@ static int it_holds(uint32_t how, uint32_t value, uint32_t against, uint32_t mas
 #define XENOLITH_LOAD_INTO_FETCHES 1u
 #define XENOLITH_LOAD_INTO_TRUTHS 2u
 #define XENOLITH_LOAD_INTO_COUNTS 3u
+#define XENOLITH_LOAD_INTO_REGISTERS 4u
+#define XENOLITH_FIRST_ORDINARY_REGISTER 0x2000u
+
+/* Where in the register file the block a packet names begins, and whether it
+ * names one this reads.
+ *
+ * The number a packet gives is counted from the front of the block rather than
+ * from the front of the register file, so one that names constant nought fills
+ * the first constant a shader reads rather than the first register anything
+ * reads. Written without the block's own start, every constant a title sends
+ * lands eight thousand registers short of where the shader looks for it, and
+ * the shader computes from nought. A block this has no reading of is refused:
+ * filling the register file from it would put a title's numbers where
+ * something else reads them. */
+static int where_a_block_begins(uint32_t named, uint32_t *start) {
+    switch ((named >> 16) & 0xffu) {
+    case XENOLITH_LOAD_INTO_CONSTANTS:
+        *start = XENOLITH_CONSTANT_REGISTER;
+        return 1;
+    case XENOLITH_LOAD_INTO_FETCHES:
+        *start = XENOLITH_FETCH_REGISTER;
+        return 1;
+    case XENOLITH_LOAD_INTO_TRUTHS:
+        *start = XENOLITH_TRUTH_REGISTER;
+        return 1;
+    case XENOLITH_LOAD_INTO_COUNTS:
+        *start = XENOLITH_COUNT_REGISTER;
+        return 1;
+    case XENOLITH_LOAD_INTO_REGISTERS:
+        *start = XENOLITH_FIRST_ORDINARY_REGISTER;
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 /* A comparison that is always true, which is how a title writes a register
  * through the compare packet rather than through a register packet. */
@@ -409,40 +445,30 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
                 uint32_t where = xenolith_load32(base, stream + (at + 1) * 4) & 0x3fffffffu;
                 uint32_t what = xenolith_load32(base, stream + (at + 2) * 4);
                 uint32_t word_count = xenolith_load32(base, stream + (at + 3) * 4) & 0xfffu;
-
-                /* Which block of registers the words fill, and where in it they
-                 * begin. The number in the low bits is counted from the front of
-                 * that block rather than from the front of the register file, so
-                 * a load that names constant nought fills the first constant a
-                 * shader reads rather than the first register anything reads.
-                 * Written without the block's own start, every constant a title
-                 * sends lands eight thousand registers short of where the shader
-                 * looks for it, and the shader computes from nought. */
-                uint32_t into = what & 0x7ffu;
-                switch ((what >> 16) & 0xffu) {
-                case XENOLITH_LOAD_INTO_CONSTANTS:
-                    into += XENOLITH_CONSTANT_REGISTER;
-                    break;
-                case XENOLITH_LOAD_INTO_FETCHES:
-                    into += XENOLITH_FETCH_REGISTER;
-                    break;
-                case XENOLITH_LOAD_INTO_TRUTHS:
-                    into += XENOLITH_TRUTH_REGISTER;
-                    break;
-                case XENOLITH_LOAD_INTO_COUNTS:
-                    into += XENOLITH_COUNT_REGISTER;
-                    break;
-                default:
-                    /* A block this has no reading of. Filling the register file
-                     * from it would put a title's numbers where something else
-                     * reads them. */
+                uint32_t into = 0;
+                if (!where_a_block_begins(what, &into)) {
                     word_count = 0;
-                    break;
                 }
-
+                into += what & 0x7ffu;
                 for (uint32_t word = 0; word < word_count; word++) {
                     set_register(base, into + word, xenolith_load32(base, where + word * 4));
                     read_so_far.registers++;
+                }
+                break;
+            }
+
+            /* Filling in registers from the words that follow, in the block and
+             * from the place the first of them names. */
+            if (opcode == XENOLITH_PACKET_SET_CONSTANT && follows >= 1) {
+                uint32_t what = xenolith_load32(base, stream + (at + 1) * 4);
+                uint32_t into = 0;
+                if (where_a_block_begins(what, &into)) {
+                    into += what & 0x7ffu;
+                    for (uint32_t word = 1; word < follows; word++) {
+                        set_register(base, into + word - 1,
+                                     xenolith_load32(base, stream + (at + 1 + word) * 4));
+                        read_so_far.registers++;
+                    }
                 }
                 break;
             }

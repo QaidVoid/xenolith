@@ -3855,6 +3855,10 @@ static void show_what_was_drawn_inside(VkImage what) {
 
 #endif
 
+/* How many frames have been shown, which is what a span of held buttons can be
+ * counted in instead of seconds. */
+static unsigned long frames_shown;
+
 #ifdef XENOLITH_WITH_WINDOW
 
 /* What is held down on the keyboard, as a controller.
@@ -3915,8 +3919,14 @@ static int held(const char *keyboard, KeySym key) {
  * is up, so a number can also be given a span of seconds from the start of the
  * run, as `0x10@40-41`, and several of them can be given apart from each other
  * by commas. Read once, and each span measured from the first time anything
- * asks. */
-#define XENOLITH_HOLDS 16u
+ * asks.
+ *
+ * A span whose start ends in `f`, as `0x1000@9000f-9010f`, counts frames shown
+ * instead, the same numbers a run writing its frames out names them by. How
+ * fast frames come varies from one run to the next while what a title shows on
+ * each does not, so a button pressed on a frame lands on the screen that frame
+ * showed. */
+#define XENOLITH_HOLDS 64u
 
 static int what_a_run_says_is_held(uint16_t *buttons) {
     static int settled = -1;
@@ -3925,6 +3935,7 @@ static int what_a_run_says_is_held(uint16_t *buttons) {
         uint16_t buttons;
         double from;
         double until;
+        int in_frames;
     } holds[XENOLITH_HOLDS];
     static struct timespec began;
 
@@ -3936,10 +3947,18 @@ static int what_a_run_says_is_held(uint16_t *buttons) {
             holds[count].buttons = (uint16_t)strtoul(asked, &after, 0);
             holds[count].from = 0.0;
             holds[count].until = 1e300;
+            holds[count].in_frames = 0;
             if (*after == '@') {
                 holds[count].from = strtod(after + 1, &after);
+                if (*after == 'f') {
+                    holds[count].in_frames = 1;
+                    after++;
+                }
                 if (*after == '-') {
                     holds[count].until = strtod(after + 1, &after);
+                    if (*after == 'f') {
+                        after++;
+                    }
                 }
             }
             count++;
@@ -3952,8 +3971,10 @@ static int what_a_run_says_is_held(uint16_t *buttons) {
     clock_gettime(CLOCK_MONOTONIC, &now);
     double since = (double)(now.tv_sec - began.tv_sec) + (double)(now.tv_nsec - began.tv_nsec) / 1e9;
     uint16_t told = 0;
+    double shown = (double)__atomic_load_n(&frames_shown, __ATOMIC_RELAXED);
     for (unsigned at = 0; at < count; at++) {
-        if (since >= holds[at].from && since < holds[at].until) {
+        double when = holds[at].in_frames ? shown : since;
+        if (when >= holds[at].from && when < holds[at].until) {
             told |= holds[at].buttons;
         }
     }
@@ -4184,6 +4205,7 @@ static int xenolith_end_a_frame_inside(void) {
 /* Shows whatever is on the drawing surface now. The swap falls back to this for
  * a title that does not copy its frame out before asking for it to be shown. */
 int xenolith_show_the_frame(void) {
+    __atomic_fetch_add(&frames_shown, 1ul, __ATOMIC_RELAXED);
     show_what_was_drawn(surface.image);
     return 1;
 }
@@ -4363,6 +4385,7 @@ int xenolith_show_what_was_copied_to(uint32_t where) {
     /* Shown from where it is kept rather than put back into the surface
      * first. It is only the frame the title named for as long as nothing else
      * has been drawn, and the surface is what everything else draws into. */
+    __atomic_fetch_add(&frames_shown, 1ul, __ATOMIC_RELAXED);
     show_what_was_drawn(copies[found - 1u].image);
     return 1;
 }
