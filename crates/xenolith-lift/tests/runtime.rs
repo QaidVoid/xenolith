@@ -2493,6 +2493,72 @@ int main(void) {
     );
 }
 
+/// A wait that is given a length actually waits.
+///
+/// The console takes the length in the fifth argument. Reading it from the
+/// fourth instead returns at once, because the fourth holds the reason for
+/// waiting rather than a length. A title pacing itself then spins as fast as the
+/// host allows, and one that polls a worker through this spins with it, which
+/// looks like a title doing nothing at all rather than one waiting.
+#[test]
+fn a_wait_given_a_length_actually_waits() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* A length of `hundreds` hundreds of nanoseconds, negative for a stretch from
+ * now, written where the console reads it. */
+static void ask_to_wait(xenolith_context *ctx, uint8_t *base, int64_t hundreds) {
+    uint32_t at = 0x300;
+    xenolith_store32(base, at, (uint32_t)((uint64_t)hundreds >> 32));
+    xenolith_store32(base, at + 4, (uint32_t)(uint64_t)hundreds);
+    ctx->r[3] = 1;
+    ctx->r[4] = 0;
+    ctx->r[5] = at;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 90, "KeDelayExecutionThread");
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+
+    /* A tenth of a second, which is ten million hundreds of nanoseconds. */
+    struct timespec before, after;
+    clock_gettime(CLOCK_MONOTONIC, &before);
+    ask_to_wait(&ctx, base, -10000000);
+    clock_gettime(CLOCK_MONOTONIC, &after);
+
+    long long waited = (long long)(after.tv_sec - before.tv_sec) * 1000
+                       + (after.tv_nsec - before.tv_nsec) / 1000000;
+    if (waited < 50) {
+        fprintf(stderr, "a wait of a tenth of a second took %lld milliseconds\n",
+                waited);
+        return 3;
+    }
+    printf("waited %lld milliseconds\n", waited);
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("wait_length", program) {
+        panic!("a wait given a length did not wait:\n{complaint}");
+    }
+}
+
 /// A run that is stopped from outside says what it read before it goes.
 ///
 /// The run this matters for is the one that never ends: a title spinning in its

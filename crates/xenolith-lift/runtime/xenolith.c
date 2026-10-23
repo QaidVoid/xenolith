@@ -2484,7 +2484,12 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * negative for a stretch from now. */
         uint32_t how = (uint32_t)ctx->r[3];
         struct timespec until;
-        int limited = give_up_at(base, (uint32_t)ctx->r[4], &until);
+        /* The stretch is the fifth argument. It was read from the fourth, which
+         * is why a wait that was given a length returned at once: the fourth
+         * holds the reason for waiting, which is not a length and was never
+         * meant to be one. A title pacing itself then spun as fast as the host
+         * allows, and one that polls a worker through this spun with it. */
+        int limited = give_up_at(base, (uint32_t)ctx->r[5], &until);
         if (!limited) {
             ctx->r[3] = XENOLITH_STATUS_SUCCESS;
             return 1;
