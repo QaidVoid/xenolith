@@ -1549,23 +1549,6 @@ static void *drain_the_ring(void *given) {
 
     unsigned long reported_at = 0;
 
-    /* What the run read, said when the run ends.
-     *
-     * The reports below are snapshots taken while the title was still going, so
-     * a run that ends between two of them says nothing at all about what it
-     * read, and a run that ends before the first one says nothing either. That
-     * makes the counts unusable for telling whether a change got a title
-     * further, which is the one thing they would be good for.
-     *
-     * A run that reaches a gap in the translation ends from the thread that
-     * found it, so the total cannot be said where this loop ends. It is said at
-     * exit instead, which runs however the program finishes. */
-    static int counting_the_end;
-    if (!counting_the_end) {
-        counting_the_end = 1;
-        atexit(say_what_was_read_in_total);
-    }
-
     while (graphics.read_back_at != 0) {
         uint32_t written = xenolith_load32(base, XENOLITH_RING_WRITE_POINTER);
         consume_the_ring(base, written);
@@ -2861,6 +2844,69 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
     }
 }
 
+/* The code a C++ throw raises, and the word its record carries to say so. */
+#define XENOLITH_CXX_EXCEPTION 0xe06d7363u
+#define XENOLITH_CXX_MAGIC 0x19930520u
+
+/* Names the C++ type a raised exception carries, when it carries one.
+ *
+ * A throw hands over three words after the record's count: a magic number, the
+ * object thrown, and a description of its type. The description leads through a
+ * list of the types the object can be caught as to each type's mangled name,
+ * and the first one is the type that was thrown. */
+static void say_what_was_thrown(uint8_t *base, uint32_t record) {
+    if (record == 0 || xenolith_load32(base, record) != XENOLITH_CXX_EXCEPTION ||
+        xenolith_load32(base, record + 16) < 3 ||
+        xenolith_load32(base, record + 20) != XENOLITH_CXX_MAGIC) {
+        return;
+    }
+    uint32_t object = xenolith_load32(base, record + 24);
+    uint32_t described = xenolith_load32(base, record + 28);
+    uint32_t types = described != 0 ? xenolith_load32(base, described + 12) : 0;
+    uint32_t first = types != 0 && xenolith_load32(base, types) > 0
+                         ? xenolith_load32(base, types + 4)
+                         : 0;
+    uint32_t type = first != 0 ? xenolith_load32(base, first + 4) : 0;
+    if (type == 0) {
+        return;
+    }
+
+    char name[128];
+    size_t used = 0;
+    for (; used + 1 < sizeof name; used++) {
+        char letter = (char)xenolith_load8(base, type + 8 + (uint32_t)used);
+        if (letter == '\0') {
+            break;
+        }
+        name[used] = letter >= 0x20 && letter < 0x7f ? letter : '?';
+    }
+    name[used] = '\0';
+    fprintf(stderr, "xenolith: what was thrown is a %s, held at %#010x\n", name, object);
+}
+
+/* Says where the calls that led here came from, by walking the title's stack.
+ *
+ * Each frame's first word leads to the frame of the function that called it, and
+ * the return address that function saved sits just below that frame. The walk
+ * stops at the first frame that does not lead further up the stack, or that
+ * saved no return address. */
+static void say_who_called(uint8_t *base, uint32_t frame) {
+    fprintf(stderr, "xenolith: called by");
+    for (int count = 0; count < 24; count++) {
+        uint32_t above = xenolith_load32(base, frame);
+        if (above <= frame || above > XENOLITH_STACK_TOP) {
+            break;
+        }
+        uint32_t returned_to = xenolith_load32(base, above - 8);
+        if (returned_to == 0) {
+            break;
+        }
+        fprintf(stderr, " %#010x", returned_to);
+        frame = above;
+    }
+    fprintf(stderr, "\n");
+}
+
 /* What a title asks of the kernel about what it can see.
  *
  * There is no graphics hardware here, so most of these say what they cannot
@@ -3157,15 +3203,18 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
          *
          * A title that raises one is not in a state to carry on from, so this
          * does not pretend the exception was handled. It says what happened and
-         * stops, which is what a fault means. */
+         * stops, which is what a fault means. The word after the flags is a
+         * nested record, and the address is the one after that. */
         uint32_t record = (uint32_t)ctx->r[3];
         uint32_t code = record != 0 ? xenolith_load32(base, record) : 0;
         uint32_t flags = record != 0 ? xenolith_load32(base, record + 4) : 0;
-        uint32_t at = record != 0 ? xenolith_load32(base, record + 8) : 0;
+        uint32_t at = record != 0 ? xenolith_load32(base, record + 12) : 0;
         fprintf(stderr,
                 "xenolith: the title raised an exception %#010x with flags %#x at "
                 "%#010x, from %#010x\n",
                 code, flags, at, (uint32_t)ctx->lr);
+        say_what_was_thrown(base, record);
+        say_who_called(base, (uint32_t)ctx->r[1]);
         exit(3);
     }
     case 302:

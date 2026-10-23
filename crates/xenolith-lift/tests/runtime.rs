@@ -2723,8 +2723,9 @@ int main(void) {
 /// record saying what. Nothing here can unwind a title's stack the way the
 /// console's dispatcher would, so the exception is not delivered. Pretending it
 /// was would leave the title running code written for a state it is not in,
-/// which is worse than stopping. What is done instead is reporting the code and
-/// the address, because that is the only thing that says why the title gave up.
+/// which is worse than stopping. What is done instead is reporting the code, the
+/// address, the C++ type thrown and the calls that led there, because those are
+/// what say why the title gave up.
 #[test]
 fn a_raised_exception_is_reported_and_the_run_stops() {
     let program = r#"
@@ -2747,13 +2748,38 @@ int main(void) {
     uint8_t *base = xenolith_boot(path, 0);
     if (base == NULL) { return 2; }
 
-    /* A record of three words: the code a C++ throw uses, the flags, and the
-     * address. */
+    /* A record as a C++ throw writes it: the code, the flags, no nested
+     * record, the address, and three parameters naming the object and its
+     * type. */
     xenolith_store32(base, 0x200, 0xe06d7363u);
     xenolith_store32(base, 0x204, 1);
-    xenolith_store32(base, 0x208, 0x82123456u);
+    xenolith_store32(base, 0x208, 0);
+    xenolith_store32(base, 0x20c, 0x82123456u);
+    xenolith_store32(base, 0x210, 3);
+    xenolith_store32(base, 0x214, 0x19930520u);
+    xenolith_store32(base, 0x218, 0x6ffffb70u);
+    xenolith_store32(base, 0x21c, 0x300);
+
+    /* The type description, its list of catchable types, the first of them,
+     * and the type's mangled name. */
+    xenolith_store32(base, 0x30c, 0x320);
+    xenolith_store32(base, 0x320, 1);
+    xenolith_store32(base, 0x324, 0x340);
+    xenolith_store32(base, 0x344, 0x380);
+    const char *name = ".?AVbad_alloc@std@@";
+    for (uint32_t at = 0; name[at] != '\0'; at++) {
+        xenolith_store8(base, 0x388 + at, (uint8_t)name[at]);
+    }
+
+    /* Two frames above the one raising, each saving where it returns to just
+     * below the frame above it, and an outermost frame that leads nowhere. */
+    xenolith_store32(base, 0x1000, 0x1100);
+    xenolith_store32(base, 0x1100 - 8, 0x8238468cu);
+    xenolith_store32(base, 0x1100, 0x1200);
+    xenolith_store32(base, 0x1200 - 8, 0x821ffdd8u);
 
     xenolith_context ctx = {0};
+    ctx.r[1] = 0x1000;
     ctx.r[3] = 0x200;
     ctx.lr = 0x82392c98u;
     xenolith_import(&ctx, base, "xboxkrnl.exe", 310, "RtlRaiseException");
@@ -2809,8 +2835,16 @@ int main(void) {
         "the code that was raised should be named: {complaint}"
     );
     assert!(
-        complaint.contains("0x82123456"),
+        complaint.contains("at 0x82123456"),
         "the address in the record should be named: {complaint}"
+    );
+    assert!(
+        complaint.contains("thrown is a .?AVbad_alloc@std@@"),
+        "the type thrown should be named: {complaint}"
+    );
+    assert!(
+        complaint.contains("called by 0x8238468c 0x821ffdd8\n"),
+        "the calls that led to the throw should be named: {complaint}"
     );
     assert_eq!(
         ran.status.code(),
