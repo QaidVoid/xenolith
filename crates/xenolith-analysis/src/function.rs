@@ -872,12 +872,22 @@ fn scan_for_constructed(
     found.into_iter().collect()
 }
 
+/// The most instructions followed from an address the code builds before it
+/// is given up on.
+///
+/// Longer than [`LEAF_LIMIT`], because the address being built is itself the
+/// evidence: a title building one at the front of a run of code nothing else
+/// has claimed means a function starts there however long it is. One title
+/// passes the address of a leaf of two hundred and seventy instructions this
+/// way and calls it through what it was handed.
+const CONSTRUCTED_LIMIT: u32 = 4096;
+
 /// Whether the words from an address are code nothing has claimed, up to one
 /// that ends a function: a return, or a branch or a branch through a register
 /// that does not fall through.
 fn ends_before_anything_claimed(image: &Image, begin: u32, claimed: &BTreeSet<u32>) -> bool {
     let mut at = begin;
-    for _ in 0..LEAF_LIMIT {
+    for _ in 0..CONSTRUCTED_LIMIT {
         if claimed.contains(&at) {
             return false;
         }
