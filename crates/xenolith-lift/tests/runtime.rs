@@ -3877,6 +3877,22 @@ int main(void) {
         fprintf(stderr, "no device was chosen\n");
         return 6;
     }
+
+    /* The device chosen is there, and another is not. */
+    ctx.r[3] = xenolith_load32(base, 0x500);
+    ctx.r[4] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 613, "XamContentGetDeviceState");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "the device chosen is not there\n");
+        return 7;
+    }
+    ctx.r[3] = xenolith_load32(base, 0x500) + 1u;
+    ctx.r[4] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 613, "XamContentGetDeviceState");
+    if (ctx.r[3] != 1167u) {
+        fprintf(stderr, "a device nobody chose came back as %#llx\n", (unsigned long long)ctx.r[3]);
+        return 8;
+    }
     return 0;
 }
 "#;

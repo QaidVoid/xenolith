@@ -2979,8 +2979,10 @@ static uint32_t answer_a_message(uint32_t program, uint32_t message) {
     stop_the_run(3);
 }
 
-/* The number of the one device a title can save to. */
+/* The number of the one device a title can save to, and what asking about
+ * any other says. */
 #define XENOLITH_THE_ONE_DEVICE 1u
+#define XENOLITH_ERROR_DEVICE_NOT_CONNECTED 1167u
 
 /* What reading a list that has run out reports, and the most one item of a
  * list a title asks for takes. */
@@ -3263,6 +3265,17 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             tell_the_system_listeners(XENOLITH_SYSTEM_SCREENS, 1);
             tell_the_system_listeners(XENOLITH_SYSTEM_SCREENS, 0);
             ctx->r[3] = block != 0 ? finish_at_once(base, block, 0, 0) : 0;
+            return 1;
+        }
+        case 613: {
+            /* Whether a device is there. The one a title can save to always
+             * is, and any other is not, which is said through the block in the
+             * second argument where there is one. */
+            uint32_t block = (uint32_t)ctx->r[4];
+            uint32_t status = (uint32_t)ctx->r[3] == XENOLITH_THE_ONE_DEVICE
+                                  ? XENOLITH_STATUS_SUCCESS
+                                  : XENOLITH_ERROR_DEVICE_NOT_CONNECTED;
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
             return 1;
         }
         case 592: {
