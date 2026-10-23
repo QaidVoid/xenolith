@@ -16,8 +16,8 @@ use clap::Parser;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use xenolith_analysis::analyze;
 use xenolith_lift::{
-    COMMAND_STREAM_SOURCE, DRAWING_SOURCE, RENDERER_SOURCE, RUNTIME_HEADER, RUNTIME_SOURCE,
-    SOUND_SOURCE, Unlifted, declaration_of, lift, name_of,
+    COMMAND_STREAM_SOURCE, DRAWING_SOURCE, Imports, RENDERER_SOURCE, RUNTIME_HEADER,
+    RUNTIME_SOURCE, SOUND_SOURCE, Unlifted, declaration_of, lift, name_of,
 };
 
 use crate::input::{Source, number};
@@ -254,6 +254,10 @@ int main(int count, char **arguments) {
      * does the thing, and one told it holds none shuts itself down. */
     xenolith_privileges(PRIVILEGES);
 
+    /* Where the kernel's variables the title imports live. Each slot is handed
+     * the address of one, and a title reading through a slot nothing filled
+     * reads the record word the container left in it. */
+VARIABLES
     xenolith_function entered = xenolith_lookup(address);
     if (entered == 0) {
         fprintf(stderr, "xenolith: %#010x is not a lifted function\n", address);
@@ -285,8 +289,18 @@ fn main_program(
     entry: Option<u32>,
     built_against: u32,
     privileges: Option<u32>,
+    variables: &Imports,
 ) -> String {
+    let mut filled = String::new();
+    for (slot, variable) in variables {
+        let _ = writeln!(
+            filled,
+            "    xenolith_import_variable(base, {slot:#010x}u, \"{}\", {});",
+            variable.library, variable.ordinal
+        );
+    }
     BOOT_PROGRAM
+        .replace("VARIABLES\n", &filled)
         .replace(
             "ENTRY_POINT",
             &entry.map_or_else(|| "0".to_owned(), |address| format!("{address:#010x}u")),
@@ -311,6 +325,7 @@ fn write_support(
     emitted: &BTreeSet<u32>,
     built_against: u32,
     privileges: Option<u32>,
+    variables: &Imports,
 ) -> Result<()> {
     // Everything the emitted code names but did not get a body becomes a trap,
     // so the program links and says where it went rather than walking past the
@@ -361,6 +376,7 @@ fn write_support(
             image.entry_point(),
             built_against,
             privileges,
+            variables,
         ),
     )?;
 
@@ -638,6 +654,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         &emitted,
         built_against.unwrap_or(0),
         loaded.privileges,
+        &loaded.variables,
     )?;
     write_the_shader_library(&args.out);
     write_into(&args.out, "Makefile", BUILD_FILE)?;

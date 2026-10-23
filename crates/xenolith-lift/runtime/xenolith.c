@@ -1014,6 +1014,25 @@ static pthread_mutex_t starting_the_count = PTHREAD_MUTEX_INITIALIZER;
  * times against it then takes longer than it asked for, and how much longer
  * depends on what else the machine was doing.
  */
+/* Where the kernel's own clock readings live, for a title that imports them, or
+ * nought where it does not. The count below keeps them current. */
+static uint32_t time_stamp_bundle;
+
+/* Writes the three readings a title takes from the kernel's clock: hundreds of
+ * nanoseconds since the start, the same counted from 1601 on the wall clock,
+ * and milliseconds since the start. */
+static void stamp_the_time(uint8_t *base, uint64_t since_ms, const struct timespec *since) {
+    struct timespec wall;
+    clock_gettime(CLOCK_REALTIME, &wall);
+    uint64_t running = (uint64_t)since->tv_sec * 10000000ull + (uint64_t)since->tv_nsec / 100u;
+    uint64_t on_the_wall =
+        ((uint64_t)wall.tv_sec + (uint64_t)XENOLITH_TO_THE_CONSOLE_EPOCH) * 10000000ull
+        + (uint64_t)wall.tv_nsec / 100u;
+    xenolith_store64(base, time_stamp_bundle, running);
+    xenolith_store64(base, time_stamp_bundle + 8, on_the_wall);
+    xenolith_store32(base, time_stamp_bundle + 16, (uint32_t)since_ms);
+}
+
 static void *count_the_ticks(void *given) {
     uint8_t *base = given;
     struct timespec began;
@@ -1030,6 +1049,14 @@ static void *count_the_ticks(void *given) {
                              - (uint64_t)(began.tv_nsec / 1000000);
             xenolith_store32(base, shared_processor_state + XENOLITH_PROCESSOR_TICKS,
                              (uint32_t)since);
+            if (time_stamp_bundle != 0) {
+                struct timespec running = {now.tv_sec - began.tv_sec, now.tv_nsec - began.tv_nsec};
+                if (running.tv_nsec < 0) {
+                    running.tv_sec -= 1;
+                    running.tv_nsec += 1000000000L;
+                }
+                stamp_the_time(base, since, &running);
+            }
         }
 
         struct timespec once = {0, 1000000};
@@ -1071,6 +1098,67 @@ uint32_t xenolith_processor_block(uint8_t *base) {
 
 /* What kernel build the image was made against, kept for anything that asks. */
 static uint32_t built_against;
+
+/* How fast the graphics hardware is clocked, in megahertz. A title divides by
+ * the display's pixel clock to pace itself against it. */
+#define XENOLITH_GPU_CLOCK_MHZ 500u
+
+/* How much room each imported variable is given. The largest the kernel
+ * exports that a title was seen to import is the clock readings, at twenty four
+ * bytes. */
+#define XENOLITH_VARIABLE_ROOM 64u
+
+void xenolith_import_variable(uint8_t *base, uint32_t slot, const char *library,
+                              uint32_t ordinal) {
+    static uint32_t room, used;
+    if (room == 0 || used + XENOLITH_VARIABLE_ROOM > XENOLITH_HEAP_GRAIN) {
+        room = take_guest_memory(XENOLITH_HEAP_GRAIN, XENOLITH_HEAP_GRAIN);
+        used = 0;
+        if (room == 0) {
+            say_a_report("no room for %s variable %u", library, ordinal);
+            return;
+        }
+    }
+    uint32_t home = room + used;
+    used += XENOLITH_VARIABLE_ROOM;
+    xenolith_store32(base, slot, home);
+
+    if (strcmp(library, "xboxkrnl.exe") != 0) {
+        say_a_report("%s variable %u is not known, and is left as nothing", library, ordinal);
+        return;
+    }
+    switch (ordinal) {
+    case 448:
+        xenolith_store32(base, home, XENOLITH_GPU_CLOCK_MHZ);
+        break;
+    case 344:
+        /* The kernel's version, as the build the title was made against: a
+         * title runs on the kernel it was built for. */
+        xenolith_store16(base, home, (uint16_t)(built_against >> 28));
+        xenolith_store16(base, home + 2, (uint16_t)((built_against >> 24) & 0xfu));
+        xenolith_store16(base, home + 4, (uint16_t)((built_against >> 8) & 0xffffu));
+        xenolith_store8(base, home + 7, (uint8_t)built_against);
+        break;
+    case 173:
+        time_stamp_bundle = home;
+        break;
+    case 27:
+    case 89:
+    case 403:
+    case 430:
+    case 446:
+    case 449:
+    case 614:
+        /* Left as nothing, which each of these is on a retail console with no
+         * debugger attached, or is a lock nobody holds, or is a pointer or a
+         * description only the kernel reads. The command line is empty, which
+         * is a title started with no arguments. */
+        break;
+    default:
+        say_a_report("%s variable %u is not known, and is left as nothing", library, ordinal);
+        break;
+    }
+}
 
 void xenolith_built_against(uint32_t build) {
     built_against = build;

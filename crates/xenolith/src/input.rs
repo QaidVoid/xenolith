@@ -6,6 +6,7 @@
 //! needs key material and reading an existing image does not. Work that would
 //! otherwise be gated behind having a key stays possible that way.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -43,6 +44,15 @@ pub(crate) struct Loaded {
     /// is: the boot program is where a title's startup finds it, and reading it
     /// twice would mean parsing the container twice.
     pub(crate) privileges: Option<u32>,
+    /// The kernel's variables the title imports, keyed by the slot each one's
+    /// address belongs in.
+    ///
+    /// A function import has a slot and a thunk, and a variable has only the
+    /// slot. Nothing fills that slot unless the boot program does, so a title
+    /// reading through it reads the record word the container left there.
+    /// Empty where the records would not decode, which lifting reports through
+    /// the thunks.
+    pub(crate) variables: Imports,
 }
 
 /// Where a subcommand reads its image from.
@@ -116,6 +126,7 @@ impl Source {
                  * nothing says what it is allowed to do. */
                 built_against: None,
                 privileges: None,
+                variables: Imports::new(),
             });
         }
 
@@ -140,24 +151,34 @@ impl Source {
             .into_diagnostic()
             .wrap_err_with(|| format!("decoding the image of {}", self.file.display()))?;
 
-        let thunks = imports(&image, container.import_libraries())
+        let declared = imports(&image, container.import_libraries())
             .into_diagnostic()
-            .wrap_err_with(|| format!("reading the imports of {}", self.file.display()))
-            .map(|found| {
-                found
-                    .into_iter()
+            .wrap_err_with(|| format!("reading the imports of {}", self.file.display()));
+        let variables = declared.as_ref().map_or_else(
+            |_| Imports::new(),
+            |found| {
+                let functions: BTreeSet<(&str, u16)> = found
+                    .iter()
                     .filter(|import| import.kind == ImportKind::Thunk)
-                    .map(|import| {
-                        (
-                            import.address,
-                            Imported {
-                                library: import.library.to_owned(),
-                                ordinal: import.ordinal,
-                            },
-                        )
+                    .map(|import| (import.library, import.ordinal))
+                    .collect();
+                found
+                    .iter()
+                    .filter(|import| {
+                        import.kind == ImportKind::Slot
+                            && !functions.contains(&(import.library, import.ordinal))
                     })
+                    .map(|import| (import.address, imported(import.library, import.ordinal)))
                     .collect()
-            });
+            },
+        );
+        let thunks = declared.map(|found| {
+            found
+                .into_iter()
+                .filter(|import| import.kind == ImportKind::Thunk)
+                .map(|import| (import.address, imported(import.library, import.ordinal)))
+                .collect()
+        });
 
         /* What the image was built against, from the kernel's own import
          * library. A container without that library says nothing rather than
@@ -181,6 +202,15 @@ impl Source {
             imports: thunks,
             built_against,
             privileges,
+            variables,
         })
+    }
+}
+
+/// What an import names, owned so that it outlives the container.
+fn imported(library: &str, ordinal: u16) -> Imported {
+    Imported {
+        library: library.to_owned(),
+        ordinal,
     }
 }

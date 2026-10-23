@@ -823,6 +823,19 @@ void xenolith_built_against(uint32_t build);
  * word with the bit clear: nothing here invents a privilege. */
 void xenolith_privileges(uint32_t flags);
 
+/* Gives a variable the kernel exports a home in guest memory, and puts its
+ * address in the slot the title reads it through.
+ *
+ * A title imports a few of the kernel's variables as well as its functions, and
+ * reads each through a slot that the console's loader fills with the variable's
+ * address. Nothing else fills it here, so the boot program calls this once for
+ * each slot, after saying what kernel build the title was made against. Each
+ * starts as nothing, and the ones a title reads a value out of are given one: the
+ * graphics clock, the kernel's version, and the clock readings, which are kept
+ * current for as long as the run lasts. One this does not know is reported. */
+void xenolith_import_variable(uint8_t *base, uint32_t slot, const char *library,
+                              uint32_t ordinal);
+
 /* Somewhere to put the vertices a shader goes and gets, and how many words of it
  * there is room for. Returns nothing where there is nothing to draw with. */
 uint32_t *xenolith_room_for_vertices(uint32_t *how_many);

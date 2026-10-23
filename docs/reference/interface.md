@@ -454,6 +454,19 @@ before it draws anything.
 Nought means the container did not say, which is answered the same way as a
 word with the bit clear: nothing here invents a privilege.
 
+## `xenolith_import_variable`
+
+Gives a variable the kernel exports a home in guest memory, and puts its
+address in the slot the title reads it through.
+
+A title imports a few of the kernel's variables as well as its functions, and
+reads each through a slot that the console's loader fills with the variable's
+address. Nothing else fills it here, so the boot program calls this once for
+each slot, after saying what kernel build the title was made against. Each
+starts as nothing, and the ones a title reads a value out of are given one: the
+graphics clock, the kernel's version, and the clock readings, which are kept
+current for as long as the run lasts. One this does not know is reported.
+
 ## `xenolith_room_for_vertices`
 
 Somewhere to put the vertices a shader goes and gets, and how many words of it

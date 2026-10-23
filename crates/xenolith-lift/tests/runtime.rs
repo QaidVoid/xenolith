@@ -930,6 +930,89 @@ int main(void) {
     }
 }
 
+/// A variable the kernel exports is given a home and a value.
+///
+/// A title reads the graphics clock, the kernel's version and the clock
+/// readings through slots the console's loader fills with their addresses.
+/// Nothing filled them here, so a title read through the record word the
+/// container left in each. One divides by the graphics clock it reads that way,
+/// gets nought, and spins in a loop counted by the answer.
+#[test]
+fn an_imported_variable_is_given_a_home_and_a_value() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Slots holding the record words a container leaves in them. */
+    xenolith_store32(base, 0x200, 0x000101c0u);
+    xenolith_store32(base, 0x204, 0x00010158u);
+    xenolith_store32(base, 0x208, 0x000100adu);
+    xenolith_built_against(0x2017f400u);
+    xenolith_import_variable(base, 0x200, "xboxkrnl.exe", 448);
+    xenolith_import_variable(base, 0x204, "xboxkrnl.exe", 344);
+    xenolith_import_variable(base, 0x208, "xboxkrnl.exe", 173);
+    (void)xenolith_processor_block(base);
+
+    uint32_t clock = xenolith_load32(base, 0x200);
+    uint32_t version = xenolith_load32(base, 0x204);
+    uint32_t stamps = xenolith_load32(base, 0x208);
+    if (clock < 0x100000u || version < 0x100000u || stamps < 0x100000u) {
+        fprintf(stderr, "a slot was left pointing at %#x, %#x, %#x\n", clock, version, stamps);
+        return 3;
+    }
+    if (xenolith_load32(base, clock) != 500u) {
+        fprintf(stderr, "the graphics clock read %u\n", xenolith_load32(base, clock));
+        return 4;
+    }
+    if (xenolith_load16(base, version) != 2u || xenolith_load16(base, version + 4) != 6132u) {
+        fprintf(stderr, "the kernel's version read %u.%u.%u\n", xenolith_load16(base, version),
+                xenolith_load16(base, version + 2), xenolith_load16(base, version + 4));
+        return 5;
+    }
+
+    /* The clock readings move: the count of milliseconds goes up between two
+     * looks a twentieth of a second apart, and the wall clock is past 2020. */
+    struct timespec pause = {0, 50000000L};
+    nanosleep(&pause, NULL);
+    uint32_t first = xenolith_load32(base, stamps + 16);
+    nanosleep(&pause, NULL);
+    uint32_t second = xenolith_load32(base, stamps + 16);
+    uint64_t wall = xenolith_load64(base, stamps + 8);
+    if (second <= first) {
+        fprintf(stderr, "the tick count went from %u to %u\n", first, second);
+        return 6;
+    }
+    if (wall < 132223104000000000ull) {
+        fprintf(stderr, "the wall clock read %llu\n", (unsigned long long)wall);
+        return 7;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("variables", program) {
+        panic!("an imported variable was not given a home and a value:\n{complaint}");
+    }
+}
+
 /// A timer falls due when it was set to, keeps falling due at its period, and
 /// stops when it is cancelled.
 ///
