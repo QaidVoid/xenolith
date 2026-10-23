@@ -3379,6 +3379,55 @@ int main(void) {
     }
 }
 
+/// The time base counts at the rate a title is told it counts at.
+///
+/// A title divides a difference of two readings by that rate to know how long
+/// passed. A count that does not keep to the rate makes every wait a title
+/// times last as long as the count says rather than as long as it asked.
+#[test]
+fn the_time_base_keeps_to_the_rate_a_title_is_told() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 131, "KeQueryPerformanceFrequency");
+    double rate = (double)ctx.r[3];
+    if (rate <= 0.0) { return 3; }
+
+    uint64_t before = xenolith_timebase();
+    struct timespec tenth = {0, 100000000};
+    nanosleep(&tenth, NULL);
+    double passed = (double)(xenolith_timebase() - before) / rate;
+    if (passed < 0.09 || passed > 0.5) {
+        fprintf(stderr, "a tenth of a second read as %f seconds\n", passed);
+        return 4;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("time_base", program) {
+        panic!("the time base did not keep to its rate:\n{complaint}");
+    }
+}
+
 /// A frame is shown when the reading reaches the packet that says to, and not
 /// when the title asks.
 ///

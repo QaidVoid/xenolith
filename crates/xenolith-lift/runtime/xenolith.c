@@ -4807,9 +4807,15 @@ uint8_t xenolith_conditional64(uint8_t *base, uint32_t address, uint64_t value) 
     return stored;
 }
 
-/* A counter that advances, which is all a timing loop needs to finish. What it
- * counts at bears no relation to the console. */
+/* The time base, counting at the rate a title is told it counts at.
+ *
+ * A title divides what it reads here by that rate to know how long something
+ * took. A count that went up by one at each reading made a title's seconds last
+ * as many readings as the rate says, so a wait for a fifth of a second that
+ * reads once a frame lasted days, and the screen asking for it never left. */
 uint64_t xenolith_timebase(void) {
-    static uint64_t ticks;
-    return ++ticks;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * XENOLITH_TIMEBASE_HZ
+           + (uint64_t)now.tv_nsec / (1000000000u / XENOLITH_TIMEBASE_HZ);
 }
