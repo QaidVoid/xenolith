@@ -4176,6 +4176,103 @@ int main(void) {
     }
 }
 
+/// A button a run is told to hold can be held for a span of seconds.
+///
+/// A title's first screen waits for a button to go down while it is up, and a
+/// button held from the start of the run went down before the screen was
+/// there, so the screen never saw it pressed.
+#[test]
+fn a_held_button_can_be_given_a_span() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    if (xenolith_boot(path, 0) == NULL) { return 2; }
+
+    uint16_t buttons = 0;
+    int16_t thumbs[4];
+    xenolith_what_is_held(&buttons, thumbs);
+    if (buttons != 0x0010u) {
+        fprintf(stderr, "at the start %#x was held\n", buttons);
+        return 3;
+    }
+    struct timespec pause = {0, 400000000L};
+    nanosleep(&pause, NULL);
+    xenolith_what_is_held(&buttons, thumbs);
+    if (buttons != 0x1000u) {
+        fprintf(stderr, "later %#x was held\n", buttons);
+        return 4;
+    }
+    return 0;
+}
+"#;
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("held_span");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", SHADER_TABLE),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text).expect("writing a file");
+    }
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args([
+            "-std=c17",
+            "-O1",
+            "-DXENOLITH_WITH_VULKAN",
+            "-DXENOLITH_WITH_WINDOW",
+            "-DXENOLITH_WITH_X11",
+        ])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lX11", "-lm", "-lpthread"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the span test did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .env("XENOLITH_HOLD", "0x0010@0-0.3,0x1000@0.3")
+        .output()
+        .expect("running the check");
+    assert!(
+        ran.status.success(),
+        "a span went wrong, {}:\n{}",
+        ran.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
 /// A run with no way to show a frame says so once and carries on.
 ///
 /// A machine with no display, or one asked to show nothing, is a limit of the

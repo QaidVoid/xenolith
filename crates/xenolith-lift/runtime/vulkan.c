@@ -3892,19 +3892,55 @@ static int held(const char *keyboard, KeySym key) {
  * waits for a button. So a run can say what is held, as the number a title
  * would be given, and every way of reading a keyboard here gives that first.
  *
- * Read once, because what is held is meant to stay held for the length of a
- * run rather than changing under a title that is waiting for it. */
+ * A number on its own is held for the whole run. A screen that waits for a
+ * button to be pressed rather than held needs it to go down while the screen
+ * is up, so a number can also be given a span of seconds from the start of the
+ * run, as `0x10@40-41`, and several of them can be given apart from each other
+ * by commas. Read once, and each span measured from the first time anything
+ * asks. */
+#define XENOLITH_HOLDS 16u
+
 static int what_a_run_says_is_held(uint16_t *buttons) {
     static int settled = -1;
-    static uint16_t told;
+    static unsigned count;
+    static struct {
+        uint16_t buttons;
+        double from;
+        double until;
+    } holds[XENOLITH_HOLDS];
+    static struct timespec began;
 
     if (settled < 0) {
         const char *asked = getenv("XENOLITH_HOLD");
-        told = asked != NULL ? (uint16_t)strtoul(asked, NULL, 0) : 0;
+        clock_gettime(CLOCK_MONOTONIC, &began);
+        while (asked != NULL && *asked != '\0' && count < XENOLITH_HOLDS) {
+            char *after;
+            holds[count].buttons = (uint16_t)strtoul(asked, &after, 0);
+            holds[count].from = 0.0;
+            holds[count].until = 1e300;
+            if (*after == '@') {
+                holds[count].from = strtod(after + 1, &after);
+                if (*after == '-') {
+                    holds[count].until = strtod(after + 1, &after);
+                }
+            }
+            count++;
+            asked = *after == ',' ? after + 1 : "";
+        }
         settled = 1;
     }
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double since = (double)(now.tv_sec - began.tv_sec) + (double)(now.tv_nsec - began.tv_nsec) / 1e9;
+    uint16_t told = 0;
+    for (unsigned at = 0; at < count; at++) {
+        if (since >= holds[at].from && since < holds[at].until) {
+            told |= holds[at].buttons;
+        }
+    }
     *buttons |= told;
-    return told != 0;
+    return count != 0;
 }
 
 int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
