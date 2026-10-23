@@ -3379,6 +3379,94 @@ int main(void) {
     }
 }
 
+/// A frame is shown when the reading reaches the packet that says to, and not
+/// when the title asks.
+///
+/// A title asks once it has written a frame's commands, and the reading may
+/// still be partway through them. Shown at the asking, a frame is cut in two
+/// and holds only some of what the title drew.
+#[test]
+fn a_frame_is_shown_when_the_reading_reaches_it() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static int kept(void) {
+    FILE *frame = fopen("frames/frame0001.ppm", "rb");
+    if (frame == NULL) { return 0; }
+    fclose(frame);
+    return 1;
+}
+
+int main(void) {
+    setenv("XENOLITH_NO_WINDOW", "1", 1);
+    setenv("XENOLITH_FRAMES", "frames", 1);
+    mkdir("frames", 0755);
+    remove("frames/frame0001.ppm");
+
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    if (!xenolith_can_draw()) {
+        printf("no device\n");
+        return 0;
+    }
+    if (!xenolith_begin_a_frame() || !xenolith_end_a_frame()) { return 3; }
+
+    /* The room is the front of the ring, so the packet the kernel writes
+     * there is read once the title says the ring holds it. */
+    uint32_t ring = 0x01000000u;
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02000000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+
+    xenolith_store32(base, 0x2004, 0x03770006u);
+    xenolith_store32(base, 0x2008, (719u << 13) | 1279u);
+    ctx.r[3] = ring;
+    ctx.r[4] = 0x2000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 603, "VdSwap");
+
+    struct timespec briefly = {0, 50000000};
+    nanosleep(&briefly, NULL);
+    if (kept()) {
+        fprintf(stderr, "a frame was shown before the reading reached it\n");
+        return 4;
+    }
+
+    xenolith_store32(base, 0x7fc80714u, 64u);
+    for (int waited = 0; waited < 2000 && xenolith_load32(base, 0x02000000u) != 64u; waited++) {
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    if (!kept()) {
+        fprintf(stderr, "no frame was shown once the reading reached it\n");
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs_with_the_renderer("shown_when_read", program) {
+        panic!("a frame was not shown when the reading reached it:\n{complaint}");
+    }
+}
+
 /// A wait on several handles takes the one that is set and says which.
 ///
 /// A title's worker waits on any of its handles, and was stopped by this not

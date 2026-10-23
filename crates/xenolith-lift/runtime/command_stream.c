@@ -465,6 +465,13 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
                 }
             }
 
+            /* Showing a frame, in the packet the kernel wrote when the title
+             * asked: the picture to show is the word after its tag. */
+            if (opcode == XENOLITH_PACKET_SWAP && follows >= 2) {
+                show_a_frame(xenolith_load32(base, stream + (at + 2) * 4));
+                break;
+            }
+
             /* Saying that what was handed over is finished.
              *
              * Everything written here is finished the moment it is read, so the

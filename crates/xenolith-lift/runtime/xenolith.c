@@ -1908,6 +1908,8 @@ static struct {
     uint32_t callback_argument;
     /* How many times a title has asked for what it drew to be shown. */
     unsigned long frames;
+    /* How many of those the reading has reached and shown. */
+    unsigned long shown;
 } graphics;
 
 /* Where a title says how far it has written into the ring buffer.
@@ -2103,6 +2105,35 @@ static void set_register(uint8_t *base, uint32_t index, uint32_t value) {
 }
 
 #include "drawing.c"
+
+/* Shows a frame, when the commands reach the packet that says to.
+ *
+ * Not when the title asks. It asks once it has written a frame's commands, and
+ * the reading may still be partway through them. Ending the frame there splits
+ * it, and what was drawn before the split is wiped when the rest begins, so a
+ * frame shows only some of what the title drew, and which part changes from
+ * one frame to the next.
+ *
+ * What is shown is the copy the title made into the picture the packet names,
+ * or the surface where it made none. It is then written out where a run asks
+ * for it, which is the only way to see whether a title drew anything rather
+ * than only that it asked to. */
+static void show_a_frame(uint32_t front) {
+    finish_the_frame();
+    if (!xenolith_show_what_was_copied_to(front)) {
+        xenolith_show_the_frame();
+    }
+    graphics.shown++;
+
+    const char *keeping = getenv("XENOLITH_FRAMES");
+    if (keeping != NULL) {
+        char where[512];
+        int written = snprintf(where, sizeof where, "%s/frame%04lu.ppm", keeping, graphics.shown);
+        if (written > 0 && (size_t)written < sizeof where) {
+            xenolith_keep_a_frame(where);
+        }
+    }
+}
 
 #include "command_stream.c"
 
@@ -4433,39 +4464,30 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         return 1;
     }
     case 603:
-        /* Showing what was drawn.
+        /* Asking for what was drawn to be shown.
          *
-         * A title reaching this has finished a frame's worth of work. What was
-         * drawn in it is finished first, which reads it back and is what makes
-         * the next frame start clean, and then it is shown if there is anywhere
-         * to show it. Where there is not, the counting is all this comes to.
+         * A title reaching this has written a frame's commands, which is not
+         * the same as their having been read. So nothing is shown here: the
+         * commands that show the frame are written where the title left room
+         * for them among its own, and the frame is shown when the reading
+         * reaches them.
          *
-         * What is shown is the picture the title names, which is the copy it
-         * made out of the hardware into its front buffer. The second argument
-         * describes that buffer the way a picture is described to a shader,
-         * and the address is the top of its second word. The drawing surface
-         * holds whatever was drawn after the copy, so it is shown only where
-         * no copy was made to the place named. */
+         * The first argument is that room, sixty four words of a buffer the
+         * title has already handed to the hardware or is about to. The kernel
+         * fills it with one packet that covers all of it, saying which picture
+         * to show, and the hardware reads past it to what comes next. Left
+         * alone, it holds whatever that memory held the last time round, which
+         * is commands from an older frame, and reading those as these puts
+         * every command after them out of step.
+         *
+         * The picture is the copy the title made out of the hardware into its
+         * front buffer. The second argument describes that buffer the way a
+         * picture is described to a shader, and the address is the top of its
+         * second word. */
         graphics.frames++;
-        finish_the_frame();
         {
             uint32_t described = (uint32_t)ctx->r[4];
             uint32_t front = described != 0 ? xenolith_load32(base, described + 4) & ~0xfffu : 0;
-            if (!xenolith_show_what_was_copied_to(front)) {
-                xenolith_show_the_frame();
-            }
-
-            /* The commands that show the frame, written where the title left
-             * room for them among its own.
-             *
-             * The first argument is that room, sixty four words of a buffer
-             * the title has already handed to the hardware or is about to. The
-             * kernel fills it with one packet that covers all of it, saying
-             * which picture to show, and the hardware reads past it to what
-             * comes next. Left alone, it holds whatever that memory held the
-             * last time round, which is commands from an older frame, and
-             * reading those as these puts every command after them out of
-             * step. */
             uint32_t room = (uint32_t)ctx->r[3];
             if (room != 0) {
                 uint32_t size = described != 0 ? xenolith_load32(base, described + 8) : 0;
@@ -4478,20 +4500,6 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
                 xenolith_store32(base, room + 16, ((size >> 13) & 0x1fffu) + 1u);
                 for (uint32_t word = 5; word < XENOLITH_SWAP_WORDS; word++) {
                     xenolith_store32(base, room + word * 4u, 0);
-                }
-            }
-        }
-        /* What was drawn, written where a run asks for it. A frame is read back
-         * the same way whatever it holds, so this is the only way to see
-         * whether a title drew anything rather than only that it asked to. */
-        {
-            const char *keeping = getenv("XENOLITH_FRAMES");
-            if (keeping != NULL) {
-                char where[512];
-                int written = snprintf(where, sizeof where, "%s/frame%04lu.ppm", keeping,
-                                       (unsigned long)graphics.frames);
-                if (written > 0 && (size_t)written < sizeof where) {
-                    xenolith_keep_a_frame(where);
                 }
             }
         }
