@@ -3081,6 +3081,287 @@ int main(void) {
     }
 }
 
+/// The program the message test runs.
+const MESSAGES_PROGRAM: &str = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0xfa;
+    ctx.r[4] = 0x0007001a;
+    ctx.r[5] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 508, "XMsgStartIORequestEx");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "the music player message came back as %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 3;
+    }
+
+    /* The same with a block to be told in, holding an event. */
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;
+    ctx.r[6] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    uint32_t event = xenolith_load32(base, 0x200);
+    xenolith_store32(base, 0x300, 0xffffffffu);
+    xenolith_store32(base, 0x30c, event);
+    ctx.r[3] = 0xfa;
+    ctx.r[4] = 0x0007001a;
+    ctx.r[5] = 0x300;
+    xenolith_import(&ctx, base, "xam.xex", 508, "XMsgStartIORequestEx");
+    if (ctx.r[3] != 997u || xenolith_load32(base, 0x300) != 0u) {
+        fprintf(stderr, "the block was not filled in: %#llx, %#x\n",
+                (unsigned long long)ctx.r[3], xenolith_load32(base, 0x300));
+        return 4;
+    }
+    xenolith_store64(base, 0x400, (uint64_t)(int64_t)-1);
+    ctx.r[3] = event;
+    ctx.r[4] = 1;
+    ctx.r[5] = 0;
+    ctx.r[6] = 0x400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "the event in the block was not set\n");
+        return 5;
+    }
+
+    ctx.r[3] = 0xfe;
+    ctx.r[4] = 0x00012345;
+    ctx.r[5] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 508, "XMsgStartIORequestEx");
+    fprintf(stderr, "an unknown message was answered\n");
+    return 6;
+}
+"#;
+
+/// A message to one of the system's programs is answered where it is known,
+/// through the block a title hands over where it hands one.
+///
+/// A title tells the music player that it keeps control of what plays, and
+/// waits on the event in the block it hands over for the answer. A message
+/// nothing here knows stops the run naming both numbers, as an entry point
+/// nothing answers does.
+#[test]
+fn a_message_to_a_system_program_is_answered_where_it_is_known() {
+    let program = MESSAGES_PROGRAM;
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("messages");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", SHADER_TABLE),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text).expect("writing a file");
+    }
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-O1"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the message test did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .output()
+        .expect("running the check");
+    let complaint = String::from_utf8_lossy(&ran.stderr);
+    assert_eq!(
+        ran.status.code(),
+        Some(3),
+        "the run should stop on an unknown message: {complaint}"
+    );
+    assert!(
+        complaint.contains("message 0x00012345 to the system's program 0xfe is not answered"),
+        "the unknown message was not named: {complaint}"
+    );
+}
+
+/// Showing a frame fills the room a title left for it with one packet.
+///
+/// The title leaves sixty four words among its commands for the kernel to say
+/// which picture to show. Left as it was, the room holds commands from an
+/// older frame, and the hardware reads them as these. The packet covers the
+/// whole room, names the picture, and the hardware passes over it by its
+/// length.
+#[test]
+fn showing_a_frame_fills_the_room_left_for_it() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Old commands in the room, and a description of the front buffer: at
+     * 0x03770000, 1280 by 720. */
+    for (uint32_t word = 0; word < 64; word++) {
+        xenolith_store32(base, 0x1000 + word * 4, 0xc0043c00u);
+    }
+    xenolith_store32(base, 0x2004, 0x03770006u);
+    xenolith_store32(base, 0x2008, (719u << 13) | 1279u);
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x1000;
+    ctx.r[4] = 0x2000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 603, "VdSwap");
+
+    uint32_t header = xenolith_load32(base, 0x1000);
+    if ((header >> 30) != 3u || ((header >> 16) & 0x3fffu) + 2u != 64u
+        || ((header >> 8) & 0xffu) != 0x64u) {
+        fprintf(stderr, "the packet's header was %#x\n", header);
+        return 3;
+    }
+    if (xenolith_load32(base, 0x1004) != 0x53574150u
+        || xenolith_load32(base, 0x1008) != 0x03770000u
+        || xenolith_load32(base, 0x100c) != 1280u || xenolith_load32(base, 0x1010) != 720u) {
+        fprintf(stderr, "the packet did not name the picture\n");
+        return 4;
+    }
+    for (uint32_t word = 5; word < 64; word++) {
+        if (xenolith_load32(base, 0x1000 + word * 4) != 0u) {
+            fprintf(stderr, "word %u of the room still holds an old command\n", word);
+            return 5;
+        }
+    }
+
+    /* What a page allows, asked while here: read and write, everywhere. */
+    ctx.r[3] = 0x1000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 196, "MmQueryAddressProtect");
+    if (ctx.r[3] != 4u) { return 6; }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("swap_room", program) {
+        panic!("showing a frame did not fill the room left for it:\n{complaint}");
+    }
+}
+
+/// A wait on several handles takes the one that is set and says which.
+///
+/// A title's worker waits on any of its handles, and was stopped by this not
+/// being answered at all.
+#[test]
+fn a_wait_on_several_handles_takes_the_one_that_is_set() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static uint32_t make_event(xenolith_context *ctx, uint8_t *base, uint32_t into) {
+    ctx->r[3] = into;
+    ctx->r[4] = 0;
+    ctx->r[5] = 1;
+    ctx->r[6] = 0;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    return xenolith_load32(base, into);
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    uint32_t first = make_event(&ctx, base, 0x200);
+    uint32_t second = make_event(&ctx, base, 0x204);
+    ctx.r[3] = second;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 246, "NtSetEvent");
+
+    xenolith_store32(base, 0x300, first);
+    xenolith_store32(base, 0x304, second);
+    xenolith_store64(base, 0x400, (uint64_t)(int64_t)-100000);
+    ctx.r[3] = 2;
+    ctx.r[4] = 0x300;
+    ctx.r[5] = 1;
+    ctx.r[6] = 1;
+    ctx.r[7] = 0;
+    ctx.r[8] = 0x400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 254, "NtWaitForMultipleObjectsEx");
+    if (ctx.r[3] != 1u) {
+        fprintf(stderr, "waiting on any came back with %#llx\n", (unsigned long long)ctx.r[3]);
+        return 3;
+    }
+    ctx.r[3] = 2;
+    ctx.r[4] = 0x300;
+    ctx.r[5] = 1;
+    ctx.r[8] = 0x400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 254, "NtWaitForMultipleObjectsEx");
+    if (ctx.r[3] != 0x102u) {
+        fprintf(stderr, "a second wait was let through by one set\n");
+        return 4;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("several_handles", program) {
+        panic!("a wait on several handles did not take the one that was set:\n{complaint}");
+    }
+}
+
 /// A privilege is answered from the flags the container declares.
 ///
 /// A title asks whether it holds a numbered privilege before it does the thing,

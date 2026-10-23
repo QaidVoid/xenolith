@@ -302,6 +302,15 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* What reading past the end of a file reports. */
 #define XENOLITH_STATUS_END_OF_FILE 0xC0000011u
 
+/* The packet the kernel writes to show a frame, how many words it covers with
+ * its header, and the four letters it starts with. */
+#define XENOLITH_PACKET_SWAP 0x64u
+#define XENOLITH_SWAP_WORDS 64u
+#define XENOLITH_SWAP_TAG 0x53574150u
+
+/* The kernel's flag for a page that can be read and written. */
+#define XENOLITH_PAGE_READ_WRITE 0x04u
+
 /* How large a context for the sound decoder is: sixteen words. */
 #define XENOLITH_SOUND_CONTEXT 64u
 
@@ -2773,6 +2782,44 @@ static void say_who_is_signed_in(xenolith_context *ctx, uint8_t *base, uint32_t 
     ctx->r[3] = 0;
 }
 
+/* The system's music player, and asking it who controls what plays. */
+#define XENOLITH_MUSIC_PLAYER 0xfau
+#define XENOLITH_SET_PLAYBACK_CONTROLLER 0x0007001au
+
+/* The system's program for what a player is doing, and telling it a context
+ * or a property of the player's game. */
+#define XENOLITH_PLAYER_STATUS 0xfbu
+#define XENOLITH_SET_CONTEXT 0x000b0006u
+#define XENOLITH_SET_PROPERTY 0x000b0007u
+
+/* Answers a message a title sends to one of the system's own programs, with
+ * the status it comes to.
+ *
+ * A message names the program and what is asked of it, and hands over a block
+ * of whatever that needs. Only the ones a title was seen to send are answered.
+ * Any other stops the run naming both numbers, as an entry point nothing
+ * answers does: answering a message with success when nothing was done is a
+ * lie a title believes. */
+static uint32_t answer_a_message(uint32_t program, uint32_t message) {
+    if (program == XENOLITH_MUSIC_PLAYER && message == XENOLITH_SET_PLAYBACK_CONTROLLER) {
+        /* Who decides what music plays: the title or the person holding the
+         * controller. Nothing here plays the person's own music, so the title
+         * is left in control, which is what it asked for. */
+        return XENOLITH_STATUS_SUCCESS;
+    }
+    if (program == XENOLITH_PLAYER_STATUS
+        && (message == XENOLITH_SET_CONTEXT || message == XENOLITH_SET_PROPERTY)) {
+        /* What the player is doing, which the console shows to their friends.
+         * There is no one to show it to, and nothing reads it back, so being
+         * told is all there is to it. */
+        return XENOLITH_STATUS_SUCCESS;
+    }
+    fprintf(stderr,
+            "xenolith: message %#010x to the system's program %#x is not answered\n",
+            message, program);
+    stop_the_run(3);
+}
+
 /* How much room one setting takes where profile settings are written. */
 #define XENOLITH_ONE_SETTING 40u
 
@@ -2994,6 +3041,22 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         case 537:
             read_profile_settings(ctx, base);
             return 1;
+        case 500:
+            /* A message answered before the call returns. */
+            ctx->r[3] = answer_a_message((uint32_t)ctx->r[3], (uint32_t)ctx->r[4]);
+            return 1;
+        case 503:
+        case 508: {
+            /* A message whose answer can be given later, through the block the
+             * third argument names. Every answer here is given at once, so
+             * where there is a block it is filled in and the title told the
+             * request is under way, and where there is none the status is the
+             * answer. */
+            uint32_t block = (uint32_t)ctx->r[5];
+            uint32_t status = answer_a_message((uint32_t)ctx->r[3], (uint32_t)ctx->r[4]);
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
+            return 1;
+        }
         case 522:
         case 526:
         case 528:
@@ -3703,6 +3766,12 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
          * different lie and a louder one. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
+    case 196:
+        /* What a page allows. Every guest page is mapped readable and writable
+         * before a title starts and nothing here changes that, so that is the
+         * answer for any address, in the kernel's own flag for it. */
+        ctx->r[3] = XENOLITH_PAGE_READ_WRITE;
+        return 1;
     case 199:
         /* Changing what a page allows. Every guest page is readable and
          * writable from the moment the space is mapped, and this runtime has no
@@ -4036,6 +4105,34 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         ctx->r[3] = was;
         return 1;
     }
+    case 254: {
+        /* Waiting on several objects named by handle: any of them, or all of
+         * them in turn, for as long as the sixth argument says. */
+        uint32_t count = (uint32_t)ctx->r[3];
+        uint32_t list = (uint32_t)ctx->r[4];
+        struct object *waited[64];
+        if (count == 0 || count > 64) {
+            ctx->r[3] = XENOLITH_STATUS_INVALID_PARAMETER;
+            return 1;
+        }
+        for (uint32_t at = 0; at < count; at++) {
+            waited[at] = object_of(xenolith_load32(base, list + at * 4));
+        }
+        struct timespec until;
+        int limited = give_up_at(base, (uint32_t)ctx->r[8], &until);
+        if ((uint32_t)ctx->r[5] == 1) {
+            ctx->r[3] = wait_for_any(waited, count, limited ? &until : NULL);
+            return 1;
+        }
+        uint32_t status = XENOLITH_STATUS_SUCCESS;
+        for (uint32_t at = 0; at < count && status == XENOLITH_STATUS_SUCCESS; at++) {
+            if (waited[at] != NULL) {
+                status = wait_until(waited[at], limited ? &until : NULL);
+            }
+        }
+        ctx->r[3] = status;
+        return 1;
+    }
     case 175: {
         /* Waiting on several objects named by where they live.
          *
@@ -4123,6 +4220,32 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
             uint32_t front = described != 0 ? xenolith_load32(base, described + 4) & ~0xfffu : 0;
             if (!xenolith_show_what_was_copied_to(front)) {
                 xenolith_show_the_frame();
+            }
+
+            /* The commands that show the frame, written where the title left
+             * room for them among its own.
+             *
+             * The first argument is that room, sixty four words of a buffer
+             * the title has already handed to the hardware or is about to. The
+             * kernel fills it with one packet that covers all of it, saying
+             * which picture to show, and the hardware reads past it to what
+             * comes next. Left alone, it holds whatever that memory held the
+             * last time round, which is commands from an older frame, and
+             * reading those as these puts every command after them out of
+             * step. */
+            uint32_t room = (uint32_t)ctx->r[3];
+            if (room != 0) {
+                uint32_t size = described != 0 ? xenolith_load32(base, described + 8) : 0;
+                xenolith_store32(base, room,
+                                 (3u << 30) | ((XENOLITH_SWAP_WORDS - 2u) << 16)
+                                     | (XENOLITH_PACKET_SWAP << 8));
+                xenolith_store32(base, room + 4, XENOLITH_SWAP_TAG);
+                xenolith_store32(base, room + 8, front & 0x1fffffffu);
+                xenolith_store32(base, room + 12, (size & 0x1fffu) + 1u);
+                xenolith_store32(base, room + 16, ((size >> 13) & 0x1fffu) + 1u);
+                for (uint32_t word = 5; word < XENOLITH_SWAP_WORDS; word++) {
+                    xenolith_store32(base, room + word * 4u, 0);
+                }
             }
         }
         /* What was drawn, written where a run asks for it. A frame is read back
