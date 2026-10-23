@@ -28,15 +28,19 @@ Measured against two retail titles, with
 | helper entries emitted beside them | 57 | 47 |
 | reaches the renderer | yes | yes |
 | issues draws with its own shaders | yes | yes |
-| runs until stopped | no, it faults | yes |
+| runs until stopped | yes | yes |
+| shows what it copies out | yes | not yet looked at |
 
-Both titles lift completely, both compile, and both reach the renderer and draw
-with their own translated shaders. What differs is what they do next: one takes a
-fault path of its own and raises an exception, and the other keeps running until
-it is stopped, drawing a fixed number of times and then waiting.
+Both titles lift completely, both compile, both reach the renderer and draw
+with their own translated shaders, and both keep running until they are
+stopped. Title A copies its frames out of the graphics hardware and hands them
+to the display, and those copies are what is shown. They are not yet the right
+picture: the shapes a title draws arrive, but what it draws into, what it reads
+back as pictures and how it composes a frame are only partly modelled.
 
-Neither shows a picture. Whether a frame is visible is not measured by anything
-here, and the runtime reports what it drew rather than what was on screen.
+Whether a frame is right is not measured by anything here. The runtime reports
+what it drew, and `XENOLITH_FRAMES` writes out what was shown so it can be
+looked at.
 
 ## Building and running
 
@@ -56,12 +60,13 @@ data is in this repository.
 
 ## What it does not do
 
-- **Play a game.** Both titles stop in their own failure states before a frame
-  is shown.
-- **Reproduce a console's settings.** A privilege, the video cable and two
-  display settings are answered from what a title's own startup requires,
-  because what a console was set to is not a property of the title. Every such
-  answer is reported as an assumption when the run starts.
+- **Play a game.** Title A runs and shows frames, but they are not yet the
+  picture the title drew.
+- **Reproduce a console's settings.** A privilege, the video cable, two display
+  settings, the region, the language and a signed in profile are answered from
+  what a title's own startup requires, because what a console was set to is not
+  a property of the title. Every such answer is reported as an assumption when
+  the run starts.
 - **Run without a host C compiler.** Most of the test suite checks the emitted C
   by compiling it, and a suite that skipped those would be comparing strings.
 - **Model the whole instruction set.** What the two titles exercise is modelled.
