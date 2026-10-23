@@ -26,14 +26,17 @@ Measured against two retail titles, with
 | of those, import thunks | 241 | 189 |
 | emitted C compiles | yes, all of it | yes, all of it |
 | helper entries emitted beside them | 57 | 47 |
-| runs its whole startup | reaches the renderer | no |
-| draws anything | issues draws with its own shaders | no |
+| reaches the renderer | yes | yes |
+| issues draws with its own shaders | yes | yes |
+| runs until stopped | no, it faults | yes |
 
-Both titles lift completely and both compile. What differs is how far they get
-when run, and the reason is the title rather than the translation: each stops on
-a kernel entry point nothing answers. Whether a frame is visible is not measured
-by anything here; what is measured is that the draws are issued with the title's
-own shaders.
+Both titles lift completely, both compile, and both reach the renderer and draw
+with their own translated shaders. What differs is what they do next: one takes a
+fault path of its own and raises an exception, and the other keeps running until
+it is stopped, drawing a fixed number of times and then waiting.
+
+Neither shows a picture. Whether a frame is visible is not measured by anything
+here, and the runtime reports what it drew rather than what was on screen.
 
 ## Building and running
 
