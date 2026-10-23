@@ -245,6 +245,9 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* What starting networking reports where there is no network to start. */
 #define XENOLITH_STATUS_NO_NETWORK 0xC00000BEu
 
+/* Why a socket could not be made, as the console's socket library says it. */
+#define XENOLITH_NETWORK_IS_DOWN 10050u
+
 /* What looking something up reports where there is nothing to look in. */
 #define XENOLITH_STATUS_NOT_FOUND 0xC0000225u
 
@@ -256,6 +259,9 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 
 /* What reading past the end of a file reports. */
 #define XENOLITH_STATUS_END_OF_FILE 0xC0000011u
+
+/* What a call given an argument it cannot use reports. */
+#define XENOLITH_STATUS_INVALID_PARAMETER 0xC000000Du
 
 /* What asking about a file for something this does not answer reports. */
 #define XENOLITH_STATUS_INVALID_INFO_CLASS 0xC0000003u
@@ -680,6 +686,10 @@ struct object {
     pthread_t thread;
     int running;
     int suspended;
+    /* Which setting of a timer is the current one. Every set and every cancel
+     * moves it on, so a countdown from an earlier setting finds it moved and
+     * signals nothing. */
+    unsigned long timer_round;
     /* What a thread was told to run, kept until it is resumed. */
     uint32_t startup;
     uint32_t entry;
@@ -761,6 +771,24 @@ static void step_over_the_ones_that_left(struct object *waited) {
     }
 }
 
+/* A count of every time any object was let go, for a thread waiting on several
+ * at once.
+ *
+ * Each object wakes only the threads waiting on it, and a thread waiting on any
+ * of eight is not waiting on one of them in particular. So every set also steps
+ * this and wakes whoever waits on it, and such a thread sleeps here between
+ * looking at each of its objects in turn. */
+static pthread_mutex_t anything_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t anything_changed = PTHREAD_COND_INITIALIZER;
+static unsigned long long anything_count;
+
+static void say_something_changed(void) {
+    pthread_mutex_lock(&anything_lock);
+    anything_count++;
+    pthread_cond_broadcast(&anything_changed);
+    pthread_mutex_unlock(&anything_lock);
+}
+
 /* Waits until an object is signalled, taking it if taking is what waiting on
  * that kind means.
  *
@@ -835,11 +863,6 @@ static uint32_t wait_until(struct object *waited, const struct timespec *until) 
     return status;
 }
 
-/* Waits for as long as it takes. */
-static uint32_t wait_on(struct object *waited) {
-    return wait_until(waited, NULL);
-}
-
 /* How many seconds the console's clock counts from before a host's does. The
  * first of January 1601 to the first of January 1970, which is a definition. */
 #define XENOLITH_TO_THE_CONSOLE_EPOCH 11644473600LL
@@ -907,6 +930,47 @@ static void signal_object(struct object *woken, int state) {
     }
     pthread_cond_broadcast(&woken->changed);
     pthread_mutex_unlock(&woken->lock);
+    say_something_changed();
+}
+
+/* Waits until any one of several objects is signalled, and takes that one.
+ *
+ * Each is looked at in turn with a wait that gives up at once, which takes it
+ * where it can be taken and leaves it alone where it cannot. Where none can,
+ * the thread sleeps until something is let go and looks again. The count is
+ * read before looking, so a set that lands while the objects are being looked
+ * at is not slept through.
+ *
+ * What comes back is the place in the list of the one taken, which is what the
+ * kernel answers, or the status saying the time ran out. */
+static uint32_t wait_for_any(struct object **waited, uint32_t count,
+                             const struct timespec *until) {
+    for (;;) {
+        pthread_mutex_lock(&anything_lock);
+        unsigned long long seen = anything_count;
+        pthread_mutex_unlock(&anything_lock);
+
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        for (uint32_t at = 0; at < count; at++) {
+            if (waited[at] != NULL &&
+                wait_until(waited[at], &now) == XENOLITH_STATUS_SUCCESS) {
+                return at;
+            }
+        }
+
+        pthread_mutex_lock(&anything_lock);
+        while (anything_count == seen) {
+            if (until == NULL) {
+                pthread_cond_wait(&anything_changed, &anything_lock);
+            } else if (pthread_cond_timedwait(&anything_changed, &anything_lock, until) ==
+                       ETIMEDOUT) {
+                pthread_mutex_unlock(&anything_lock);
+                return XENOLITH_STATUS_TIMEOUT;
+            }
+        }
+        pthread_mutex_unlock(&anything_lock);
+    }
 }
 
 /* The block a title reaches through r13, and the count of ticks inside it.
@@ -1048,6 +1112,18 @@ static uint32_t take_thread_stack(void) {
     return top;
 }
 
+/* The thread object of the guest thread running here, or nothing on the thread
+ * that entered the title. */
+static _Thread_local struct object *this_thread;
+
+/* Says a thread has finished, which is what anyone waiting on it waits for. */
+static void finish_thread(struct object *self) {
+    if (self != NULL) {
+        self->manual = 1;
+        signal_object(self, 1);
+    }
+}
+
 /* What a guest thread runs.
  *
  * The console gives a thread a shim to start in, which takes what to run and
@@ -1057,6 +1133,7 @@ static uint32_t take_thread_stack(void) {
 static void *run_guest_thread(void *given) {
     struct object *self = given;
     static _Thread_local xenolith_context state;
+    this_thread = self;
 
     /* A thread that cannot be given a stack never runs, and says so rather than
      * running on memory that belongs to something else. */
@@ -1089,8 +1166,7 @@ static void *run_guest_thread(void *given) {
         body(&state, self->base);
     }
 
-    self->manual = 1;
-    signal_object(self, 1);
+    finish_thread(self);
     return NULL;
 }
 
@@ -1139,11 +1215,16 @@ static pthread_mutex_t *section_of(uint32_t at) {
  * what identifies it here, the same way a critical section is identified by the
  * address it lives at.
  *
- * What such an object was initialized as is not read out of that structure. Its
- * layout is a property of the kernel rather than of the title, and reading
- * fields out of it by guesswork would put invented state behind every wait. One
- * is made on first mention instead, which is stated where it matters.
+ * What such an object is comes from the head every one of them starts with,
+ * read once when the object is first named: a byte saying what kind it is, and a
+ * word saying whether it is signalled, or for a semaphore how many it admits. A
+ * title writes that head itself rather than asking the kernel to, so it is the
+ * only record there is. The kinds are the kernel's numbers. Anything that is not
+ * one of them is taken for an event that a set lets one waiter through, which is
+ * what such an object was always taken for here.
  */
+#define XENOLITH_KIND_NOTIFICATION_EVENT 0u
+#define XENOLITH_KIND_SEMAPHORE 5u
 #define XENOLITH_NAMED_OBJECTS 1024
 
 static struct {
@@ -1152,7 +1233,28 @@ static struct {
 } named[XENOLITH_NAMED_OBJECTS];
 static pthread_mutex_t named_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static struct object *object_at(uint32_t at, enum object_kind kind) {
+/* Makes the object a head in guest memory describes. */
+static uint32_t take_object_described_at(uint8_t *base, uint32_t at) {
+    uint8_t kind = xenolith_load8(base, at);
+    int32_t state = (int32_t)xenolith_load32(base, at + 4);
+    uint32_t handle =
+        take_object(kind == XENOLITH_KIND_SEMAPHORE ? OBJECT_SEMAPHORE : OBJECT_EVENT);
+    struct object *made = object_of(handle);
+    if (made == NULL) {
+        return 0;
+    }
+    if (kind == XENOLITH_KIND_SEMAPHORE) {
+        made->count = state;
+    } else if (kind == XENOLITH_KIND_NOTIFICATION_EVENT) {
+        made->manual = 1;
+        made->signalled = state != 0;
+    } else {
+        made->releases = state != 0;
+    }
+    return handle;
+}
+
+static struct object *object_at(uint8_t *base, uint32_t at) {
     if (at == 0) {
         return NULL;
     }
@@ -1170,7 +1272,7 @@ static struct object *object_at(uint32_t at, enum object_kind kind) {
              * it. Written first, a slot whose object could not be made stays
              * claimed, and every later wait on that address finds a slot that
              * names nothing and returns nothing for ever. */
-            uint32_t handle = take_object(kind);
+            uint32_t handle = take_object_described_at(base, at);
             struct object *found = object_of(handle);
             if (found == NULL) {
                 pthread_mutex_unlock(&named_lock);
@@ -1264,6 +1366,110 @@ static void create_waitable(xenolith_context *ctx, uint8_t *base, enum object_ki
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
 
+/* One setting of a timer, counting down on a thread of its own. */
+struct timer_setting {
+    struct object *timer;
+    unsigned long round;
+    struct timespec due;
+    long period;
+};
+
+/* Signals a timer when it falls due, and again every period after that, until
+ * the timer is set again or cancelled. */
+static void *count_a_timer_down(void *given) {
+    struct timer_setting setting = *(struct timer_setting *)given;
+    free(given);
+
+    for (;;) {
+        while (clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &setting.due, NULL) == EINTR) {
+        }
+        pthread_mutex_lock(&setting.timer->lock);
+        int current = setting.timer->timer_round == setting.round;
+        pthread_mutex_unlock(&setting.timer->lock);
+        if (!current) {
+            return NULL;
+        }
+        signal_object(setting.timer, 1);
+        if (setting.period <= 0) {
+            return NULL;
+        }
+        setting.due.tv_sec += setting.period / 1000;
+        setting.due.tv_nsec += (setting.period % 1000) * 1000000L;
+        if (setting.due.tv_nsec >= 1000000000L) {
+            setting.due.tv_sec += 1;
+            setting.due.tv_nsec -= 1000000000L;
+        }
+    }
+}
+
+/* Setting a timer to fall due after a stretch or at a moment, and then every
+ * so many milliseconds if a period is given.
+ *
+ * Setting one takes back whatever it was set to before and leaves it not
+ * signalled until it falls due. A routine a title names to be run when it does
+ * is not run: running one means stopping a thread of the title's in a wait that
+ * may be cut short, which nothing here does. That is said once rather than left
+ * to look like a timer that never went. */
+static void set_timer(xenolith_context *ctx, uint8_t *base) {
+    struct object *timer = object_of((uint32_t)ctx->r[3]);
+    if (timer == NULL) {
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return;
+    }
+    if ((uint32_t)ctx->r[5] != 0) {
+        static int said;
+        if (!said) {
+            said = 1;
+            say_a_report("a timer's routine at %#x is not run when the timer falls due",
+                         (unsigned)ctx->r[5]);
+        }
+    }
+
+    struct timer_setting *setting = malloc(sizeof *setting);
+    if (setting == NULL) {
+        ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+        return;
+    }
+    if (!give_up_at(base, (uint32_t)ctx->r[4], &setting->due)) {
+        clock_gettime(CLOCK_REALTIME, &setting->due);
+    }
+    setting->timer = timer;
+    setting->period = (long)(int32_t)ctx->r[9];
+
+    pthread_mutex_lock(&timer->lock);
+    setting->round = ++timer->timer_round;
+    timer->signalled = 0;
+    timer->releases = 0;
+    pthread_mutex_unlock(&timer->lock);
+
+    pthread_t counting;
+    if (pthread_create(&counting, NULL, count_a_timer_down, setting) != 0) {
+        free(setting);
+        ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
+        return;
+    }
+    pthread_detach(counting);
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
+/* Cancelling a timer, which leaves it as it is and stops it falling due. What
+ * comes back, where a title asks, is whether it was signalled. */
+static void cancel_timer(xenolith_context *ctx, uint8_t *base) {
+    struct object *timer = object_of((uint32_t)ctx->r[3]);
+    if (timer == NULL) {
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return;
+    }
+    pthread_mutex_lock(&timer->lock);
+    timer->timer_round++;
+    uint32_t was = timer->signalled || timer->releases > 0;
+    pthread_mutex_unlock(&timer->lock);
+    if ((uint32_t)ctx->r[4] != 0) {
+        xenolith_store32(base, (uint32_t)ctx->r[4], was);
+    }
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
 /* Turning a count of time into the parts of a date.
  *
  * The console counts hundreds of nanoseconds from the start of 1601, and this
@@ -1340,6 +1546,21 @@ static void time_to_fields(xenolith_context *ctx, uint8_t *base) {
  * The values are the console's own numbering, and the title's startup compares
  * against four of them. Three is the component cable. */
 #define XENOLITH_AV_PACK_COMPONENT 3u
+
+/* Where a console was sold and what language it speaks, by the console's own
+ * numbers: every North American market, and English. */
+#define XENOLITH_REGION_NORTH_AMERICA 0x00ffu
+#define XENOLITH_LANGUAGE_ENGLISH 1u
+
+/* The one profile a run has: signed in on the console without the network, in
+ * the first slot, with an identity of the kind such a profile has, whose top
+ * nibble says it was never online. */
+#define XENOLITH_SIGNED_IN_LOCALLY 1u
+#define XENOLITH_PROFILE_XUID 0xe000000000000001ull
+#define XENOLITH_PROFILE_NAME "Player"
+
+/* What asking about a slot nobody is signed in to reports. */
+#define XENOLITH_ERROR_NO_SUCH_USER 0x525u
 
 /* Listeners a title asked for, which never have anything to say.
  *
@@ -1603,6 +1824,11 @@ static void *drain_the_ring(void *given) {
     return NULL;
 }
 
+/* The standard a North American console's signal follows, and how fast the
+ * pixels of a 1280 by 720 picture at sixty go, in whole megahertz. */
+#define XENOLITH_VIDEO_STANDARD_NTSC 1u
+#define XENOLITH_PIXEL_CLOCK_MHZ 74u
+
 /* What the display is, written into the structure a title hands over.
  *
  * Two separate things are needed here and only one of them was recoverable.
@@ -1621,10 +1847,18 @@ static void *drain_the_ring(void *given) {
  * in and is the size this title asks for elsewhere, and it is said outright
  * rather than passed off as recovered.
  *
- * Only the fields the title was seen to read are written. The three words
- * between them are set to nothing, matching the console with nothing turned on
- * that the settings answer describes. Nothing past that is touched, since where
- * the structure ends is not derivable from a title that never reads that far.
+ * The three words between them say whether the picture is interlaced, wide and
+ * high definition. A picture 1280 wide and 720 tall is not interlaced, and is
+ * wide and high definition by what those words mean, so the last two say so.
+ *
+ * Two words after the rate are written as well, because a title reads the
+ * second of them: the standard the signal follows, and how fast its pixels go in
+ * megahertz. One title divides the graphics clock by the second, and its
+ * compiler put a trap in front of the division for a divisor of nought, which a
+ * structure left half written gave it. The signal for this picture is clocked at
+ * seventy four and a quarter megahertz, and the standard is the one a North
+ * American console sends. Nothing past those is touched, since where the
+ * structure ends is not derivable from a title that never reads that far.
  */
 static void report_the_display(uint8_t *base, uint32_t at) {
     if (at == 0) {
@@ -1642,9 +1876,11 @@ static void report_the_display(uint8_t *base, uint32_t at) {
     xenolith_store32(base, at, 1280);
     xenolith_store32(base, at + 4, 720);
     xenolith_store32(base, at + 8, 0);
-    xenolith_store32(base, at + 12, 0);
-    xenolith_store32(base, at + 16, 0);
+    xenolith_store32(base, at + 12, 1);
+    xenolith_store32(base, at + 16, 1);
     xenolith_store32(base, at + 20, rate);
+    xenolith_store32(base, at + 24, XENOLITH_VIDEO_STANDARD_NTSC);
+    xenolith_store32(base, at + 28, XENOLITH_PIXEL_CLOCK_MHZ);
 }
 
 /* What the runtime answers to, by ordinal within a library.
@@ -2179,6 +2415,143 @@ static void query_directory(xenolith_context *ctx, uint8_t *base) {
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
 
+/* What a request handed over to be finished later is answered with, what one
+ * finished without trouble says, and what one given too little room says. */
+#define XENOLITH_ERROR_IO_PENDING 997u
+#define XENOLITH_ERROR_INSUFFICIENT_BUFFER 122u
+#define XENOLITH_ERROR_INVALID_PARAMETER 87u
+
+/* Finishes a request a title handed over a block to be told in.
+ *
+ * A title asking for something that may take a while is answered that it is
+ * under way, and waits on the event in the block or looks at the block's first
+ * word until it changes. Everything here is done by the time it returns, so the
+ * block is filled in at once: what the request came to, how much it produced,
+ * the same result in the form a title reads as an extended error, and the event
+ * set. */
+static uint32_t finish_at_once(uint8_t *base, uint32_t block, uint32_t result,
+                               uint32_t length) {
+    xenolith_store32(base, block, result);
+    xenolith_store32(base, block + 4, length);
+    xenolith_store32(base, block + 24, result == 0 ? 0 : 0x80070000u | result);
+    struct object *event = object_of(xenolith_load32(base, block + 12));
+    if (event != NULL) {
+        signal_object(event, 1);
+    }
+    return XENOLITH_ERROR_IO_PENDING;
+}
+
+/* Whether a slot holds the profile, saying once that it is assumed. */
+static int is_the_profile(uint32_t user) {
+    assumed("one profile signed in without the network, in the first slot",
+            "who was signed in to a console is not a property of the title, and a "
+            "title asks for a profile to save to before it starts");
+    return user == 0;
+}
+
+/* Asking about the profile in a slot: whether one is signed in, who it is, its
+ * name, and all of that at once. A slot without one says so. */
+static void say_who_is_signed_in(xenolith_context *ctx, uint8_t *base, uint32_t ordinal) {
+    uint32_t user = (uint32_t)ctx->r[3];
+    if (ordinal == 528) {
+        ctx->r[3] = is_the_profile(user) ? XENOLITH_SIGNED_IN_LOCALLY : 0;
+        return;
+    }
+    if (!is_the_profile(user)) {
+        ctx->r[3] = XENOLITH_ERROR_NO_SUCH_USER;
+        return;
+    }
+
+    const char *name = XENOLITH_PROFILE_NAME;
+    if (ordinal == 522) {
+        uint32_t into = (uint32_t)ctx->r[5];
+        if (into != 0) {
+            xenolith_store64(base, into, XENOLITH_PROFILE_XUID);
+        }
+    } else if (ordinal == 526) {
+        uint32_t into = (uint32_t)ctx->r[4];
+        uint32_t room = (uint32_t)ctx->r[5];
+        for (uint32_t at = 0; into != 0 && at < room; at++) {
+            char letter = at < strlen(name) ? name[at] : '\0';
+            xenolith_store8(base, into + at, (uint8_t)letter);
+            if (letter == '\0') {
+                break;
+            }
+        }
+    } else {
+        /* The whole of it: the identity, flags saying nothing more, the state,
+         * no guest number, no sponsor, and the name in sixteen bytes. */
+        uint32_t into = (uint32_t)ctx->r[5];
+        if (into != 0) {
+            xenolith_store64(base, into, XENOLITH_PROFILE_XUID);
+            xenolith_store32(base, into + 8, 0);
+            xenolith_store32(base, into + 12, XENOLITH_SIGNED_IN_LOCALLY);
+            xenolith_store32(base, into + 16, 0);
+            xenolith_store32(base, into + 20, 0);
+            for (uint32_t at = 0; at < 16; at++) {
+                char letter = at < strlen(name) ? name[at] : '\0';
+                xenolith_store8(base, into + 24 + at, (uint8_t)letter);
+            }
+        }
+    }
+    ctx->r[3] = 0;
+}
+
+/* How much room one setting takes where profile settings are written. */
+#define XENOLITH_ONE_SETTING 40u
+
+/* Reading profile settings, of which none have ever been written here.
+ *
+ * Asked first with nowhere to put them, this says how much room they take. Asked
+ * again with the room, it writes how many there are and where the list is, then
+ * one block for each setting the title named: that it has no value, whose it is,
+ * which setting it is, and the kind of value that setting would hold. A title
+ * told a setting has no value uses its own default, which is what it gets from
+ * a profile that has never saved one. */
+static void read_profile_settings(xenolith_context *ctx, uint8_t *base) {
+    uint32_t user = (uint32_t)ctx->r[4];
+    uint32_t people = (uint32_t)ctx->r[5];
+    uint32_t xuids = (uint32_t)ctx->r[6];
+    uint32_t count = (uint32_t)ctx->r[7];
+    uint32_t ids = (uint32_t)ctx->r[8];
+    uint32_t room_at = (uint32_t)ctx->r[9];
+    uint32_t into = (uint32_t)ctx->r[10];
+    uint32_t block = xenolith_load32(base, (uint32_t)ctx->r[1] + XENOLITH_NINTH_ARGUMENT);
+
+    uint32_t whose = people != 0 ? people : 1;
+    if (room_at == 0 || count == 0 || whose > 16 || count > 64) {
+        ctx->r[3] = XENOLITH_ERROR_INVALID_PARAMETER;
+        return;
+    }
+    uint32_t needed = 8 + whose * count * XENOLITH_ONE_SETTING;
+    if (into == 0 || xenolith_load32(base, room_at) < needed) {
+        xenolith_store32(base, room_at, needed);
+        ctx->r[3] = XENOLITH_ERROR_INSUFFICIENT_BUFFER;
+        return;
+    }
+
+    uint32_t list = into + 8;
+    xenolith_store32(base, into, whose * count);
+    xenolith_store32(base, into + 4, list);
+    for (uint32_t person = 0; person < whose; person++) {
+        for (uint32_t k = 0; k < count; k++) {
+            uint32_t one = list + (person * count + k) * XENOLITH_ONE_SETTING;
+            uint32_t id = xenolith_load32(base, ids + k * 4);
+            for (uint32_t word = 0; word < XENOLITH_ONE_SETTING; word += 4) {
+                xenolith_store32(base, one + word, 0);
+            }
+            if (people != 0) {
+                xenolith_store64(base, one + 8, xenolith_load64(base, xuids + person * 8));
+            } else {
+                xenolith_store32(base, one + 8, user);
+            }
+            xenolith_store32(base, one + 16, id);
+            xenolith_store8(base, one + 24, (uint8_t)(id >> 28));
+        }
+    }
+    ctx->r[3] = block != 0 ? finish_at_once(base, block, 0, 0) : 0;
+}
+
 static int serviced_by_the_kernel(xenolith_context *ctx, uint8_t *base, uint32_t ordinal);
 
 static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
@@ -2190,6 +2563,42 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             /* Starting networking, of which there is none here. Saying it
              * started would send a title looking for one. */
             ctx->r[3] = XENOLITH_STATUS_NO_NETWORK;
+            return 1;
+        case 3:
+        case 4:
+        case 5:
+        case 6:
+        case 7:
+        case 8:
+        case 9:
+        case 11:
+        case 12:
+        case 13:
+        case 14:
+        case 15:
+        case 18:
+        case 20:
+        case 22:
+        case 24:
+            /* Making a socket and everything done with one, on the network
+             * that did not start. Each comes back with the value that says it
+             * failed, which for making one is also the value that says no
+             * socket was made, and asking why says the network is down. A
+             * title that makes one and uses it without looking is told the
+             * same at every step rather than handed a socket that is not. */
+            ctx->r[3] = (uint64_t)(int64_t)-1;
+            return 1;
+        case 34:
+            /* Whether a socket is among those a wait found ready. None is. */
+            ctx->r[3] = 0;
+            return 1;
+        case 2:
+        case 52:
+            /* Stopping networking, which never started. */
+            ctx->r[3] = 0;
+            return 1;
+        case 27:
+            ctx->r[3] = XENOLITH_NETWORK_IS_DOWN;
             return 1;
         case 400: {
             /* What a controller can do.
@@ -2221,9 +2630,14 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
              *
              * The console's structure is a packet number, the buttons, the two
              * triggers and the two sticks. What is written is what the host is
-             * holding, read the same way a window's keys are. */
+             * holding, read the same way a window's keys are.
+             *
+             * The structure is the third argument. The second is a flag word
+             * the title's own wrapper puts there, and written through as an
+             * address it sends what is held to the bottom of memory, where the
+             * title never looks. */
             uint32_t port = (uint32_t)ctx->r[3];
-            uint32_t into = (uint32_t)ctx->r[4];
+            uint32_t into = (uint32_t)ctx->r[5];
             if (port > 3u) {
                 ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
                 return 1;
@@ -2242,6 +2656,12 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             ctx->r[3] = XENOLITH_STATUS_SUCCESS;
             return 1;
         }
+        case 402:
+            /* Making a controller rumble. Nothing here rumbles, and a pad that
+             * cannot is still a pad, so a port that answers the questions above
+             * says this was done. */
+            ctx->r[3] = (uint32_t)ctx->r[3] > 3u ? XENOLITH_STATUS_NOT_FOUND : 0;
+            return 1;
         case 408: {
             /* The next thing a controller did, if anything did.
              *
@@ -2300,6 +2720,15 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         case 642:
             ctx->r[3] = XENOLITH_SYSTEM_VERSION;
             return 1;
+        case 537:
+            read_profile_settings(ctx, base);
+            return 1;
+        case 522:
+        case 526:
+        case 528:
+        case 551:
+            say_who_is_signed_in(ctx, base, ordinal);
+            return 1;
         case 971:
             /* Which cable the console's video output is going through. The
              * title's startup asks, and refuses to start for four of the eight
@@ -2315,6 +2744,25 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
                     "what one was plugged into is not a property of the title "
                     "and is not in the container");
             ctx->r[3] = XENOLITH_AV_PACK_COMPONENT;
+            return 1;
+        case 652:
+            /* Where on the screen the system's notices should appear. Nothing
+             * here shows one, so there is nowhere to move them to. */
+            return 1;
+        case 972:
+            /* Which region the console was sold in, which decides what a
+             * title shows and in which order. */
+            assumed("a console sold in North America",
+                    "where a console was sold is not a property of the title and "
+                    "is not in the container");
+            ctx->r[3] = XENOLITH_REGION_NORTH_AMERICA;
+            return 1;
+        case 973:
+            /* Which language the console was set to. */
+            assumed("a console set to English",
+                    "what a console was set to is not a property of the title and "
+                    "is not in the container");
+            ctx->r[3] = XENOLITH_LANGUAGE_ENGLISH;
             return 1;
         case 977:
             report_the_display(base, (uint32_t)ctx->r[3]);
@@ -2410,6 +2858,7 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
             found->signalled = 0;
             pthread_cond_broadcast(&found->changed);
             pthread_mutex_unlock(&found->lock);
+            say_something_changed();
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
@@ -2450,6 +2899,13 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
     case 245:
         resume_thread(ctx);
         return 1;
+    case 25:
+        /* A thread ending itself. It does not come back from this, so the
+         * host thread ends here too, after saying it has finished. On the
+         * thread that entered the title the rest of the threads carry on, as
+         * they do when a console's first thread ends. */
+        finish_thread(this_thread);
+        pthread_exit(NULL);
     case 251: {
         /* Releasing one object and waiting on another, which a title uses to
          * hand work to a thread and wait for the answer without missing the
@@ -2465,8 +2921,12 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
             ctx->r[3] = XENOLITH_STATUS_SUCCESS;
             return 1;
         }
+        /* The length of the wait is the fifth argument. The two before it are
+         * the mode and whether a wait may be cut short, and read as the
+         * length either is taken for an address, which gives up at once and
+         * sends the title round its loop as fast as a host can carry it. */
         struct timespec until;
-        int limited = give_up_at(base, (uint32_t)ctx->r[5], &until);
+        int limited = give_up_at(base, (uint32_t)ctx->r[7], &until);
         ctx->r[3] = wait_until(waited, limited ? &until : NULL);
         return 1;
     }
@@ -2552,17 +3012,10 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         return 1;
     }
     case 250:
-        /* Setting a timer to fire after a stretch, once or repeatedly.
-         *
-         * Firing one means a thread that waits on the timer and then signals
-         * whatever the title registered, and nothing here has that. Answering
-         * success without firing is the worst of the three: a title waits for a
-         * timer that never goes and the run stops there with nothing said.
-         *
-         * So this says it could not, which a title handles as a timer it does
-         * not have and carries on without. That is a real answer rather than a
-         * pretend success, and it is what the title was seen to do with it. */
-        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        set_timer(ctx, base);
+        return 1;
+    case 205:
+        cancel_timer(ctx, base);
         return 1;
     case 231: {
         /* Asking about a file by name, without opening it.
@@ -2600,25 +3053,30 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * mapped to a number nothing here has a table for. */
         ctx->r[3] = (uint32_t)ctx->r[3] == XENOLITH_STATUS_SUCCESS ? 0u : (uint32_t)ctx->r[3];
         return 1;
-    case 215:
-        /* Making a timer. A title makes one to be woken later or at an interval,
-         * and nothing here delivers a wakeup to one, so what is made is an
-         * object the title can name and nothing more.
-         *
-         * Answering success without making one leaves a title holding a handle
-         * to nothing, and the wait that follows returns at once for ever. So a
-         * real object is made, which a wait can be given and which nothing ever
-         * signals. */
+    case 215: {
+        /* Making a timer, which is waited on like an event of the same two
+         * kinds and is signalled when it falls due. A timer starts not
+         * signalled, and there is no argument saying otherwise: what sits where
+         * an event's starting state would be is left over from the caller. */
+        uint32_t handle_at = (uint32_t)ctx->r[3];
         create_waitable(ctx, base, OBJECT_EVENT);
+        struct object *made =
+            handle_at != 0 ? object_of(xenolith_load32(base, handle_at)) : NULL;
+        if (made != NULL) {
+            made->signalled = 0;
+        }
         return 1;
+    }
     case 253: {
+        /* Waiting on a handle. The length is the fourth argument, after the
+         * mode and whether the wait may be cut short. */
         struct object *found = object_of((uint32_t)ctx->r[3]);
         if (found == NULL) {
             ctx->r[3] = XENOLITH_STATUS_SUCCESS;
             return 1;
         }
         struct timespec until;
-        int limited = give_up_at(base, (uint32_t)ctx->r[5], &until);
+        int limited = give_up_at(base, (uint32_t)ctx->r[6], &until);
         ctx->r[3] = wait_until(found, limited ? &until : NULL);
         return 1;
     }
@@ -3074,17 +3532,68 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 143: {
-        struct object *found = object_at((uint32_t)ctx->r[3], OBJECT_EVENT);
+        struct object *found = object_at(base, (uint32_t)ctx->r[3]);
         if (found != NULL) {
             signal_object(found, 0);
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
+    case 157: {
+        /* Setting an event named by where it lives. What comes back is
+         * whether it was already set. */
+        struct object *found = object_at(base, (uint32_t)ctx->r[3]);
+        uint32_t was = 0;
+        if (found != NULL) {
+            pthread_mutex_lock(&found->lock);
+            was = found->signalled || found->releases > 0;
+            pthread_mutex_unlock(&found->lock);
+            signal_object(found, 1);
+        }
+        ctx->r[3] = was;
+        return 1;
+    }
+    case 175: {
+        /* Waiting on several objects named by where they live.
+         *
+         * Waiting for any of them takes the first that can be taken. Waiting
+         * for all of them takes each in turn, which ends in the same place but
+         * not atomically: the console takes none until every one can be taken,
+         * and this may hold one while waiting on the next. */
+        uint32_t count = (uint32_t)ctx->r[3];
+        uint32_t list = (uint32_t)ctx->r[4];
+        int for_any = (uint32_t)ctx->r[5] == 1;
+        struct object *waited[64];
+        if (count == 0 || count > 64) {
+            ctx->r[3] = XENOLITH_STATUS_INVALID_PARAMETER;
+            return 1;
+        }
+        for (uint32_t at = 0; at < count; at++) {
+            waited[at] = object_at(base, xenolith_load32(base, list + at * 4));
+        }
+        struct timespec until;
+        int limited = give_up_at(base, (uint32_t)ctx->r[9], &until);
+        if (for_any) {
+            ctx->r[3] = wait_for_any(waited, count, limited ? &until : NULL);
+            return 1;
+        }
+        uint32_t status = XENOLITH_STATUS_SUCCESS;
+        for (uint32_t at = 0; at < count && status == XENOLITH_STATUS_SUCCESS; at++) {
+            if (waited[at] != NULL) {
+                status = wait_until(waited[at], limited ? &until : NULL);
+            }
+        }
+        ctx->r[3] = status;
+        return 1;
+    }
     case 176: {
-        /* Waiting on an object named by where it lives. */
-        struct object *found = object_at((uint32_t)ctx->r[3], OBJECT_EVENT);
-        ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS : wait_on(found);
+        /* Waiting on an object named by where it lives, for as long as the
+         * fifth argument says. */
+        struct object *found = object_at(base, (uint32_t)ctx->r[3]);
+        struct timespec until;
+        int limited = give_up_at(base, (uint32_t)ctx->r[7], &until);
+        ctx->r[3] = found == NULL ? XENOLITH_STATUS_SUCCESS
+                                  : wait_until(found, limited ? &until : NULL);
         return 1;
     }
     case 445: {

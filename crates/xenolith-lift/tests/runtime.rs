@@ -786,11 +786,13 @@ int main(void) {
     int64_t stretch = -100000;
     xenolith_store64(base, 0x300, (uint64_t)stretch);
     ctx.r[3] = handle;
-    ctx.r[5] = 0x300;
+    ctx.r[4] = 1;          /* the mode */
+    ctx.r[5] = 1;          /* a wait that may be cut short */
+    ctx.r[6] = 0x300;
 
     struct timespec began, ended;
     clock_gettime(CLOCK_MONOTONIC, &began);
-    xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
     clock_gettime(CLOCK_MONOTONIC, &ended);
 
     if (ctx.r[3] != 0x00000102u) {
@@ -810,6 +812,330 @@ int main(void) {
 "#;
     if let Err(complaint) = runs("timeout", program) {
         panic!("a wait with a timeout did not come back at the timeout:\n{complaint}");
+    }
+}
+
+/// Every wait takes its length from the argument that holds it.
+///
+/// The waits differ in how many arguments come before the length: the mode and
+/// whether a wait may be cut short sit in front of it, and where those are read
+/// as the length they are taken for an address. One title hands a wait mode of
+/// one to the wait that signals one object and waits on another, so it was given
+/// up at once and the title went round its loop forty million times in a minute.
+/// The wait on an object named by where it lives read no length at all, and so
+/// waited for ever. Each wait here is given nothing to wait for and ten
+/// milliseconds, and has to come back with the timeout after about that long.
+#[test]
+fn every_wait_takes_its_length_from_the_argument_that_holds_it() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static struct timespec began;
+
+static void start(void) {
+    clock_gettime(CLOCK_MONOTONIC, &began);
+}
+
+/* Whether the wait just made gave up with the timeout after about ten
+ * milliseconds. */
+static int timed_out(const char *which, uint64_t status) {
+    struct timespec ended;
+    clock_gettime(CLOCK_MONOTONIC, &ended);
+    long long took = (long long)(ended.tv_sec - began.tv_sec) * 1000000000ll
+                     + (long long)(ended.tv_nsec - began.tv_nsec);
+    if (status != 0x00000102u || took < 5000000ll || took > 2000000000ll) {
+        fprintf(stderr, "%s came back with %#llx after %lld nanoseconds\n", which,
+                (unsigned long long)status, took);
+        return 0;
+    }
+    return 1;
+}
+
+static uint32_t make_event(xenolith_context *ctx, uint8_t *base) {
+    ctx->r[3] = 0x200;
+    ctx->r[4] = 0;
+    ctx->r[5] = 1;
+    ctx->r[6] = 0;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    return xenolith_load32(base, 0x200);
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* A wait that never comes back is a failure, not a test that hangs. */
+    alarm(10);
+
+    xenolith_context ctx = {0};
+    xenolith_store64(base, 0x300, (uint64_t)(int64_t)-100000);
+    uint32_t released = make_event(&ctx, base);
+    uint32_t waited = make_event(&ctx, base);
+
+    ctx.r[3] = released;
+    ctx.r[4] = waited;
+    ctx.r[5] = 1;           /* the mode */
+    ctx.r[6] = 1;           /* a wait that may be cut short */
+    ctx.r[7] = 0x300;
+    start();
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 251, "NtSignalAndWaitForSingleObjectEx");
+    if (!timed_out("signalling one and waiting on another", ctx.r[3])) { return 3; }
+
+    /* An event in guest memory: a synchronization event, not signalled. */
+    xenolith_store32(base, 0x400, 0x01000000u);
+    xenolith_store32(base, 0x404, 0);
+    ctx.r[3] = 0x400;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;
+    ctx.r[6] = 1;
+    ctx.r[7] = 0x300;
+    start();
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 176, "KeWaitForSingleObject");
+    if (!timed_out("waiting on an object by where it lives", ctx.r[3])) { return 4; }
+
+    xenolith_store32(base, 0x500, 0x400);
+    ctx.r[3] = 1;
+    ctx.r[4] = 0x500;
+    ctx.r[5] = 1;           /* any of them */
+    ctx.r[6] = 0;
+    ctx.r[7] = 1;
+    ctx.r[8] = 1;
+    ctx.r[9] = 0x300;
+    ctx.r[10] = 0;
+    start();
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 175, "KeWaitForMultipleObjects");
+    if (!timed_out("waiting on several by where they live", ctx.r[3])) { return 5; }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("lengths", program) {
+        panic!("a wait read its length from the wrong argument:\n{complaint}");
+    }
+}
+
+/// A timer falls due when it was set to, keeps falling due at its period, and
+/// stops when it is cancelled.
+///
+/// One title starts a thread that sets a timer for every ten milliseconds and
+/// gives up on itself when it cannot, before it says it is ready. The thread
+/// that started it waits for that for ever. A timer told it could not be set
+/// sends the title down that path, and one that never falls due leaves it
+/// waiting on the timer instead.
+#[test]
+fn a_timer_falls_due_repeats_and_stops_when_cancelled() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Waits on a handle for up to `hundreds` hundreds of nanoseconds. */
+static uint32_t wait_for(xenolith_context *ctx, uint8_t *base, uint32_t handle,
+                         int64_t hundreds) {
+    xenolith_store64(base, 0x300, (uint64_t)hundreds);
+    ctx->r[3] = handle;
+    ctx->r[4] = 1;
+    ctx->r[5] = 0;
+    ctx->r[6] = 0x300;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
+    return (uint32_t)ctx->r[3];
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    alarm(10);
+
+    /* A timer of the kind that lets one waiter through each time it falls due,
+     * made with something left over where an event's starting state would be. */
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;
+    ctx.r[6] = 0x6ffffd20u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 215, "NtCreateTimer");
+    uint32_t timer = xenolith_load32(base, 0x200);
+    if (ctx.r[3] != 0u || timer == 0) { return 3; }
+    if (wait_for(&ctx, base, timer, -10000) != 0x102u) {
+        fprintf(stderr, "a timer nobody set was signalled\n");
+        return 4;
+    }
+
+    /* Due in ten milliseconds and every five after that. */
+    xenolith_store64(base, 0x400, (uint64_t)(int64_t)-100000);
+    ctx.r[3] = timer;
+    ctx.r[4] = 0x400;
+    ctx.r[5] = 0;
+    ctx.r[6] = 1;
+    ctx.r[7] = 0;
+    ctx.r[8] = 0;
+    ctx.r[9] = 5;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 250, "NtSetTimerEx");
+    if (ctx.r[3] != 0u) {
+        fprintf(stderr, "setting a timer came back with %#llx\n", (unsigned long long)ctx.r[3]);
+        return 5;
+    }
+    for (int round = 0; round < 3; round++) {
+        if (wait_for(&ctx, base, timer, -10000000) != 0u) {
+            fprintf(stderr, "the timer did not fall due on round %d\n", round);
+            return 6;
+        }
+    }
+
+    ctx.r[3] = timer;
+    ctx.r[4] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 205, "NtCancelTimer");
+    wait_for(&ctx, base, timer, -1);
+    if (wait_for(&ctx, base, timer, -300000) != 0x102u) {
+        fprintf(stderr, "a cancelled timer fell due\n");
+        return 7;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("timers", program) {
+        panic!("a timer did not fall due, repeat and stop:\n{complaint}");
+    }
+}
+
+/// An object named by where it lives is what its head says it is.
+///
+/// A title writes the head of an event or a semaphore itself, inside its own
+/// memory, and hands the kernel the address. The kind and the starting state are
+/// in that head and nowhere else. A notification event stays set and lets every
+/// waiter through, a synchronization event lets one through, a semaphore admits
+/// as many as its count, and a wait on several takes the one that is set and
+/// says which it was.
+#[test]
+fn an_object_named_by_where_it_lives_is_what_its_head_says() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Waits on the object at `at` for no time at all and says what came back. */
+static uint32_t poll_one(xenolith_context *ctx, uint8_t *base, uint32_t at) {
+    xenolith_store64(base, 0x300, 0xffffffffffffffffull);
+    ctx->r[3] = at;
+    ctx->r[4] = 0;
+    ctx->r[5] = 1;
+    ctx->r[6] = 0;
+    ctx->r[7] = 0x300;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 176, "KeWaitForSingleObject");
+    return (uint32_t)ctx->r[3];
+}
+
+static void set(xenolith_context *ctx, uint8_t *base, uint32_t at) {
+    ctx->r[3] = at;
+    ctx->r[4] = 0;
+    ctx->r[5] = 0;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 157, "KeSetEvent");
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    alarm(10);
+
+    xenolith_context ctx = {0};
+
+    /* A notification event, set: it stays set however many wait. */
+    xenolith_store32(base, 0x400, 0x00000000u);
+    xenolith_store32(base, 0x404, 1);
+    if (poll_one(&ctx, base, 0x400) != 0 || poll_one(&ctx, base, 0x400) != 0) {
+        fprintf(stderr, "a set notification event did not let two waits through\n");
+        return 3;
+    }
+
+    /* A synchronization event, set by the title: one wait spends it. */
+    xenolith_store32(base, 0x420, 0x01000000u);
+    xenolith_store32(base, 0x424, 0);
+    set(&ctx, base, 0x420);
+    if (poll_one(&ctx, base, 0x420) != 0 || poll_one(&ctx, base, 0x420) != 0x102u) {
+        fprintf(stderr, "a set synchronization event did not let exactly one through\n");
+        return 4;
+    }
+
+    /* A semaphore with a count of two admits two. */
+    xenolith_store32(base, 0x440, 0x05000000u);
+    xenolith_store32(base, 0x444, 2);
+    xenolith_store32(base, 0x450, 4);
+    if (poll_one(&ctx, base, 0x440) != 0 || poll_one(&ctx, base, 0x440) != 0 ||
+        poll_one(&ctx, base, 0x440) != 0x102u) {
+        fprintf(stderr, "a semaphore with a count of two did not admit exactly two\n");
+        return 5;
+    }
+
+    /* Three events, the last of them set: waiting on any says it was the
+     * third. */
+    for (uint32_t k = 0; k < 3; k++) {
+        xenolith_store32(base, 0x600 + k * 0x20, 0x01000000u);
+        xenolith_store32(base, 0x604 + k * 0x20, 0);
+        xenolith_store32(base, 0x700 + k * 4, 0x600 + k * 0x20);
+    }
+    set(&ctx, base, 0x640);
+    ctx.r[3] = 3;
+    ctx.r[4] = 0x700;
+    ctx.r[5] = 1;
+    ctx.r[6] = 0;
+    ctx.r[7] = 1;
+    ctx.r[8] = 0;
+    ctx.r[9] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 175, "KeWaitForMultipleObjects");
+    if (ctx.r[3] != 2u) {
+        fprintf(stderr, "waiting on any of three came back with %#llx\n",
+                (unsigned long long)ctx.r[3]);
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("described", program) {
+        panic!("an object named by where it lives was not what its head says:\n{complaint}");
     }
 }
 
@@ -840,8 +1166,9 @@ static uint32_t wait_for(xenolith_context *ctx, uint8_t *base, uint32_t handle,
                          int64_t hundreds) {
     xenolith_store64(base, 0x300, (uint64_t)hundreds);
     ctx->r[3] = handle;
-    ctx->r[5] = 0x300;
-    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    ctx->r[5] = 0;
+    ctx->r[6] = 0x300;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
     return (uint32_t)ctx->r[3];
 }
 
@@ -923,8 +1250,9 @@ static uint32_t wait_for(xenolith_context *ctx, uint8_t *base, uint32_t handle,
                          int64_t hundreds) {
     xenolith_store64(base, 0x300, (uint64_t)hundreds);
     ctx->r[3] = handle;
-    ctx->r[5] = 0x300;
-    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    ctx->r[5] = 0;
+    ctx->r[6] = 0x300;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
     return (uint32_t)ctx->r[3];
 }
 
@@ -1177,16 +1505,8 @@ fn cases_of(runtime: &str, name: &str) -> BTreeSet<u32> {
     found
 }
 
-/// A file beside the program opens, reads, reports how long it is, and reads
-/// again from where a title moves to.
-///
-/// A title names its files with a prefix of its own and never with a path a
-/// host would recognise, so what is being checked is the mapping from the one
-/// to the other as much as the reading. A title that cannot open its data looks
-/// exactly like one that opened it and read nothing.
-#[test]
-fn a_file_beside_the_program_opens_and_reads() {
-    let program = r#"
+/// The program the file test runs, kept apart so the test reads as its checks.
+const FILES_PROGRAM: &str = r#"
 /* Asked for before anything is included, because a strict C compiler hides the
  * declarations this needs otherwise. */
 #define _POSIX_C_SOURCE 200809L
@@ -1325,6 +1645,17 @@ int main(void) {
     return 0;
 }
 "#;
+
+/// A file beside the program opens, reads, reports how long it is, and reads
+/// again from where a title moves to.
+///
+/// A title names its files with a prefix of its own and never with a path a
+/// host would recognise, so what is being checked is the mapping from the one
+/// to the other as much as the reading. A title that cannot open its data looks
+/// exactly like one that opened it and read nothing.
+#[test]
+fn a_file_beside_the_program_opens_and_reads() {
+    let program = FILES_PROGRAM;
     if let Err(complaint) = runs("files", program) {
         panic!("a file beside the program did not open and read:\n{complaint}");
     }
@@ -1884,8 +2215,9 @@ int main(void) {
     xenolith_import(&ctx, where, "xboxkrnl.exe", 246, "NtSetEvent");
     xenolith_store64(where, 0x300, (uint64_t)(int64_t)-100000);
     ctx.r[3] = handle;
-    ctx.r[5] = 0x300;
-    xenolith_import(&ctx, where, "xboxkrnl.exe", 253, "NtWaitForSingleObject");
+    ctx.r[5] = 0;
+    ctx.r[6] = 0x300;
+    xenolith_import(&ctx, where, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
     ctx.r[3] = 0x400;
     xenolith_import(&ctx, where, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
     ctx.r[3] = 0x400;
@@ -2759,18 +3091,8 @@ int main(void) {
     );
 }
 
-/// A raised exception is reported with what was raised, and the run stops.
-///
-/// A title reaching this has decided something is wrong and is handing over a
-/// record saying what. Nothing here can unwind a title's stack the way the
-/// console's dispatcher would, so the exception is not delivered. Pretending it
-/// was would leave the title running code written for a state it is not in,
-/// which is worse than stopping. What is done instead is reporting the code, the
-/// address, the C++ type thrown and the calls that led there, because those are
-/// what say why the title gave up.
-#[test]
-fn a_raised_exception_is_reported_and_the_run_stops() {
-    let program = r#"
+/// The program the raised exception test runs.
+const RAISING_PROGRAM: &str = r#"
 #define _POSIX_C_SOURCE 200809L
 
 #include "xenolith.h"
@@ -2831,6 +3153,19 @@ int main(void) {
     return 3;
 }
 "#;
+
+/// A raised exception is reported with what was raised, and the run stops.
+///
+/// A title reaching this has decided something is wrong and is handing over a
+/// record saying what. Nothing here can unwind a title's stack the way the
+/// console's dispatcher would, so the exception is not delivered. Pretending it
+/// was would leave the title running code written for a state it is not in,
+/// which is worse than stopping. What is done instead is reporting the code, the
+/// address, the C++ type thrown and the calls that led there, because those are
+/// what say why the title gave up.
+#[test]
+fn a_raised_exception_is_reported_and_the_run_stops() {
+    let program = RAISING_PROGRAM;
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("raised");
     std::fs::create_dir_all(&directory).expect("making a directory");
     for (file, text) in [
@@ -3027,6 +3362,21 @@ int main(void) {
     if (buttons != wanted) {
         fprintf(stderr, "held %#x where %#x was asked for\n", buttons, wanted);
         return 4;
+    }
+
+    /* And asked the way a title asks: the port, a flag word its own wrapper
+     * puts in the second argument, and the structure in the third. */
+    uint8_t *base = xenolith_boot(path, 0);
+    xenolith_context ctx = {0};
+    xenolith_store16(base, 0x204, 0xbeef);
+    ctx.r[3] = 0;
+    ctx.r[4] = 1;
+    ctx.r[5] = 0x200;
+    xenolith_import(&ctx, base, "xam.xex", 401, "XamInputGetState");
+    if (ctx.r[3] != 0u || xenolith_load16(base, 0x204) != wanted) {
+        fprintf(stderr, "a title asking was told %#x with %#llx\n",
+                xenolith_load16(base, 0x204), (unsigned long long)ctx.r[3]);
+        return 5;
     }
     printf("held %#x\n", buttons);
     return 0;
