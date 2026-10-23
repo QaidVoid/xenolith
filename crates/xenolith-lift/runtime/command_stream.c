@@ -196,6 +196,24 @@ static void say_what_was_read_in_total(void) {
                  read_so_far.shaders);
 }
 
+/* How many words a packet takes, its header included. */
+static uint32_t packet_words(uint32_t header) {
+    switch (header >> 30) {
+    case XENOLITH_PACKET_KIND_NOTHING:
+        /* A filler word, carrying nothing. */
+        return 1;
+    case XENOLITH_PACKET_KIND_TWO_REGISTERS:
+        return 3;
+    default:
+        /* The field is one less than how many words follow the header. A
+         * buffer packet a title wrote reads `c0013f00 163d0040 0000000b`: the
+         * field is one and there are two words after the header, so the field
+         * plus one is the count. Read as the count itself, every packet is one
+         * word short and the walk starts the next one inside the one before. */
+        return ((header >> 16) & 0x3fff) + 2;
+    }
+}
+
 /* Reads one run of commands, which may name others.
  * Returns how many words it read, which is every word it was given: a packet
  * that runs past the end is the rest of it not having been written yet, and the
@@ -213,26 +231,7 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
     while (at < words) {
         uint32_t header = xenolith_load32(base, stream + at * 4);
         uint32_t kind = header >> 30;
-        uint32_t follows;
-
-        switch (kind) {
-        case XENOLITH_PACKET_KIND_NOTHING:
-            /* A filler word, carrying nothing. */
-            follows = 0;
-            break;
-        case XENOLITH_PACKET_KIND_TWO_REGISTERS:
-            follows = 2;
-            break;
-        default:
-            /* The field is one less than how many words follow the header. A
-             * buffer packet a title wrote reads `c0013f00 163d0040 0000000b`:
-             * the field is one and there are two words after the header, so
-             * the field plus one is the count. Read as the count itself, every
-             * packet is one word short and the walk starts the next one inside
-             * the one before. */
-            follows = ((header >> 16) & 0x3fff) + 1;
-            break;
-        }
+        uint32_t follows = packet_words(header) - 1;
 
         if (at + 1 + follows > words) {
             /* The rest of this packet has not been written yet. */

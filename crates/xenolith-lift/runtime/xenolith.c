@@ -1902,7 +1902,7 @@ static void *ask_for_sound(void *given) {
  */
 static struct {
     uint32_t ring_at;
-    uint32_t ring_size;
+    uint32_t ring_words;
     uint32_t read_back_at;
     uint32_t callback;
     uint32_t callback_argument;
@@ -2108,16 +2108,53 @@ static void set_register(uint8_t *base, uint32_t index, uint32_t value) {
 
 #include "sound.c"
 
-/* Reads the packets a title wrote, and does what this can with them. */
+/* The most words one packet takes: a header and the longest count after it. */
+#define XENOLITH_LONGEST_PACKET (0x3fffu + 2u)
+
+/* Where a packet that runs off the end of the ring is put back together. */
+static uint32_t mended_at;
+
+/* Reads the packets a title wrote, and does what this can with them.
+ *
+ * Going backwards is the ring having wrapped. What is left up to its end is
+ * read first, and a title carries a packet straight on from the end to the
+ * front, so one may start in the last words and finish in the first. That one
+ * is put back together in a place of its own and read there, once the title
+ * has written the rest of it. Read from the front as it stands, its remainder
+ * is taken for a header, and the count that header seems to give is longer
+ * than anything written yet, so nothing is read again until the title writes
+ * further. A title waiting on that packet never does. */
 static void consume_the_ring(uint8_t *base, uint32_t written) {
-    if (graphics.ring_at == 0) {
+    if (graphics.ring_at == 0 || graphics.ring_words == 0) {
         return;
     }
 
-    /* Going backwards is the buffer having wrapped, and everything from where
-     * this had got to up to the end was read before it did. */
     if (written < consumed) {
-        consumed = 0;
+        consumed += walk_the_commands(base, graphics.ring_at + consumed * 4,
+                                      graphics.ring_words - consumed, 0);
+        if (consumed < graphics.ring_words) {
+            uint32_t left = graphics.ring_words - consumed;
+            uint32_t whole = packet_words(xenolith_load32(base, graphics.ring_at + consumed * 4));
+            uint32_t rest = whole - left;
+            if (rest > written) {
+                return;
+            }
+            if (mended_at == 0) {
+                mended_at = take_guest_memory(XENOLITH_LONGEST_PACKET * 4, 0);
+                if (mended_at == 0) {
+                    return;
+                }
+            }
+            for (uint32_t word = 0; word < whole; word++) {
+                uint32_t from = word < left ? consumed + word : word - left;
+                xenolith_store32(base, mended_at + word * 4,
+                                 xenolith_load32(base, graphics.ring_at + from * 4));
+            }
+            walk_the_commands(base, mended_at, whole, 0);
+            consumed = rest;
+        } else {
+            consumed = 0;
+        }
     }
 
     if (consumed >= written) {
@@ -4504,7 +4541,8 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         /* Where the commands are written, which starts them again from the
          * front. */
         graphics.ring_at = (uint32_t)ctx->r[3];
-        graphics.ring_size = 1u << ((uint32_t)ctx->r[4] & 0x1f);
+        /* The size is given as a power of two of eight byte units. */
+        graphics.ring_words = 2u << ((uint32_t)ctx->r[4] & 0x1f);
         consumed = 0;
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;

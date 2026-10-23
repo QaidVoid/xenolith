@@ -2514,6 +2514,82 @@ int main(void) {
     }
 }
 
+/// A packet that starts at the end of the ring and finishes at its front is
+/// read whole.
+///
+/// A title carries a packet straight on across the wrap. Read from the front
+/// as it stands, the rest of that packet is taken for a header, and a title
+/// waiting on what the packet says waits for ever.
+#[test]
+fn a_packet_across_the_end_of_the_ring_is_read_whole() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static int read_back_reaches(uint8_t *base, uint32_t value) {
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, 0x02000000u) == value) { return 1; }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Eight words of ring, the first six of them filler. */
+    uint32_t ring = 0x01000000u;
+    for (uint32_t word = 0; word < 6u; word++) {
+        xenolith_store32(base, ring + word * 4u, 0x80000000u);
+    }
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 2;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02000000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+    xenolith_store32(base, 0x7fc80714u, 6u);
+    if (!read_back_reaches(base, 6u)) { return 3; }
+
+    /* Two registers from 0x20: the header and the first in the last two
+     * words, and the second at the front. */
+    xenolith_store32(base, ring + 24u, 0x00010020u);
+    xenolith_store32(base, ring + 28u, 0x11111111u);
+    xenolith_store32(base, ring, 0x22222222u);
+    xenolith_store32(base, 0x7fc80714u, 1u);
+    if (!read_back_reaches(base, 1u)) {
+        fprintf(stderr, "the reading stopped at %u\n", xenolith_load32(base, 0x02000000u));
+        return 4;
+    }
+    uint32_t first = xenolith_load32(base, 0x7fc80000u + 0x20u * 4u);
+    uint32_t second = xenolith_load32(base, 0x7fc80000u + 0x21u * 4u);
+    if (first != 0x11111111u || second != 0x22222222u) {
+        fprintf(stderr, "the registers hold %#x and %#x\n", first, second);
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("ring_wrap", program) {
+        panic!("a packet across the end of the ring was not read whole:\n{complaint}");
+    }
+}
+
 /// An import the runtime answers says it succeeded.
 ///
 /// The status is `r[3]`, which is also where the first argument arrives. An
