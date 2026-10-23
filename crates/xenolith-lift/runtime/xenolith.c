@@ -70,6 +70,21 @@ static void remember_where_the_image_was(const char *image);
 static void say_what_was_read_in_total(void);
 static void say_what_was_read_and_stop(int which);
 
+/* Ends a run the runtime has decided cannot go on, with the code that says why.
+ *
+ * What was read is said first, the way any other end of a run says it. The
+ * process then ends at once rather than through the exit handlers: those
+ * include the graphics driver's own, which take the device apart while the
+ * thread reading the title's commands may be in the middle of drawing with it,
+ * and a run stopped for a reason it reported then crashes on the way out with a
+ * code that says something else. */
+static _Noreturn void stop_the_run(int code) {
+    say_what_was_read_in_total();
+    fflush(stdout);
+    fflush(stderr);
+    _exit(code);
+}
+
 uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
     remember_where_the_image_was(image);
 
@@ -141,7 +156,7 @@ static void wanted_but_not_lifted(uint32_t address, uint32_t from, const char *w
     }
     fprintf(stderr, "xenolith: %s %#010x from %#010x, which is not a lifted function\n",
             what, address, from);
-    exit(2);
+    stop_the_run(2);
 }
 
 /* A trap leaves the function it was in, and there is nowhere for it to go. */
@@ -149,7 +164,7 @@ void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address) {
     (void)ctx;
     (void)base;
     fprintf(stderr, "xenolith: trapped at %#010x\n", address);
-    exit(2);
+    stop_the_run(2);
 }
 
 /* A function the translation could not express.
@@ -3945,7 +3960,7 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
                 code, flags, at, (uint32_t)ctx->lr);
         say_what_was_thrown(base, record);
         say_who_called(base, (uint32_t)ctx->r[1]);
-        exit(3);
+        stop_the_run(3);
     }
     case 302:
         initialize_critical_section(ctx, base);
@@ -4008,12 +4023,12 @@ void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
                 "from %#010llx\n",
                 library, ordinal, name ? name : "unnamed",
                 (unsigned long long)ctx->lr);
-        exit(3);
+        stop_the_run(3);
     }
 
     if (reached >= XENOLITH_TRACE_LIMIT) {
         fprintf(stderr, "xenolith: trace: stopping after %lu calls\n", reached);
-        exit(3);
+        stop_the_run(3);
     }
     reached++;
 
