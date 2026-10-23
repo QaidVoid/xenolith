@@ -26,6 +26,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -65,8 +66,23 @@ static void remember_where_the_image_was(const char *image);
  */
 #define XENOLITH_A_LITTLE_PAST_THE_END ((size_t)4096)
 
+static void say_what_was_read_in_total(void);
+static void say_what_was_read_and_stop(int which);
+
 uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
     remember_where_the_image_was(image);
+
+    /* What the run read, said however it ends.
+     *
+     * `atexit` covers a run that finishes and a run that stops on a gap in the
+     * translation. It does not cover the one that matters most: a title spinning
+     * in its own code is stopped by whatever started it, and a signal does not
+     * run the exit handlers. So both are registered here, where every run goes
+     * through, rather than from the thread that reads the command stream, which
+     * a spinning title may never have started. */
+    atexit(say_what_was_read_in_total);
+    signal(SIGTERM, say_what_was_read_and_stop);
+    signal(SIGINT, say_what_was_read_and_stop);
     void *base = mmap(NULL, XENOLITH_GUEST_SPAN + XENOLITH_A_LITTLE_PAST_THE_END,
                       PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -1318,6 +1334,18 @@ static uint32_t listeners_handed_out = 0x100;
 
 static uint32_t take_a_listener(void) {
     return listeners_handed_out++;
+}
+
+/* Says what the run read, and stops, when something outside it asks.
+ *
+ * Only the safe part is done here: writing one line through the runtime's own
+ * lock is not async-signal-safe in the strictest reading, and the alternative is
+ * a run that reports nothing at all. What is written is a snapshot of counters,
+ * and the process ends immediately afterwards. */
+static void say_what_was_read_and_stop(int which) {
+    (void)which;
+    say_what_was_read_in_total();
+    _exit(3);
 }
 
 /* What a title registered as a sound client, if it registered one.

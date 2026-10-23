@@ -2493,6 +2493,100 @@ int main(void) {
     );
 }
 
+/// A run that is stopped from outside says what it read before it goes.
+///
+/// The run this matters for is the one that never ends: a title spinning in its
+/// own code is stopped by whatever started it, and the counts a reader most wants
+/// are the ones that would otherwise never be printed. `atexit` does not run on a
+/// signal, so the handler is registered at boot, where every run goes through,
+/// rather than from the thread that reads the command stream, which a spinning
+/// title may never have started.
+#[test]
+fn a_run_stopped_from_outside_says_what_it_read() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    if (xenolith_boot(path, 0) == NULL) { return 2; }
+
+    /* Spin here, as a title in a loop of its own would, and let the signal
+     * arrive. */
+    for (;;) {
+        pause();
+    }
+}
+"#;
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("stopped");
+    std::fs::create_dir_all(&directory).expect("making a directory");
+    for (file, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", SHADER_TABLE),
+        ("main.c", program),
+    ] {
+        std::fs::write(directory.join(file), text).expect("writing a file");
+    }
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-O1"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
+        .output()
+        .expect("running the compiler");
+    assert!(
+        built.status.success(),
+        "the stopped test did not build:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let child = Command::new(&program_path)
+        .current_dir(&directory)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("starting the program");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("sending the signal");
+    assert!(killed.success(), "the signal should have been sent");
+
+    let ended = child.wait_with_output().expect("waiting for the program");
+    let complaint = String::from_utf8_lossy(&ended.stderr);
+
+    assert!(
+        complaint.contains("in total, read"),
+        "a run stopped from outside should say what it read: {complaint}"
+    );
+}
+
 /// A raised exception is reported with what was raised, and the run stops.
 ///
 /// A title reaching this has decided something is wrong and is handing over a
