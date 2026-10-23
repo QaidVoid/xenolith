@@ -2756,6 +2756,76 @@ int main(void) {
     }
 }
 
+/// A marked command is carried out only for the part of the screen it was
+/// marked for.
+///
+/// A title drawing the screen a part at a time hands every part the same
+/// commands and marks the ones that belong to only some parts. Carried out for
+/// every part, a marked request to run something on the processor runs once a
+/// part, and what it runs hands the hardware the parts again for ever.
+#[test]
+fn a_marked_command_is_carried_out_only_for_its_part() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Part one marked and part two drawn, so a marked register write is
+     * passed over; then part one drawn, so the next is carried out. */
+    uint32_t ring = 0x01000000u;
+    uint32_t words[] = {
+        (3u << 30) | (0x60u << 8), 1u,
+        (3u << 30) | (0x61u << 8), 0u,
+        (3u << 30) | (0x62u << 8), 2u,
+        (3u << 30) | (0x63u << 8), 0u,
+        (3u << 30) | (1u << 16) | (0x2du << 8) | 1u, (4u << 16) | 5u, 0x1111u,
+        (3u << 30) | (0x62u << 8), 1u,
+        (3u << 30) | (1u << 16) | (0x2du << 8) | 1u, (4u << 16) | 6u, 0x2222u,
+    };
+    for (uint32_t at = 0; at < sizeof words / sizeof *words; at++) {
+        xenolith_store32(base, ring + at * 4u, words[at]);
+    }
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02000000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+    xenolith_store32(base, 0x7fc80714u, 16u);
+    for (int waited = 0; waited < 2000 && xenolith_load32(base, 0x02000000u) != 16u; waited++) {
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    uint32_t passed = xenolith_load32(base, 0x7fc80000u + 0x2005u * 4u);
+    uint32_t carried = xenolith_load32(base, 0x7fc80000u + 0x2006u * 4u);
+    if (passed != 0u || carried != 0x2222u) {
+        fprintf(stderr, "the two registers hold %#x and %#x\n", passed, carried);
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("marked_parts", program) {
+        panic!("a marked command was not kept to its part:\n{complaint}");
+    }
+}
+
 /// A report packet writes its value where it was asked to, in the byte order it
 /// asked for.
 ///

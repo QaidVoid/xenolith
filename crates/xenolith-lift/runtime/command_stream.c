@@ -83,6 +83,26 @@ static int it_holds(uint32_t how, uint32_t value, uint32_t against, uint32_t mas
 #define XENOLITH_PACKET_TELL_THE_TITLE 0x54u
 #define XENOLITH_PACKET_LOAD 0x2fu
 #define XENOLITH_PACKET_SET_CONSTANT 0x2du
+#define XENOLITH_PACKET_BIN_MASK 0x50u
+#define XENOLITH_PACKET_BIN_SELECT 0x51u
+#define XENOLITH_PACKET_BIN_MASK_LOW 0x60u
+#define XENOLITH_PACKET_BIN_MASK_HIGH 0x61u
+#define XENOLITH_PACKET_BIN_SELECT_LOW 0x62u
+#define XENOLITH_PACKET_BIN_SELECT_HIGH 0x63u
+
+/* Which parts of the screen the commands are for, and which part is being
+ * drawn now.
+ *
+ * A title drawing the screen a part at a time hands every part the same
+ * commands, and marks the ones that belong to only some of the parts. A marked
+ * command is carried out only where the two have a bit in common. Among the
+ * marked ones is asking for something to be run on the processor when the
+ * commands get there, and carried out for every part rather than the one it
+ * belongs to, it runs once a part, and what it runs hands the hardware the
+ * parts over again. Both start with every bit set, so a title that never draws
+ * a part at a time has every command carried out. */
+static uint64_t parts_marked = ~0ull;
+static uint64_t part_drawn = ~0ull;
 #define XENOLITH_PACKET_REPORT 0x58u
 #define XENOLITH_PACKET_DRAW 0x36u
 #define XENOLITH_PACKET_DRAW_INDEXED 0x22u
@@ -306,6 +326,34 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
 
         case XENOLITH_PACKET_KIND_COMMAND: {
             uint32_t opcode = (header >> 8) & 0xff;
+
+            if ((header & 1u) != 0 && (parts_marked & part_drawn) == 0) {
+                read_so_far.passed_over++;
+                break;
+            }
+
+            if (opcode >= XENOLITH_PACKET_BIN_MASK_LOW && opcode <= XENOLITH_PACKET_BIN_SELECT_HIGH
+                && follows >= 1) {
+                uint64_t value = xenolith_load32(base, stream + (at + 1) * 4);
+                int high = opcode == XENOLITH_PACKET_BIN_MASK_HIGH
+                           || opcode == XENOLITH_PACKET_BIN_SELECT_HIGH;
+                uint64_t *which = opcode <= XENOLITH_PACKET_BIN_MASK_HIGH ? &parts_marked
+                                                                          : &part_drawn;
+                *which = high ? (*which & 0xffffffffull) | (value << 32)
+                              : (*which & ~0xffffffffull) | value;
+                break;
+            }
+            if ((opcode == XENOLITH_PACKET_BIN_MASK || opcode == XENOLITH_PACKET_BIN_SELECT)
+                && follows >= 2) {
+                uint64_t value = ((uint64_t)xenolith_load32(base, stream + (at + 1) * 4) << 32)
+                                 | xenolith_load32(base, stream + (at + 2) * 4);
+                if (opcode == XENOLITH_PACKET_BIN_MASK) {
+                    parts_marked = value;
+                } else {
+                    part_drawn = value;
+                }
+                break;
+            }
 
             /* Commands kept somewhere else are followed, because that is where
              * a title puts nearly all of them. */
