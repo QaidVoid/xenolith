@@ -696,6 +696,7 @@ enum object_kind {
     OBJECT_SEMAPHORE,
     OBJECT_THREAD,
     OBJECT_FILE,
+    OBJECT_ENUMERATOR,
 };
 
 struct object {
@@ -989,6 +990,29 @@ static void signal_object(struct object *woken, int state) {
     pthread_cond_broadcast(&woken->changed);
     pthread_mutex_unlock(&woken->lock);
     say_something_changed();
+}
+
+/* Lets go of a lock a thread holds, once, and says how many times over it was
+ * held beforehand.
+ *
+ * Only the thread holding it can let it go, and only as many times as it took
+ * it. The last letting go is what lets another thread take it. Set as an event
+ * instead, a thread that takes it again straight after finds itself still
+ * holding it and walks in without spending the setting, which leaves it free
+ * for a second thread as well, and the two are inside the same lock at once. */
+static long release_lock(struct object *lock) {
+    pthread_mutex_lock(&lock->lock);
+    long was = lock->held;
+    if (lock->held > 0 && pthread_equal(lock->holder, pthread_self())) {
+        lock->held--;
+        if (lock->held == 0) {
+            lock->signalled = 1;
+            pthread_cond_broadcast(&lock->changed);
+        }
+    }
+    pthread_mutex_unlock(&lock->lock);
+    say_something_changed();
+    return was;
 }
 
 /* Waits until any one of several objects is signalled, and takes that one.
@@ -1497,8 +1521,16 @@ static void create_waitable(xenolith_context *ctx, uint8_t *base, enum object_ki
         made->manual = (uint32_t)ctx->r[5] == 0;
         made->signalled = (uint32_t)ctx->r[6] != 0;
     } else if (kind == OBJECT_MUTANT) {
+        /* One made already held belongs to the thread that made it, which
+         * may take it again and lets it go once for each time. */
         made->manual = 0;
-        made->signalled = (uint32_t)ctx->r[5] == 0;
+        if ((uint32_t)ctx->r[5] != 0) {
+            made->holder = pthread_self();
+            made->held = 1;
+            made->signalled = 0;
+        } else {
+            made->signalled = 1;
+        }
     } else {
         made->manual = 0;
         made->count = (long)(uint32_t)ctx->r[5];
@@ -1727,6 +1759,7 @@ static struct {
     uint32_t said[XENOLITH_NOTICES_HELD];
     uint32_t about[XENOLITH_NOTICES_HELD];
     uint32_t held;
+    uint64_t hears;
 } listeners[XENOLITH_LISTENERS];
 static uint32_t listeners_handed_out;
 static int told_how_it_started;
@@ -1739,6 +1772,7 @@ static uint32_t take_a_listener(uint64_t hears) {
         return 0;
     }
     uint32_t which = listeners_handed_out++;
+    listeners[which].hears = hears;
     if (!told_how_it_started && (hears & XENOLITH_HEARS_THE_SYSTEM) != 0) {
         told_how_it_started = 1;
         const uint32_t said[4] = {XENOLITH_SYSTEM_SCREENS, XENOLITH_SYSTEM_SCREENS,
@@ -1752,6 +1786,21 @@ static uint32_t take_a_listener(uint64_t hears) {
     }
     pthread_mutex_unlock(&listening);
     return XENOLITH_FIRST_LISTENER + which;
+}
+
+/* Tells every listener that hears about the system one more thing. One with no
+ * room left misses it, which is what a console does with a queue that full. */
+static void tell_the_system_listeners(uint32_t said, uint32_t about) {
+    pthread_mutex_lock(&listening);
+    for (uint32_t which = 0; which < listeners_handed_out; which++) {
+        if ((listeners[which].hears & XENOLITH_HEARS_THE_SYSTEM) != 0
+            && listeners[which].held < XENOLITH_NOTICES_HELD) {
+            listeners[which].said[listeners[which].held] = said;
+            listeners[which].about[listeners[which].held] = about;
+            listeners[which].held++;
+        }
+    }
+    pthread_mutex_unlock(&listening);
 }
 
 /* Takes the next thing a listener has to say, or the next of the kind a title
@@ -2862,6 +2911,31 @@ static uint32_t answer_a_message(uint32_t program, uint32_t message) {
     stop_the_run(3);
 }
 
+/* The number of the one device a title can save to. */
+#define XENOLITH_THE_ONE_DEVICE 1u
+
+/* What reading a list that has run out reports, and the most one item of a
+ * list a title asks for takes. */
+#define XENOLITH_ERROR_NO_MORE_FILES 18u
+#define XENOLITH_LARGEST_ITEM 0x200u
+
+/* Makes a list with nothing in it, writes the handle it is read through and
+ * how much room a reading of `count` items takes, and says how that went. */
+static uint32_t make_an_empty_list(uint8_t *base, uint32_t count, uint32_t room_at,
+                                   uint32_t handle_at) {
+    uint32_t handle = take_object(OBJECT_ENUMERATOR);
+    if (handle == 0) {
+        return XENOLITH_ERROR_INVALID_PARAMETER;
+    }
+    if (room_at != 0) {
+        xenolith_store32(base, room_at, count * XENOLITH_LARGEST_ITEM);
+    }
+    if (handle_at != 0) {
+        xenolith_store32(base, handle_at, handle);
+    }
+    return 0;
+}
+
 /* How much room one setting takes where profile settings are written. */
 #define XENOLITH_ONE_SETTING 40u
 
@@ -3083,6 +3157,62 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         case 537:
             read_profile_settings(ctx, base);
             return 1;
+        case 750: {
+            /* A list of the profile's achievements, to be read a few at a
+             * time. The profile here has earned none and nothing here reads
+             * what the title says it can award, so the list is empty. What
+             * comes back is a handle to read it through and how much room the
+             * title should make for a reading: the sixth argument's count of
+             * items at the most an item takes. */
+            uint32_t room_at = (uint32_t)ctx->r[9];
+            uint32_t handle_at = (uint32_t)ctx->r[10];
+            ctx->r[3] = make_an_empty_list(base, (uint32_t)ctx->r[8], room_at, handle_at);
+            return 1;
+        }
+        case 604: {
+            /* A list of what has been saved to a device, read the same way.
+             * Nothing has been saved, so it is empty too. */
+            uint32_t room_at = (uint32_t)ctx->r[6];
+            uint32_t handle_at = (uint32_t)ctx->r[7];
+            ctx->r[3] = make_an_empty_list(base, (uint32_t)ctx->r[5], room_at, handle_at);
+            return 1;
+        }
+        case 715: {
+            /* Asking the player which device to save to. There is one, so it
+             * is chosen without asking: its number goes where the fifth
+             * argument says, through the block in the sixth where there is
+             * one.
+             *
+             * On a console this puts the system's own screen up and takes it
+             * down again, and says so to everything listening, and a title
+             * waits to hear the screen has gone before it reads the answer.
+             * So that is said here too, as though it had been up and gone. */
+            uint32_t chosen_at = (uint32_t)ctx->r[7];
+            uint32_t block = (uint32_t)ctx->r[8];
+            if (chosen_at != 0) {
+                xenolith_store32(base, chosen_at, XENOLITH_THE_ONE_DEVICE);
+            }
+            tell_the_system_listeners(XENOLITH_SYSTEM_SCREENS, 1);
+            tell_the_system_listeners(XENOLITH_SYSTEM_SCREENS, 0);
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, 0, 0) : 0;
+            return 1;
+        }
+        case 592: {
+            /* Reading the next few items of a list. Every list here is empty,
+             * so the answer is that there are no more, with no items read,
+             * through the block a title hands over where it hands one. */
+            struct object *list = object_of((uint32_t)ctx->r[3]);
+            uint32_t read_at = (uint32_t)ctx->r[7];
+            uint32_t block = (uint32_t)ctx->r[8];
+            uint32_t status = list != NULL && list->kind == OBJECT_ENUMERATOR
+                                  ? XENOLITH_ERROR_NO_MORE_FILES
+                                  : XENOLITH_ERROR_INVALID_PARAMETER;
+            if (read_at != 0) {
+                xenolith_store32(base, read_at, 0);
+            }
+            ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
+            return 1;
+        }
         case 500:
             /* A message answered before the call returns. */
             ctx->r[3] = answer_a_message((uint32_t)ctx->r[3], (uint32_t)ctx->r[4]);
@@ -3249,9 +3379,18 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         create_waitable(ctx, base, OBJECT_SEMAPHORE);
         return 1;
     case 242: {
+        /* Letting go of a lock, with what it was held as before where a title
+         * asks. */
         struct object *found = object_of((uint32_t)ctx->r[3]);
-        if (found != NULL) {
+        uint32_t before_at = (uint32_t)ctx->r[4];
+        long was = 0;
+        if (found != NULL && found->kind == OBJECT_MUTANT) {
+            was = release_lock(found);
+        } else if (found != NULL) {
             signal_object(found, 1);
+        }
+        if (before_at != 0) {
+            xenolith_store32(base, before_at, (uint32_t)was);
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
@@ -3290,7 +3429,14 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * other thread being let go between them. */
         struct object *released = object_of((uint32_t)ctx->r[3]);
         struct object *waited = object_of((uint32_t)ctx->r[4]);
-        if (released != NULL) {
+        if (released != NULL && released->kind == OBJECT_MUTANT) {
+            release_lock(released);
+        } else if (released != NULL && released->kind == OBJECT_SEMAPHORE) {
+            pthread_mutex_lock(&released->lock);
+            released->count++;
+            pthread_mutex_unlock(&released->lock);
+            signal_object(released, 1);
+        } else if (released != NULL) {
             signal_object(released, 1);
         }
         if (waited == NULL) {

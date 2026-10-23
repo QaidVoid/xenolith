@@ -2907,6 +2907,21 @@ int main(void) {
         fprintf(stderr, "the second listener heard %#x\n", said);
         return 6;
     }
+
+    /* Choosing where to save puts the system's screen up and takes it down,
+     * which every listener for the system hears. */
+    ctx.r[3] = 0;
+    ctx.r[7] = 0x500;
+    ctx.r[8] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 715, "XamShowDeviceSelectorUI");
+    for (int which = 0; which < 2; which++) {
+        uint32_t listener = which == 0 ? first : second;
+        if (!hear(&ctx, base, listener, &said, &about) || said != 9u || about != 1u
+            || !hear(&ctx, base, listener, &said, &about) || said != 9u || about != 0u) {
+            fprintf(stderr, "listener %d did not hear the screen come and go\n", which);
+            return 7;
+        }
+    }
     return 0;
 }
 "#;
@@ -3434,6 +3449,226 @@ int main(void) {
 "#;
     if let Err(complaint) = runs("sound_client", program) {
         panic!("a sound client was not asked for frames:\n{complaint}");
+    }
+}
+
+/// The program the lock test runs.
+const LOCK_PROGRAM: &str = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static uint8_t *base;
+static uint32_t lock;
+
+/* Tries to take the lock from another thread without waiting. */
+static void *try_from_elsewhere(void *given) {
+    (void)given;
+    xenolith_context ctx = {0};
+    xenolith_store64(base, 0x500, 0xffffffffffffffffull);
+    ctx.r[3] = lock;
+    ctx.r[4] = 1;
+    ctx.r[5] = 0;
+    ctx.r[6] = 0x500;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
+    return (void *)(uintptr_t)(uint32_t)ctx.r[3];
+}
+
+static uint32_t elsewhere(void) {
+    pthread_t thread;
+    void *got = NULL;
+    pthread_create(&thread, NULL, try_from_elsewhere, NULL);
+    pthread_join(thread, &got);
+    return (uint32_t)(uintptr_t)got;
+}
+
+static uint32_t take(xenolith_context *ctx) {
+    xenolith_store64(base, 0x400, 0xffffffffffffffffull);
+    ctx->r[3] = lock;
+    ctx->r[4] = 1;
+    ctx->r[5] = 0;
+    ctx->r[6] = 0x400;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
+    return (uint32_t)ctx->r[3];
+}
+
+static void let_go(xenolith_context *ctx) {
+    ctx->r[3] = lock;
+    ctx->r[4] = 0;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 242, "NtReleaseMutant");
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0;
+    ctx.r[5] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 212, "NtCreateMutant");
+    lock = xenolith_load32(base, 0x200);
+
+    if (take(&ctx) != 0u || take(&ctx) != 0u) {
+        fprintf(stderr, "the lock could not be taken twice by one thread\n");
+        return 3;
+    }
+    let_go(&ctx);
+    if (elsewhere() != 0x102u) {
+        fprintf(stderr, "another thread took a lock still held once\n");
+        return 4;
+    }
+    let_go(&ctx);
+    if (elsewhere() != 0u) {
+        fprintf(stderr, "another thread could not take a lock let go of\n");
+        return 5;
+    }
+
+    /* Let go of through the call that lets go of one thing and waits on
+     * another, which is how the title above used it. */
+    ctx.r[3] = 0x204;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 212, "NtCreateMutant");
+    lock = xenolith_load32(base, 0x204);
+    ctx.r[3] = 0x208;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;
+    ctx.r[6] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    uint32_t event = xenolith_load32(base, 0x208);
+    if (elsewhere() != 0x102u) {
+        fprintf(stderr, "a lock made already held could be taken by another thread\n");
+        return 6;
+    }
+    xenolith_store64(base, 0x600, (uint64_t)(int64_t)-10000);
+    ctx.r[3] = lock;
+    ctx.r[4] = event;
+    ctx.r[5] = 1;
+    ctx.r[6] = 0;
+    ctx.r[7] = 0x600;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 251, "NtSignalAndWaitForSingleObjectEx");
+    if (elsewhere() != 0u) {
+        fprintf(stderr, "letting go through the signal and wait did not free the lock\n");
+        return 7;
+    }
+    return 0;
+}
+"#;
+
+/// A lock is let go of only by the thread holding it, once for each time it was
+/// taken.
+///
+/// Let go of as an event is set, a thread that takes it again straight after
+/// walks in without spending the letting go, and a second thread can take it
+/// as well. One title rendezvous its main and drawing threads on a lock and an
+/// event, and with two threads inside the lock at once each waited for the
+/// other.
+#[test]
+fn a_lock_is_let_go_only_by_its_holder_once_for_each_taking() {
+    let program = LOCK_PROGRAM;
+    if let Err(complaint) = runs("lock_holder", program) {
+        panic!("a lock was let go of wrongly:\n{complaint}");
+    }
+}
+
+/// A list of achievements or of what was saved is empty, and reading it says
+/// there is no more.
+///
+/// The profile here has earned nothing and saved nothing. A title asks for a
+/// handle and how much room a reading takes, reads, and is told the list has
+/// run out, through the block it hands over where it hands one.
+#[test]
+fn a_list_of_what_a_profile_holds_is_empty() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0;
+    ctx.r[4] = 0;
+    ctx.r[5] = 0;
+    ctx.r[6] = 0;
+    ctx.r[7] = 0;
+    ctx.r[8] = 8;
+    ctx.r[9] = 0x200;
+    ctx.r[10] = 0x204;
+    xenolith_import(&ctx, base, "xam.xex", 750, "XamUserCreateAchievementEnumerator");
+    uint32_t list = xenolith_load32(base, 0x204);
+    if (ctx.r[3] != 0u || list == 0u || xenolith_load32(base, 0x200) == 0u) {
+        fprintf(stderr, "no list was made\n");
+        return 3;
+    }
+
+    xenolith_store32(base, 0x300, 0xdeadu);
+    ctx.r[3] = list;
+    ctx.r[4] = 0;
+    ctx.r[5] = 0x1000;
+    ctx.r[6] = 0x100;
+    ctx.r[7] = 0x300;
+    ctx.r[8] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 592, "XamEnumerate");
+    if (ctx.r[3] != 18u || xenolith_load32(base, 0x300) != 0u) {
+        fprintf(stderr, "reading an empty list came back as %#llx\n", (unsigned long long)ctx.r[3]);
+        return 4;
+    }
+
+    xenolith_store32(base, 0x400, 0xffffffffu);
+    ctx.r[3] = list;
+    ctx.r[7] = 0;
+    ctx.r[8] = 0x400;
+    xenolith_import(&ctx, base, "xam.xex", 592, "XamEnumerate");
+    if (ctx.r[3] != 997u || xenolith_load32(base, 0x400) != 18u) {
+        fprintf(stderr, "reading through a block was not finished in the block\n");
+        return 5;
+    }
+
+    /* And choosing where to save picks the one device. */
+    ctx.r[3] = 0;
+    ctx.r[7] = 0x500;
+    ctx.r[8] = 0;
+    xenolith_import(&ctx, base, "xam.xex", 715, "XamShowDeviceSelectorUI");
+    if (ctx.r[3] != 0u || xenolith_load32(base, 0x500) == 0u) {
+        fprintf(stderr, "no device was chosen\n");
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("empty_lists", program) {
+        panic!("a list of what a profile holds was not empty:\n{complaint}");
     }
 }
 
