@@ -60,6 +60,13 @@ pub enum Origin {
     /// Nothing calls one of these, so discovery cannot reach it, but a table of
     /// addresses is a stronger thing to have found it by than any shape.
     Tabled,
+    /// The code builds its address out of two halves and keeps it somewhere,
+    /// to be called through later.
+    ///
+    /// A title registering a handler does this: the address is in no table and
+    /// nothing calls it by name, and the only trace of it is the pair of
+    /// instructions that puts it together.
+    Constructed,
 }
 
 impl Origin {
@@ -74,6 +81,7 @@ impl Origin {
             Self::Recorded => "recorded",
             Self::Tabled => "tabled",
             Self::Surrounded => "surrounded",
+            Self::Constructed => "constructed",
         }
     }
 }
@@ -90,6 +98,7 @@ pub const ORIGINS: &[Origin] = &[
     Origin::Scanned,
     Origin::Recorded,
     Origin::Tabled,
+    Origin::Constructed,
     Origin::Surrounded,
 ];
 
@@ -779,6 +788,136 @@ fn claim_run(
     run.clear();
 }
 
+/// How far after the instruction holding the top half of an address the one
+/// adding the bottom half is looked for. A compiler puts the two close together
+/// but not always next to each other.
+const HALVES_APART: u32 = 8;
+
+/// Returns the addresses the code puts together out of two halves.
+///
+/// A title that registers a handler builds the handler's address with one
+/// instruction loading the top half and another adding the bottom half, and
+/// keeps it somewhere to call through. Nothing else records where that function
+/// is. An address put together this way is claimed when it lands on code, is
+/// not inside anything already walked, and is not the tail of whatever precedes
+/// it: the same three things a table's addresses are held to, and the last of
+/// them keeps an address built to point inside a function, as a label's is,
+/// from being taken for a function of its own.
+///
+/// Most addresses built this way are of data, and data placed just after a
+/// function decodes as often as not. So what is found must also look like a
+/// function in its own right: open with a prologue, read as one whole leaf, or
+/// begin a run of code nothing has claimed that ends the way a function ends.
+/// The last is what a handler that finishes by branching to another function
+/// looks like, and what a table of addresses placed after a switch does not:
+/// its words decode, but they run on into the code that follows the table,
+/// which is already claimed, before anything ends.
+fn scan_for_constructed(
+    image: &Image,
+    helpers: &Helpers,
+    walked: &BTreeMap<u32, Vec<Block>>,
+) -> Vec<u32> {
+    let starts: BTreeSet<u32> = walked.keys().copied().collect();
+    let claimed = claimed_instructions(walked);
+    let mut found = BTreeSet::new();
+
+    for section in image.executable_sections() {
+        let end = u32::try_from(section.end()).unwrap_or(u32::MAX);
+        let mut at = section.start;
+        while at < end {
+            let Some(next) = at.checked_add(INSTRUCTION_SIZE) else {
+                break;
+            };
+            let top = image.u32(at).map(Instruction::decode).ok();
+            if let Some(top) = top.filter(|one| one.opcode() == Opcode::Addis && one.ra() == 0) {
+                let high = 0u32.wrapping_add_signed(top.displacement()) << 16;
+                let mut after = next;
+                for _ in 0..HALVES_APART {
+                    if after >= end {
+                        break;
+                    }
+                    let Ok(word) = image.u32(after) else {
+                        break;
+                    };
+                    let one = Instruction::decode(word);
+                    let low = match one.opcode() {
+                        Opcode::Addi if one.ra() == top.rt() => {
+                            Some(high.wrapping_add_signed(one.displacement()))
+                        }
+                        Opcode::Ori if one.rs() == top.rt() => {
+                            Some(high | (0u32.wrapping_add_signed(one.displacement()) & 0xffff))
+                        }
+                        _ => None,
+                    };
+                    if let Some(target) = low {
+                        if names_code(image, target)
+                            && !starts.contains(&target)
+                            && !claimed.contains(&target)
+                            && nothing_falls_into(image, target)
+                            && (prologue_signals(image, target, helpers) >= PROLOGUE_SIGNALS
+                                || reads_as_a_leaf(image, target, &starts, &starts).is_some()
+                                || ends_before_anything_claimed(image, target, &claimed))
+                        {
+                            found.insert(target);
+                        }
+                        break;
+                    }
+                    after = after.saturating_add(INSTRUCTION_SIZE);
+                }
+            }
+            at = next;
+        }
+    }
+
+    found.into_iter().collect()
+}
+
+/// Whether the words from an address are code nothing has claimed, up to one
+/// that ends a function: a return, or a branch or a branch through a register
+/// that does not fall through.
+fn ends_before_anything_claimed(image: &Image, begin: u32, claimed: &BTreeSet<u32>) -> bool {
+    let mut at = begin;
+    for _ in 0..LEAF_LIMIT {
+        if claimed.contains(&at) {
+            return false;
+        }
+        let Ok(word) = image.u32(at) else {
+            return false;
+        };
+        let instruction = Instruction::decode(word);
+        if instruction.is_unknown() {
+            return false;
+        }
+        let flow = instruction.flow(at);
+        if !flow.falls_through
+            && matches!(
+                flow.kind,
+                FlowKind::Return | FlowKind::Branch | FlowKind::Indirect
+            )
+        {
+            return true;
+        }
+        let Some(next) = at.checked_add(INSTRUCTION_SIZE) else {
+            return false;
+        };
+        at = next;
+    }
+    false
+}
+
+/// Records each address not already recorded, as found by `origin`, and says
+/// whether any was new.
+fn record_new(origins: &mut BTreeMap<u32, Origin>, found: Vec<u32>, origin: Origin) -> bool {
+    let mut added = false;
+    for address in found {
+        if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
+            slot.insert(origin);
+            added = true;
+        }
+    }
+    added
+}
+
 /// How many pairs in a row make the record an image keeps of its own functions.
 const RECORD_RUN: usize = 8;
 
@@ -1209,47 +1348,47 @@ pub fn analyze(image: &Image, roots: &[u32]) -> Program {
     for _ in 0..MAX_SCAN_ROUNDS {
         let mut added = false;
 
-        for address in scan_for_prologues(image, &helpers, &walked) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
-                slot.insert(Origin::Scanned);
-                added = true;
-            }
-        }
+        added |= record_new(
+            &mut origins,
+            scan_for_prologues(image, &helpers, &walked),
+            Origin::Scanned,
+        );
 
-        for address in scan_for_import_branches(image, &walked) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
-                slot.insert(Origin::Scanned);
-                added = true;
-            }
-        }
+        added |= record_new(
+            &mut origins,
+            scan_for_import_branches(image, &walked),
+            Origin::Scanned,
+        );
 
-        for address in scan_for_handovers(image, &helpers, &walked) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
-                slot.insert(Origin::Surrounded);
-                added = true;
-            }
-        }
+        added |= record_new(
+            &mut origins,
+            scan_for_handovers(image, &helpers, &walked),
+            Origin::Surrounded,
+        );
 
-        for address in scan_for_recorded(image, &walked) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
-                slot.insert(Origin::Recorded);
-                added = true;
-            }
-        }
+        added |= record_new(
+            &mut origins,
+            scan_for_recorded(image, &walked),
+            Origin::Recorded,
+        );
 
-        for address in scan_for_tables(image, &walked) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
-                slot.insert(Origin::Tabled);
-                added = true;
-            }
-        }
+        added |= record_new(
+            &mut origins,
+            scan_for_tables(image, &walked),
+            Origin::Tabled,
+        );
 
-        for address in scan_for_trampolines(image, &walked) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = origins.entry(address) {
-                slot.insert(Origin::Scanned);
-                added = true;
-            }
-        }
+        added |= record_new(
+            &mut origins,
+            scan_for_constructed(image, &helpers, &walked),
+            Origin::Constructed,
+        );
+
+        added |= record_new(
+            &mut origins,
+            scan_for_trampolines(image, &walked),
+            Origin::Scanned,
+        );
 
         for function in assemble(&walked, &origins, &resolved).values() {
             for table in crate::jumptable::recover(image, function).recovered() {
@@ -1482,7 +1621,7 @@ mod tests {
         assert_eq!(counted, program.function_count());
         assert_eq!(
             ORIGINS.len(),
-            7,
+            8,
             "the report prints one line per origin, so this is the number of lines"
         );
     }
@@ -1547,6 +1686,65 @@ mod tests {
             program.function_at(0x8200_0008).map(|one| one.origin),
             Some(Origin::Tabled)
         );
+    }
+
+    /// An address the code builds out of two halves names a function, however
+    /// little it looks like one.
+    #[test]
+    fn an_address_built_from_two_halves_names_a_function() {
+        let words = vec![
+            encode::addis(3, 0, 0x8200),
+            encode::addi(3, 3, 0x10),
+            encode::blr(),
+            encode::blr(),
+            encode::addi(4, 5, 1),
+            encode::blr(),
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0010).map(|one| one.origin),
+            Some(Origin::Constructed)
+        );
+    }
+
+    /// One built for a handler that calls something and returns, with no
+    /// prologue and so no leaf, still names a function: the words from it are
+    /// code nothing has claimed, up to the return.
+    #[test]
+    fn an_address_built_for_a_handler_that_calls_names_a_function() {
+        let words = vec![
+            encode::addis(3, 0, 0x8200),
+            encode::addi(3, 3, 0x10),
+            encode::blr(),
+            encode::blr(),
+            encode::bl(0x3ff_fff0),
+            encode::blr(),
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0010).map(|one| one.origin),
+            Some(Origin::Constructed)
+        );
+    }
+
+    /// One built to point inside a function already walked names a place in
+    /// it, not a function of its own.
+    #[test]
+    fn an_address_built_into_a_function_names_nothing_new() {
+        let words = vec![
+            encode::addis(3, 0, 0x8200),
+            encode::addi(3, 3, 0x8),
+            encode::addi(4, 5, 1),
+            encode::blr(),
+        ];
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(program.count_from(Origin::Constructed), 0);
     }
 
     /// A list of records naming one function each, at the same place in every
