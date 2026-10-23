@@ -417,12 +417,10 @@ int main(void) {
     }
 }
 
-/// Guest memory is handed out in distinct grains, aligned as asked.
+/// Guest memory is handed out in distinct grains, each aligned to a grain.
 ///
 /// Two allocations that overlap would put one title structure on top of another,
 /// which is the kind of fault that shows up as corruption far from the call.
-/// The alignment is what a title asks for and gets told it got, so it has to be
-/// the alignment it asked for.
 #[test]
 fn two_allocations_do_not_overlap_and_are_aligned() {
     let program = r#"
@@ -438,13 +436,9 @@ xenolith_function xenolith_lookup(uint32_t address) {
     return 0;
 }
 
-/* Asks for `size` bytes at `alignment`, the way a title asks. */
+/* Asks for `size` bytes, the way a title asks. */
 static int allocate(xenolith_context *ctx, uint8_t *base, uint32_t size,
-                    uint32_t alignment, uint32_t *got_at, uint32_t *got_size) {
-    uint32_t address = 0;
-    uint32_t size_slot = size;
-    ctx->r[3] = 0;          /* nowhere in particular */
-    ctx->r[4] = 0;
+                    uint32_t *got_at, uint32_t *got_size) {
     xenolith_store32(base, 0x100, 0);
     xenolith_store32(base, 0x104, size);
     ctx->r[3] = 0x100;
@@ -452,9 +446,6 @@ static int allocate(xenolith_context *ctx, uint8_t *base, uint32_t size,
     ctx->r[5] = 0;
     ctx->r[6] = 0;
     ctx->r[7] = 0;
-    ctx->r[8] = alignment;
-    (void)address;
-    (void)size_slot;
     xenolith_import(ctx, base, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
     if (ctx->r[3] != 0u) {
         return 1;
@@ -480,11 +471,11 @@ int main(void) {
     xenolith_context ctx = {0};
     uint32_t first_at = 0, first_size = 0;
     uint32_t second_at = 0, second_size = 0;
-    if (allocate(&ctx, base, 0x3000, 0x10000, &first_at, &first_size) != 0) {
+    if (allocate(&ctx, base, 0x3000, &first_at, &first_size) != 0) {
         fprintf(stderr, "the first allocation failed\n");
         return 3;
     }
-    if (allocate(&ctx, base, 0x3000, 0x20000, &second_at, &second_size) != 0) {
+    if (allocate(&ctx, base, 0x3000, &second_at, &second_size) != 0) {
         fprintf(stderr, "the second allocation failed\n");
         return 4;
     }
@@ -493,10 +484,9 @@ int main(void) {
         fprintf(stderr, "an allocation came back as nothing\n");
         return 5;
     }
-    if (first_at % 0x10000u != 0 || second_at % 0x20000u != 0) {
-        fprintf(stderr, "an allocation was not aligned as asked: %#x at %u, %#x at %u\n",
-                first_at, (unsigned)(first_at % 0x10000u),
-                second_at, (unsigned)(second_at % 0x20000u));
+    if (first_at % 0x10000u != 0 || second_at % 0x10000u != 0) {
+        fprintf(stderr, "an allocation was not aligned to a grain: %#x and %#x\n",
+                first_at, second_at);
         return 6;
     }
     /* A size is rounded up to whole grains, and nothing of it is smaller than
@@ -603,24 +593,33 @@ xenolith_function xenolith_lookup(uint32_t address) {
     return 0;
 }
 
-/* Asks for `size` bytes at `alignment` and says whether it was granted. */
+/* Asks for `size` bytes of memory the graphics hardware reaches, at
+ * `alignment`, and says whether it was granted. */
 static int ask_aligned(xenolith_context *ctx, uint8_t *base, uint32_t size,
                        uint32_t alignment, uint32_t *got) {
+    ctx->r[3] = 0;
+    ctx->r[4] = size;
+    ctx->r[5] = 0;
+    ctx->r[6] = 0;
+    ctx->r[7] = 0xffffffffu;
+    ctx->r[8] = alignment;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 186, "MmAllocatePhysicalMemoryEx");
+    *got = (uint32_t)ctx->r[3];
+    return *got != 0u;
+}
+
+/* Asks for `size` bytes and says whether it was granted. */
+static int ask(xenolith_context *ctx, uint8_t *base, uint32_t size, uint32_t *got) {
     xenolith_store32(base, 0x100, 0);
     xenolith_store32(base, 0x104, size);
     ctx->r[3] = 0x100;
     ctx->r[4] = 0x104;
-    ctx->r[8] = alignment;
     xenolith_import(ctx, base, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
     if (ctx->r[3] != 0u) {
         return 0;
     }
     *got = xenolith_load32(base, 0x100);
     return 1;
-}
-
-static int ask(xenolith_context *ctx, uint8_t *base, uint32_t size, uint32_t *got) {
-    return ask_aligned(ctx, base, size, 0x10000u, got);
 }
 
 int main(void) {
@@ -665,6 +664,71 @@ int main(void) {
 "#;
     if let Err(complaint) = runs("past_the_arena", program) {
         panic!("an allocation past the arena was granted:\n{complaint}");
+    }
+}
+
+/// Reserving memory reads no alignment, because it is given none.
+///
+/// The kernel entry takes five arguments, and the register after them holds
+/// whatever the caller left there. One title leaves a stack address in it. Read
+/// as an alignment, that is a mask with holes in it: the first ask is pushed far
+/// up the arena and the next is rounded past its end and refused. The title's
+/// own allocator takes the refusal as no memory and throws, and the run stops.
+#[test]
+fn reserving_memory_reads_no_alignment_from_a_leftover_register() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    uint32_t previous = 0;
+    for (int ask = 0; ask < 3; ask++) {
+        xenolith_store32(base, 0x100, 0);
+        xenolith_store32(base, 0x104, 0x200000u);
+        ctx.r[3] = 0x100;
+        ctx.r[4] = 0x104;
+        ctx.r[5] = 0x00002000u;
+        ctx.r[6] = 0x04u;
+        ctx.r[7] = 0;
+        /* The stack address one title leaves here. */
+        ctx.r[8] = 0x6ffffd20u;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
+        if (ctx.r[3] != 0u) {
+            fprintf(stderr, "ask %d of two megabytes was refused with %#llx\n", ask,
+                    (unsigned long long)ctx.r[3]);
+            return 3;
+        }
+        uint32_t got = xenolith_load32(base, 0x100);
+        if (ask > 0 && got != previous + 0x200000u) {
+            fprintf(stderr, "ask %d landed at %#x, not after the one before at %#x\n",
+                    ask, got, previous);
+            return 4;
+        }
+        previous = got;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("leftover_alignment", program) {
+        panic!("reserving memory read an alignment it was not given:\n{complaint}");
     }
 }
 

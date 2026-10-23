@@ -374,6 +374,10 @@ static uint32_t take_guest_memory(uint32_t size, uint32_t alignment) {
  * holding an address and a size, both read and both written back, and a status
  * returned. Where the address arrives as zero the runtime chooses one.
  *
+ * There is no alignment among the five arguments, so none is read. Whatever a
+ * register past them holds is left over from the caller, and taken for an
+ * alignment it turns a pointer into a mask that refuses an ask that fits.
+ *
  * The flags saying whether this reserves or commits are deliberately not
  * consulted. Every guest address is mapped and zeroed before a title starts, so
  * there is no state here for the two to differ in, and honouring a distinction
@@ -382,7 +386,6 @@ static uint32_t take_guest_memory(uint32_t size, uint32_t alignment) {
 static void allocate_virtual_memory(xenolith_context *ctx, uint8_t *base) {
     uint32_t address_at = (uint32_t)ctx->r[3];
     uint32_t size_at = (uint32_t)ctx->r[4];
-    uint32_t alignment = (uint32_t)ctx->r[8];
     uint32_t wanted = address_at ? xenolith_load32(base, address_at) : 0;
     uint32_t size = size_at ? xenolith_load32(base, size_at) : 0;
 
@@ -396,7 +399,7 @@ static void allocate_virtual_memory(xenolith_context *ctx, uint8_t *base) {
 
     uint32_t at = wanted & ~(XENOLITH_HEAP_GRAIN - 1);
     if (at == 0) {
-        at = take_guest_memory(size, alignment);
+        at = take_guest_memory(size, 0);
         if (at == 0) {
             ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
             return;
