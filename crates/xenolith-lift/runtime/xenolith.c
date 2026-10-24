@@ -4100,9 +4100,13 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * nothing to put back. */
         return 1;
     case 146:
-        /* Resuming a thread. Threads here run from the moment they are made, so
-         * one that is resumed is already running and there is nothing to do. */
-        ctx->r[3] = 0;
+        /* Resuming a thread named by the object a title was handed for it,
+         * which here is its handle. A thread made suspended does not run until
+         * it is let go, and a title that lets it go this way rather than by
+         * handle is as much waiting on it: its sound engine makes the thread
+         * that mixes suspended and starts it here, and never started, nothing
+         * mixes and a film keeping to its soundtrack stands on its first frame. */
+        resume_thread(ctx);
         return 1;
     case 252:
         /* Suspending a thread.

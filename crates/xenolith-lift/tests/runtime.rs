@@ -367,6 +367,80 @@ int main(void) {
     }
 }
 
+/// A thread made suspended runs once it is resumed by the object a title holds.
+///
+/// A title makes a thread suspended, turns its handle into an object to hold,
+/// and resumes it through that object rather than the handle. Left suspended,
+/// the thread a title's sound engine mixes on never runs.
+#[test]
+fn a_suspended_thread_resumed_by_its_object_runs() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <sys/mman.h>
+#include <time.h>
+
+static volatile uint32_t ran;
+
+void sub_82000000(xenolith_context *ctx, uint8_t *base) {
+    (void)ctx;
+    (void)base;
+    ran = 1;
+}
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    return address == 0x82000000u ? sub_82000000 : 0;
+}
+
+static void wait_a_little(void) {
+    for (int waited = 0; waited < 200 && ran == 0; waited++) {
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+}
+
+int main(void) {
+    uint8_t *base = mmap(NULL, (size_t)1 << 32, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) {
+        return 6;
+    }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 64;
+    ctx.r[7] = 0x82000000u;
+    ctx.r[9] = 1;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 13, "ExCreateThread");
+    if (ctx.r[3] != 0u) {
+        return 1;
+    }
+    wait_a_little();
+    if (ran != 0) {
+        fprintf(stderr, "the thread ran before it was resumed\n");
+        return 2;
+    }
+
+    ctx.r[3] = xenolith_load32(base, 64);
+    ctx.r[4] = 0;
+    ctx.r[5] = 96;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 272, "ObReferenceObjectByHandle");
+    ctx.r[3] = xenolith_load32(base, 96);
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 146, "KeResumeThread");
+    wait_a_little();
+    if (ran == 0) {
+        fprintf(stderr, "the thread never ran after it was resumed\n");
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("resumed_by_its_object", program) {
+        panic!("a suspended thread did not run once resumed:\n{complaint}");
+    }
+}
+
 /// A read that begins in the last bytes of the guest span lands on something.
 ///
 /// Guest addresses are four bytes wide and a read works out where it is reading
