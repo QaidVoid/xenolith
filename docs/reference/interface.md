@@ -434,8 +434,9 @@ again before the next drawing, and what to start it as.
 
 ## `xenolith_wipe_the_colours_after_a_copy`
 
-Says whether the copy just made asked for the colours to start again before
-the next drawing, and what to start them as.
+Says whether the copy just made asked for the colours to start again, and what
+to start them as. They are wiped at once, while the surface still holds the
+place the copy was made from.
 
 ## `xenolith_built_against`
 
@@ -509,14 +510,20 @@ Nothing said means the whole of what is drawn into.
 
 ## `xenolith_hand_back_what_was_drawn`
 
-Hands what was drawn back into a title's own memory, where it said to put it,
-a row at a time. Returns zero where there is nothing to hand back.
+Hands what was drawn back into a title's own memory, as a `struct
+xenolith_copy` says. Returns zero where there is nothing to hand back.
+
+The copy names a rectangle in the pixels of the place drawn into, which is
+where it lands in the picture copied into as well: a title drawing a frame in
+parts moves where the picture starts for each part rather than the rectangle.
+How many samples the place keeps across and down for each pixel says how much
+of the surface one pixel covers, and those are averaged on the way out.
 
 A title asks for how far away things came out as often as it asks for their
 colours, and reads that back as a picture to work out haze, fog and what is
 out of focus. Handed the colours instead it draws none of those, so which of
-the two is wanted is said here. How far away is kept either as a fraction of
-the whole or as the console's small float, which is the other flag.
+the two is wanted is said in the copy. How far away is kept either as a
+fraction of the whole or as the console's small float.
 
 ## `xenolith_what_is_held`
 

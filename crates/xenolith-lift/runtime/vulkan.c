@@ -1282,6 +1282,7 @@ static struct {
     int taken;
 } built[XENOLITH_PIPELINES];
 
+
 /* How far away a place on the surface is, kept as a plain number between one
  * end of the view and the other.
  *
@@ -2449,8 +2450,6 @@ int xenolith_can_draw_with(uint32_t vertex_sum, const uint32_t *vertex, uint32_t
            != VK_NULL_HANDLE;
 }
 
-/* Whether a frame is being recorded, so that beginning one twice or drawing
- * into one that never began cannot happen. */
 /* Whether how far away things are starts again from nothing.
  *
  * A console keeps what it drew, and how far away it was, in memory beside the
@@ -2463,13 +2462,49 @@ int xenolith_can_draw_with(uint32_t vertex_sum, const uint32_t *vertex, uint32_t
 static int wipe_the_colours;
 static uint32_t colours_start_at;
 
-/* Says whether the copy just made asked for the colours to start again before
- * the next drawing, and what to start them as. */
-void xenolith_wipe_the_colours_after_a_copy(int wipe, uint32_t to) {
-    if (wipe) {
-        wipe_the_colours = 1;
-        colours_start_at = to;
+/* Whether a frame is being recorded, so that beginning one twice or drawing
+ * into one that never began cannot happen. */
+static int recording;
+
+/* Wipes the surface as it stands, between frames, to the colour a title said. */
+static int wipe_the_surface_now(uint32_t to) {
+    VkCommandBuffer one = begin_one_lot_of_commands();
+    if (one == VK_NULL_HANDLE) {
+        return 0;
     }
+    VkClearColorValue cleared_to = {0};
+    cleared_to.float32[0] = (float)((to >> 16) & 0xffu) / 255.0f;
+    cleared_to.float32[1] = (float)((to >> 8) & 0xffu) / 255.0f;
+    cleared_to.float32[2] = (float)(to & 0xffu) / 255.0f;
+    cleared_to.float32[3] = (float)((to >> 24) & 0xffu) / 255.0f;
+    VkImageSubresourceRange every_part = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    a_picture_becomes(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdClearColorImage(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cleared_to,
+                         1, &every_part);
+    a_picture_becomes(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    return finish_one_lot_of_commands(one);
+}
+
+/* Says whether the copy just made asked for the colours to start again, and
+ * what to start them as.
+ *
+ * They are wiped at once, while the surface still holds the place the copy was
+ * made from. Left for the next frame instead, the wipe fell on whichever place
+ * that frame drew into, and the place a title copied from kept what it meant
+ * to start again: a frame drawn a part at a time began each part over the last
+ * one, and what it told apart by how solid it was came out the wrong way. */
+void xenolith_wipe_the_colours_after_a_copy(int wipe, uint32_t to) {
+    if (!wipe) {
+        return;
+    }
+    colours_start_at = to;
+    pthread_mutex_lock(&one_drawing);
+    if (!surface.read_out || recording || !wipe_the_surface_now(to)) {
+        wipe_the_colours = 1;
+    }
+    pthread_mutex_unlock(&one_drawing);
 }
 
 static int wipe_how_far = 1;
@@ -2490,8 +2525,6 @@ void xenolith_wipe_how_far_after_a_copy(int wipe, float to) {
         how_far_to_start_at = to;
     }
 }
-
-static int recording;
 
 /* Starts a frame, clearing it to the colour a title starts from.
  *
