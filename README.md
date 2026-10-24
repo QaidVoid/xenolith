@@ -34,8 +34,8 @@ Measured against two retail titles, with
 Both titles lift completely, both compile, both reach the renderer and draw
 with their own translated shaders, and both keep running until they are
 stopped. Title A copies its frames out of the graphics hardware and hands them
-to the display, and its opening logos, notices and menus come out as the title
-drew them. Past the menus it draws the opening of its first mission a part of
+to the display, and its opening logos, notices, opening film and menus come
+out as the title drew them. Past the menus it draws the opening of its first mission a part of
 the screen at a time, with parts of each scene still missing, and nothing
 decodes its compressed sound, so its music and voices are not heard.
 
@@ -62,7 +62,7 @@ data is in this repository.
 
 ## What it does not do
 
-- **Play a game.** Title A plays the opening of its first mission with parts of each scene missing, and goes no further yet.
+- **Play a game.** Title A plays its opening film and the opening of its first mission, with parts of each scene missing, and goes no further yet.
 - **Reproduce a console's settings.** A privilege, the video cable, two display
   settings, the region, the language and a signed in profile are answered from
   what a title's own startup requires, because what a console was set to is not
