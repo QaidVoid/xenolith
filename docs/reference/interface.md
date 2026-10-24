@@ -412,6 +412,10 @@ on the screen near one another in memory, and squeezed into squares of four
 by four. A host squeezes them the same way, so what is squeezed is handed over
 as it is and only the order is undone. Says whether it took.
 
+How it is held says how it is sampled in its lowest twelve bits, and above
+them which part of the picture each of the four a shader reads is, three bits
+each in the console's numbering.
+
 ## `xenolith_look_at_nothing`
 
 Leaves a place a shader reads a picture from holding nothing.

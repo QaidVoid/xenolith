@@ -1055,11 +1055,14 @@ static void hand_over_the_pictures(const uint8_t *base, const uint32_t *looks,
         say_what_a_picture_holds(place, base, (second >> 12) << 12, (third & 0x1fffu) + 1u,
                                  ((third >> 13) & 0x1fffu) + 1u, format, (first >> 10) & 7u,
                                  (first >> 13) & 7u, read_how);
+        /* Which part of the picture each of the four a shader reads is, three
+         * bits each above the bit saying how a number in it is kept. */
+        uint32_t parts = (fourth >> 1) & 0xfffu;
         xenolith_look_at_a_picture(place, base, (second >> 12) << 12, (third & 0x1fffu) + 1u,
                                    ((third >> 13) & 0x1fffu) + 1u, ((first >> 22) & 0x1ffu) * 32u,
                                    (int)((first >> 31) & 1u), (second >> 6) & 3u, format,
                                    ((first >> 10) & 7u) | (((first >> 13) & 7u) << 4)
-                                       | (read_how << 8));
+                                       | (read_how << 8) | (parts << 12));
     }
 }
 
@@ -1479,6 +1482,7 @@ static void take_the_shader_in_hand(uint8_t *base, uint32_t which_kind, uint32_t
 #define XENOLITH_COPY_DEST_BASE 0x2319u
 #define XENOLITH_COPY_DEST_PITCH 0x231au
 #define XENOLITH_COPY_DEST_INFO 0x231bu
+#define XENOLITH_COPY_SWAPS_RED_AND_BLUE (1u << 24)
 #define XENOLITH_DEPTH_CLEAR 0x231du
 
 /* How the place a title keeps how far away things are holds it, and the bit of
@@ -1562,6 +1566,8 @@ static void copy_what_was_drawn(uint8_t *base) {
     copy.samples_across = samples == 2u ? 2u : 1u;
     copy.samples_down = samples != 0u ? 2u : 1u;
     copy.as_one_float = format == XENOLITH_PICTURE_IN_FLOATS;
+    copy.red_and_blue_swapped =
+        (a_register(base, XENOLITH_COPY_DEST_INFO) & XENOLITH_COPY_SWAPS_RED_AND_BLUE) != 0;
     copy.from_how_far = (control & 7u) == XENOLITH_COPY_FROM_HOW_FAR;
     copy.how_far_as_a_float =
         (a_register(base, XENOLITH_HOW_FAR_IS_KEPT) & XENOLITH_KEPT_AS_A_FLOAT) != 0;

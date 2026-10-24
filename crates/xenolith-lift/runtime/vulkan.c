@@ -802,6 +802,37 @@ static VkFilter read_the_way(uint32_t said) {
     return said == 0u ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
 }
 
+/* Which parts of how a picture is read say how it is sampled, and where above
+ * them the four parts a shader is handed are said, three bits each. */
+#define XENOLITH_HOW_IT_IS_READ 0xfffu
+#define XENOLITH_PARTS_SHIFT 12u
+
+/* Which part of a picture a shader is handed in one of the four it reads.
+ *
+ * A title says this for each picture rather than the picture saying it, and
+ * builds the ways round a colour can be kept out of the one the hardware keeps:
+ * a picture copied out with its red and blue swapped is read with them swapped
+ * back here. Read as it stands instead, a scene drawn into one picture and then
+ * read from it comes out with its reds blue. */
+static VkComponentSwizzle which_part_is_read(uint32_t said) {
+    switch (said & 7u) {
+    case 0:
+        return VK_COMPONENT_SWIZZLE_R;
+    case 1:
+        return VK_COMPONENT_SWIZZLE_G;
+    case 2:
+        return VK_COMPONENT_SWIZZLE_B;
+    case 3:
+        return VK_COMPONENT_SWIZZLE_A;
+    case 4:
+        return VK_COMPONENT_SWIZZLE_ZERO;
+    case 5:
+        return VK_COMPONENT_SWIZZLE_ONE;
+    default:
+        return VK_COMPONENT_SWIZZLE_IDENTITY;
+    }
+}
+
 static VkSampler a_way_of_reading(uint32_t held) {
     for (uint32_t at = 0; at < ways_of_reading_now; at++) {
         if (ways_of_reading[at].held == held) {
@@ -2172,6 +2203,10 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
         seeing.image = made;
         seeing.viewType = VK_IMAGE_VIEW_TYPE_2D;
         seeing.format = as_a_host_reads_it;
+        seeing.components.r = which_part_is_read(held_how >> XENOLITH_PARTS_SHIFT);
+        seeing.components.g = which_part_is_read(held_how >> (XENOLITH_PARTS_SHIFT + 3u));
+        seeing.components.b = which_part_is_read(held_how >> (XENOLITH_PARTS_SHIFT + 6u));
+        seeing.components.a = which_part_is_read(held_how >> (XENOLITH_PARTS_SHIFT + 9u));
         seeing.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         seeing.subresourceRange.levelCount = 1;
         seeing.subresourceRange.layerCount = 1;
@@ -2215,7 +2250,7 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
     turned[room].down = down;
     turned[room].kept = kept;
     turned[room].held_how = held_how;
-    turned[room].way = a_way_of_reading(held_how);
+    turned[room].way = a_way_of_reading(held_how & XENOLITH_HOW_IT_IS_READ);
     /* How much of a title's memory this was read out of, which is not how much
      * it came to. Where it is kept in squares the run it sits in is as wide as
      * the pitch and as tall as the next whole lot of two and thirty, so one
@@ -4480,8 +4515,9 @@ static uint32_t a_short_float_from_how_far(float away) {
  * writing the whole of what was drawn each time wrote every part over the ones
  * before it.
  *
- * The colours are turned on the way out. What was drawn keeps red first and a
- * title's own memory keeps it the other way about.
+ * The colours go out the way round the hardware keeps them, red last, unless
+ * the copy asks for red and blue to be swapped, which a title asks for where it
+ * means to show what it copies.
  *
  * It goes out in squares rather than row by row, because that is the shape a
  * title reads it back in. The console copies into a picture, and a picture is
@@ -4674,9 +4710,12 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
                 if (copy->as_one_float) {
                     float bright = (float)part_of[0] / 255.0f;
                     memcpy(&colour, &bright, sizeof colour);
-                } else {
+                } else if (copy->red_and_blue_swapped) {
                     colour = (part_of[3] << 24) | (part_of[0] << 16) | (part_of[1] << 8)
                              | part_of[2];
+                } else {
+                    colour = (part_of[3] << 24) | (part_of[2] << 16) | (part_of[1] << 8)
+                             | part_of[0];
                 }
             }
             uint32_t sits = down_to + (at / XENOLITH_A_SQUARE_ACROSS) * XENOLITH_WHAT_A_SQUARE_HOLDS

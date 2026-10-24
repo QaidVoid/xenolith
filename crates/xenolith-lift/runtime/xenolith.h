@@ -782,6 +782,10 @@ void xenolith_clip_to(uint32_t left, uint32_t top, uint32_t right, uint32_t bott
  * on the screen near one another in memory, and squeezed into squares of four
  * by four. A host squeezes them the same way, so what is squeezed is handed over
  * as it is and only the order is undone. Says whether it took.
+ *
+ * How it is held says how it is sampled in its lowest twelve bits, and above
+ * them which part of the picture each of the four a shader reads is, three bits
+ * each in the console's numbering.
  */
 int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t where, uint32_t across,
                                uint32_t down, uint32_t pitch, int in_squares, uint32_t order,
@@ -887,7 +891,8 @@ void xenolith_look_at(const float *scale, const float *offset);
  * colours, and reads that back as a picture to work out haze, fog and what is
  * out of focus. Handed the colours instead it draws none of those, so which of
  * the two is wanted is said here. How far away is kept either as a fraction of
- * the whole or as the console's small float. */
+ * the whole or as the console's small float. A colour goes out red last unless
+ * the copy asks for red and blue to be swapped. */
 struct xenolith_copy {
     uint32_t into;
     uint32_t pitch;
@@ -901,6 +906,7 @@ struct xenolith_copy {
     int as_one_float;
     int from_how_far;
     int how_far_as_a_float;
+    int red_and_blue_swapped;
 };
 
 /* Hands what was drawn back into a title's own memory, as the copy says.
