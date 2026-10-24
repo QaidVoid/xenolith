@@ -877,6 +877,17 @@ void xenolith_done_with_vertices(uint32_t words);
  * reads another particle's. So the shape is drawn by the title's numbers. */
 void xenolith_number_the_vertices(uint32_t at, uint32_t count, uint32_t first);
 
+/* Says how much further away what is drawn next is taken to be when it is
+ * compared with what is already there: a distance added outright, as a
+ * fraction of the whole depth, and one added for each sixteenth of a pixel a
+ * shape slopes away by, which is how the console's polygon offset is said.
+ * Nought for both draws as the shape lies.
+ *
+ * A title draws a light or a mark flat onto a surface it has already drawn,
+ * and pushes it a little nearer so that it is not half hidden by the surface
+ * it lies on. */
+void xenolith_push_away_by(float outright, float along_a_slope);
+
 /* Forgets any picture already turned that came out of memory the title has
  * since written over, so that the next draw reads what is there now. */
 void xenolith_forget_pictures_at(uint32_t where, uint32_t bytes);

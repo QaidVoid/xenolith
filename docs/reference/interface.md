@@ -534,6 +534,18 @@ otherwise has to for a quad, hands the shader numbers the title never gave:
 one that reads a particle's corner and centre at a quarter of its number reads
 another particle's. So the shape is drawn by the title's numbers.
 
+## `xenolith_push_away_by`
+
+Says how much further away what is drawn next is taken to be when it is
+compared with what is already there: a distance added outright, as a fraction
+of the whole depth, and one added for each sixteenth of a pixel a shape slopes
+away by, which is how the console's polygon offset is said. Nought for both
+draws as the shape lies.
+
+A title draws a light or a mark flat onto a surface it has already drawn, and
+pushes it a little nearer so that it is not half hidden by the surface it lies
+on.
+
 ## `xenolith_forget_pictures_at`
 
 Forgets any picture already turned that came out of memory the title has

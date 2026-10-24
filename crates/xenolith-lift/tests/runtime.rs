@@ -6365,6 +6365,126 @@ fn a_constant_read_without_its_sign_is_positive() {
     );
 }
 
+/// A shape drawn where another already lies is drawn over it when the title
+/// pushes it nearer, and is left behind it when the title does not.
+///
+/// Two triangles cover the middle of the frame at the same depth, the first
+/// red and the second green, and the second is drawn only where it is further
+/// away than what is there. Pushed away, it is; left alone, it lies exactly on
+/// the first and fails. Needs a device to draw on, and returns where there is
+/// none.
+#[test]
+fn a_shape_pushed_away_is_drawn_behind_what_lies_on_it() {
+    let run = (2u64 << 44) | (1u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    let max_of = |source: u32| (2u32 << 24) | (source << 16) | (source << 8) | source;
+    let keeps = 50u32 << 26;
+    let exports_every_lane = (1u32 << 15) | (0xf << 16);
+    words.extend([exports_every_lane | keeps, 0, max_of(0)]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    for (name, pushed, wanted) in [
+        ("a_shape_pushed_away", "0.001f", [0u8, 255, 0]),
+        ("a_shape_left_where_it_lies", "0.0f", [255u8, 0, 0]),
+    ] {
+        let program = TWO_TRIANGLES_ONE_PUSHED.replace("PUSHED", pushed);
+        let ran = draw_with(name, &pixel.words, &program).expect("the draw ran");
+        if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+            return;
+        }
+        let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+        let picture =
+            std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+        let middle = a_pixel_of(&picture, 640, 360).expect("the frame is too short");
+        assert_eq!(
+            middle, wanted,
+            "{name}: the middle of the frame is the wrong colour"
+        );
+    }
+}
+
+/// The program [`a_shape_pushed_away_is_drawn_behind_what_lies_on_it`] runs,
+/// pushing the second triangle away by `PUSHED`.
+const TWO_TRIANGLES_ONE_PUSHED: &str = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void put_colour(uint8_t *base, float red, float green) {
+    const float colour[4] = {red, green, 0.0f, 1.0f};
+    for (unsigned lane = 0; lane < 4; lane++) {
+        uint32_t word;
+        memcpy(&word, &colour[lane], 4);
+        xenolith_store32(base, 0x7fc80000u + (0x4000u + 256u * 4u + lane) * 4u, word);
+    }
+}
+
+static int draw(uint8_t *base, const uint32_t *vertex, uint32_t vertex_length,
+                const uint32_t *pixel, uint32_t pixel_length, uint32_t how_far) {
+    xenolith_hand_over_constants(base + 0x7fc80000u + 0x4000u * 4u,
+                                 base + 0x7fc80000u + 0x4900u * 4u,
+                                 base + 0x7fc80000u + 0x4908u * 4u);
+    return xenolith_draw_now(0x00010001u, 0xfu, how_far, XENOLITH_DRAWN_HOWEVER_SOLID, 0u, 0u,
+                             vertex, vertex_length, 0u, pixel, pixel_length, 3u,
+                             XENOLITH_SHAPE_TRIANGLES);
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    if (!xenolith_can_draw()) {
+        printf("no device\n");
+        return 0;
+    }
+
+    uint32_t vertex_length = 0;
+    uint32_t pixel_length = 0;
+    const uint32_t *vertex = xenolith_said(0u, 0u, 0u, &vertex_length);
+    const uint32_t *pixel = xenolith_said(1u, 0u, 0u, &pixel_length);
+    if (!xenolith_begin_a_frame()) { return 3; }
+    /* Both triangles at half the depth, where a step in it is the one the
+     * push is counted in. */
+    const float scale[4] = {640.0f, -360.0f, 0.25f, 1.0f};
+    const float offset[4] = {640.0f, 360.0f, 0.5f, 0.0f};
+    xenolith_look_at(scale, offset);
+    xenolith_clip_to(0u, 0u, 1280u, 720u);
+
+    /* Drawn whatever is there, and saying how far away it is. */
+    put_colour(base, 1.0f, 0.0f);
+    xenolith_push_away_by(0.0f, 0.0f);
+    if (!draw(base, vertex, vertex_length, pixel, pixel_length, 0x2u | 0x4u | (7u << 4))) {
+        return 4;
+    }
+    /* Drawn only where it is further away than what is there. */
+    put_colour(base, 0.0f, 1.0f);
+    xenolith_push_away_by(PUSHED, 0.0f);
+    if (!draw(base, vertex, vertex_length, pixel, pixel_length, 0x2u | (4u << 4))) {
+        return 5;
+    }
+    if (!xenolith_end_a_frame()) { return 6; }
+    if (!xenolith_keep_a_frame("frame.ppm")) { return 7; }
+    printf("drawn\n");
+    return 0;
+}
+"#;
+
 /// A pixel shader that asks for where its pixel is finds it in the register
 /// it asked for, counted in pixels from the top left.
 ///

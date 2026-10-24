@@ -726,6 +726,10 @@ static struct {
     uint32_t numbers_at;
     uint32_t numbers;
     uint32_t first_number;
+    /* How much further away what is drawn next is taken to be, in the
+     * console's terms. */
+    float pushed_outright;
+    float pushed_along_a_slope;
     VkDeviceSize constant_from;
     VkDeviceSize offsets_line_up_on;
     VkImageView view;
@@ -2654,10 +2658,11 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
      * anything else, and one pipeline is made for each pair of shaders. Baking
      * it in would mean a pipeline for every window a title ever asks for, and
      * the wrong one for every draw that came after the window changed. */
-    const VkDynamicState changes[] = {VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VIEWPORT};
+    const VkDynamicState changes[] = {VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VIEWPORT,
+                                      VK_DYNAMIC_STATE_DEPTH_BIAS};
     VkPipelineDynamicStateCreateInfo said_per_draw = {0};
     said_per_draw.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    said_per_draw.dynamicStateCount = 2;
+    said_per_draw.dynamicStateCount = 3;
     said_per_draw.pDynamicStates = changes;
 
     VkPipelineRasterizationStateCreateInfo filling = {0};
@@ -2666,6 +2671,7 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
     filling.cullMode = VK_CULL_MODE_NONE;
     filling.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     filling.lineWidth = 1.0f;
+    filling.depthBiasEnable = VK_TRUE;
 
     VkPipelineMultisampleStateCreateInfo once = {0};
     once.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -2908,6 +2914,11 @@ void xenolith_number_the_vertices(uint32_t at, uint32_t count, uint32_t first) {
     through.numbers_at = at;
     through.numbers = count;
     through.first_number = first;
+}
+
+void xenolith_push_away_by(float outright, float along_a_slope) {
+    through.pushed_outright = outright;
+    through.pushed_along_a_slope = along_a_slope;
 }
 
 /* What the hardware would have done to a position, as this run was told it. */
@@ -5211,6 +5222,11 @@ int xenolith_draw_now_inside(uint32_t blending, uint32_t written, uint32_t how_f
     vkCmdBindPipeline(surface.commands, VK_PIPELINE_BIND_POINT_GRAPHICS, with);
     vkCmdBindDescriptorSets(surface.commands, VK_PIPELINE_BIND_POINT_GRAPHICS, through.layout, 0,
                             1, &through.handed[through.saying_now], 0, NULL);
+    /* A host counts the distance added outright in the smallest step its
+     * depth can take, which for depths from a half to the whole of the
+     * range is one part in two to the twenty fourth. */
+    vkCmdSetDepthBias(surface.commands, through.pushed_outright * 16777216.0f, 0.0f,
+                      through.pushed_along_a_slope / 16.0f);
     if (through.numbers != 0) {
         vkCmdBindIndexBuffer(surface.commands, through.vertices,
                              through.vertex_from + (VkDeviceSize)through.numbers_at * 4u,
@@ -6832,6 +6848,11 @@ void xenolith_number_the_vertices(uint32_t at, uint32_t count, uint32_t first) {
     (void)at;
     (void)count;
     (void)first;
+}
+
+void xenolith_push_away_by(float outright, float along_a_slope) {
+    (void)outright;
+    (void)along_a_slope;
 }
 
 void xenolith_move_a_position_by(const float *scale, const float *offset) {

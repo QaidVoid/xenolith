@@ -185,6 +185,14 @@ static void said_nothing_of_a_shader(uint32_t sum, uint32_t words) {
 #define XENOLITH_WINDOW_OFFSET 0x2080u
 #define XENOLITH_HOW_SHAPES_ARE_FILLED 0x2205u
 #define XENOLITH_CORNERS_ARE_MOVED (1u << 16)
+
+/* Whether the faces turned towards and away from the viewer are pushed away
+ * before they are compared, and where each kind says how far: how much for
+ * each step a face slopes away by, then how much outright. */
+#define XENOLITH_FRONTS_ARE_PUSHED (1u << 11)
+#define XENOLITH_BACKS_ARE_PUSHED (1u << 12)
+#define XENOLITH_PUSHED_FRONTS 0x2380u
+#define XENOLITH_PUSHED_BACKS 0x2382u
 #define XENOLITH_KEPT_WHERE_IT_IS (1u << 31)
 
 /* One of the two halves of a place's move, which are fifteen bits each and
@@ -492,6 +500,25 @@ static void say_how_a_position_moves(const uint8_t *base) {
         memcpy(&moved_depth_by, &held, sizeof moved_depth_by);
         held = xenolith_load32(base, XENOLITH_REGISTERS + 0x2114u * 4u);
         memcpy(&moved_depth_to, &held, sizeof moved_depth_to);
+    }
+
+    /* How far a title pushes what it draws next away, for the faces it says
+     * to: the ones facing it first, and otherwise the ones facing away. A host
+     * here draws both kinds of face alike, so one of the two is what is used. */
+    {
+        uint32_t filled = register_says(base, XENOLITH_HOW_SHAPES_ARE_FILLED);
+        uint32_t pushes = (filled & XENOLITH_FRONTS_ARE_PUSHED) != 0  ? XENOLITH_PUSHED_FRONTS
+                          : (filled & XENOLITH_BACKS_ARE_PUSHED) != 0 ? XENOLITH_PUSHED_BACKS
+                                                                       : 0u;
+        float along_a_slope = 0.0f;
+        float outright = 0.0f;
+        if (pushes != 0) {
+            uint32_t held = register_says(base, pushes);
+            memcpy(&along_a_slope, &held, sizeof along_a_slope);
+            held = register_says(base, pushes + 1u);
+            memcpy(&outright, &held, sizeof outright);
+        }
+        xenolith_push_away_by(outright, along_a_slope);
     }
 
     float scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
