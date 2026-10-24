@@ -831,8 +831,7 @@ static uint32_t a_corner_named(const uint8_t *base, uint32_t listed_at, int wide
     if (wide) {
         return xenolith_load32(base, listed_at + which * 4u);
     }
-    uint32_t pair = xenolith_load32(base, listed_at + (which / 2u) * 4u);
-    return (which % 2u) == 0u ? (pair >> 16) : (pair & 0xffffu);
+    return xenolith_load16(base, listed_at + which * 2u);
 }
 
 static uint32_t breaks_a_run(int wide) {
@@ -1699,7 +1698,13 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
              * of sits, for the draws that name one. The two bits saying
              * where a draw takes its order from say nought for a list kept
              * in memory, and the bit above the count says whether each
-             * number is four bytes rather than two. */
+             * number is four bytes rather than two.
+             *
+             * A list of two byte numbers starts on any two bytes. A title
+             * keeps many lists end to end in one buffer, and one starting
+             * halfway into a word read from the word's start takes the last
+             * number of the list before it as its own first corner, turning
+             * every triangle of a run into a spike across the scene. */
             uint32_t listed_at = 0;
             uint32_t listed_count = 0;
             uint32_t comes_to = 0;
@@ -1707,8 +1712,9 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
             int listed_wide = 0;
             if (opcode == XENOLITH_PACKET_DRAW_INDEXED && ((how >> 6) & 3u) == 0u
                 && follows >= 4) {
-                listed_at = xenolith_load32(base, stream + (at + 3) * 4) & ~3u;
                 listed_wide = (int)((how >> 11) & 1u);
+                listed_at = xenolith_load32(base, stream + (at + 3) * 4)
+                            & (listed_wide ? ~3u : ~1u);
                 listed_count = how >> 16;
                 look_over_the_list(base, listed_at, listed_wide, listed_count, &comes_to,
                                    &furthest);
