@@ -103,6 +103,15 @@ pub const IMAGE_SAMPLE_IMPLICIT_LOD: u16 = 87;
 /// `OpImageSampleExplicitLod`: reads a picture at a level the shader states.
 pub const IMAGE_SAMPLE_EXPLICIT_LOD: u16 = 88;
 
+/// `OpImage`: the picture a picture and how to read it hold.
+pub const IMAGE: u16 = 100;
+
+/// `OpImageQuerySizeLod`: how many texels across and down one level of a picture is.
+pub const IMAGE_QUERY_SIZE_LOD: u16 = 103;
+
+/// `OpImageQueryLod`: the level the driver would read a picture at, at a place.
+pub const IMAGE_QUERY_LOD: u16 = 105;
+
 /// `OpConvertFToU`: a number with a point in it as an unsigned whole number.
 pub const CONVERT_FLOAT_TO_UNSIGNED: u16 = 109;
 

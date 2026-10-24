@@ -10,7 +10,9 @@
 //! into the module, and the instruction translation works inside that.
 
 use crate::Kind;
-use crate::bindings::{what_a_fetch_reads, what_a_shader_is_handed, what_a_shader_looks_at};
+use crate::bindings::{
+    Pictures, what_a_fetch_reads, what_a_shader_is_handed, what_a_shader_looks_at,
+};
 use crate::constants::{
     DRAWN_WHATEVER_IT_IS, KEPT_AS_A_FRACTION, NO_REGISTER, REGISTERS, SAID_WHEN_BUILT,
     WHAT_IT_IS_AGAINST, WHERE_THE_PIXEL_GOES, WHICH_TEST,
@@ -65,7 +67,7 @@ pub(crate) struct Named {
     pub(crate) previous_kept: crate::spirv::Name,
     pub(crate) exported_kept: crate::spirv::Name,
     /// The pictures a shader was handed, named only where it reads one.
-    pub(crate) looked_at: Option<(crate::spirv::Name, crate::spirv::Name, crate::spirv::Name)>,
+    pub(crate) looked_at: Option<Pictures>,
     /// The test a title sets on how solid a place has to be to be drawn at all,
     /// named for a pixel shader only: which test it is, and what it is against.
     pub(crate) cutoff: Option<(crate::spirv::Name, crate::spirv::Name)>,
@@ -82,10 +84,16 @@ pub(crate) fn what_the_module_is(
     extended: crate::spirv::Name,
     out: crate::spirv::Name,
     types: &[crate::spirv::Name; 4],
+    samples: bool,
 ) -> u32 {
     let [void, signature, float, four] = *types;
 
     module.add_early(17, &[1]);
+    /* Asking how big a picture is, and which of its levels a place reads,
+     * which a shader that blends a picture's texels itself does. */
+    if samples {
+        module.add_early(17, &[50]);
+    }
     module.add_early_with_text(
         opcodes::EXT_INST_IMPORT,
         &[extended.number()],
@@ -175,7 +183,14 @@ pub(crate) fn preamble(
     let entry = module.name();
     let body = module.name();
 
-    let model = what_the_module_is(module, kind, extended, out, &[void, signature, float, four]);
+    let model = what_the_module_is(
+        module,
+        kind,
+        extended,
+        out,
+        &[void, signature, float, four],
+        samples,
+    );
 
     let two = module.name();
     module.add(opcodes::TYPE_VECTOR, &[two.number(), float.number(), 2]);
@@ -394,6 +409,17 @@ pub(crate) fn preamble(
         opcodes::VARIABLE,
         &[to_one.number(), exported_kept.number(), 7, nothing.number()],
     );
+    if let Some(pictures) = looked_at {
+        module.add(
+            opcodes::VARIABLE,
+            &[
+                to_float.number(),
+                pictures.level.number(),
+                7,
+                no_number.number(),
+            ],
+        );
+    }
 
     what_a_shader_starts_with(
         module,

@@ -75,7 +75,14 @@ pub(crate) fn what_the_fetches_need(words: &[u32], running: &[Step]) -> Result<F
          * read, since that is worked out from how fast the place being read
          * moves across the screen and nothing moves across a screen before
          * there is one; so it says which to read instead, further down. */
-        if fetch.kind() == FetchKind::Texture {
+        if fetch.kind() == FetchKind::SetLevel {
+            samples = true;
+            continue;
+        }
+        if matches!(
+            fetch.kind(),
+            FetchKind::Texture | FetchKind::Level | FetchKind::Weights
+        ) {
             samples = true;
             let which = u32::from(fetch.constant());
             if !pictures.contains(&which) {

@@ -45,6 +45,9 @@ thing written, because what it says is not one subject:
   operations everything else is written from. `arithmetic.rs` is the four lane
   half, `single_lane.rs` the single lane half, `fetching.rs` the fetches, and
   `plan.rs` reads a shader ahead of writing it to find what a fetch needs named.
+  `picture.rs` reads a picture, and answers what a shader blending a picture's
+  texels itself asks: which level a place reads at, how far between texels it
+  lies, and reading at a level the shader says.
 - `dispatch.rs` writes one instruction out and gives the two ways of reaching
   instructions, straight through and jumping. `translate.rs` holds the result
   types and the reasons a shader is refused.

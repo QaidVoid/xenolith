@@ -145,6 +145,24 @@ pub(crate) fn what_a_shader_is_handed(
     (constants, to_constant)
 }
 
+/// The pictures a shader was handed, and what reading one needs named.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pictures {
+    /// Every place a picture is kept, one after another.
+    pub(crate) all: crate::spirv::Name,
+    /// The type of a pointer to one of them.
+    pub(crate) to_one: crate::spirv::Name,
+    /// The type of one of them, together with the way it is read.
+    pub(crate) read_one: crate::spirv::Name,
+    /// The type of one of them alone.
+    pub(crate) picture: crate::spirv::Name,
+    /// The type of two whole numbers, which is what a picture's size is said in.
+    pub(crate) two_whole: crate::spirv::Name,
+    /// Where a level a shader says to read later pictures at is kept, made
+    /// where the function begins.
+    pub(crate) level: crate::spirv::Name,
+}
+
 /// What a shader reads a picture through.
 ///
 /// A texture is not memory a shader works an address into. It is read through
@@ -156,7 +174,7 @@ pub(crate) fn what_a_shader_looks_at(
     module: &mut Module,
     float: crate::spirv::Name,
     count: crate::spirv::Name,
-) -> (crate::spirv::Name, crate::spirv::Name, crate::spirv::Name) {
+) -> Pictures {
     let picture = module.name();
     module.add(
         opcodes::TYPE_IMAGE,
@@ -183,16 +201,28 @@ pub(crate) fn what_a_shader_looks_at(
         opcodes::TYPE_POINTER,
         &[to_all.number(), 0, all_of_them.number()],
     );
-    let looked_at = module.name();
-    module.add(opcodes::VARIABLE, &[to_all.number(), looked_at.number(), 0]);
-    module.annotate(71, &[looked_at.number(), 34, 0]);
-    module.annotate(71, &[looked_at.number(), 33, 2]);
+    let all = module.name();
+    module.add(opcodes::VARIABLE, &[to_all.number(), all.number(), 0]);
+    module.annotate(71, &[all.number(), 34, 0]);
+    module.annotate(71, &[all.number(), 33, 2]);
 
     let to_one = module.name();
     module.add(
         opcodes::TYPE_POINTER,
         &[to_one.number(), 0, read_one.number()],
     );
+    let two_whole = module.name();
+    module.add(
+        opcodes::TYPE_VECTOR,
+        &[two_whole.number(), count.number(), 2],
+    );
 
-    (looked_at, to_one, read_one)
+    Pictures {
+        all,
+        to_one,
+        read_one,
+        picture,
+        two_whole,
+        level: module.name(),
+    }
 }

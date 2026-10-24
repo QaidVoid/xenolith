@@ -38,6 +38,7 @@ mod flow;
 mod layout;
 pub mod opcodes;
 mod operands;
+mod picture;
 mod plan;
 mod preamble;
 #[allow(unsafe_code)]

@@ -11,10 +11,14 @@
 
 use crate::opcodes;
 use crate::operands::read_whole;
+use crate::picture::{
+    Runs, how_far_between_texels, look_at_a_picture, read_pictures_at_a_level,
+    the_level_a_place_reads, whether_a_fetch_runs,
+};
 use crate::preamble::Named;
 use crate::spirv::Module;
 use crate::values::extract;
-use crate::{ALU_WORDS, Fetch, FetchKind, Format, Kind, Refused};
+use crate::{ALU_WORDS, Fetch, FetchKind, Format, Refused};
 
 /// Reads one word out of the window on a title's memory.
 pub(crate) fn one_word(module: &mut Module, named: &Named, at: u32) -> u32 {
@@ -431,136 +435,6 @@ pub(crate) fn go_and_get(
     Ok(())
 }
 
-/// Reads a picture at the place a register names.
-///
-/// Where in the picture to read is a pair of numbers running from nothing to one
-/// across it, which is how the hardware counts and how a host counts too, so
-/// they are handed over as they were found. How far down the sizes of the
-/// picture to read is not said by anything: it follows from how fast the place
-/// being read moves from one part of the screen to the next, and the hardware a
-/// host has works that out itself.
-///
-/// # Errors
-///
-/// Reports [`Refused`] where the shader names a picture or a register this has
-/// no reading of.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn look_at_a_picture(
-    module: &mut Module,
-    named: &Named,
-    fetch: Fetch,
-) -> Result<(), Refused> {
-    let (looked_at, to_one, read_one) = named.looked_at.ok_or(Refused::Fetch)?;
-
-    let where_in_it = read_whole(module, named, fetch.source(), true);
-    let across = module.name();
-    module.add(
-        opcodes::VECTOR_SHUFFLE,
-        &[
-            named.two.number(),
-            across.number(),
-            where_in_it,
-            where_in_it,
-            0,
-            1,
-        ],
-    );
-
-    let which = named
-        .numbers
-        .get(&u32::from(fetch.constant()))
-        .ok_or(Refused::Fetch)?;
-    let at = module.name();
-    module.add(
-        opcodes::ACCESS_CHAIN,
-        &[
-            to_one.number(),
-            at.number(),
-            looked_at.number(),
-            which.number(),
-        ],
-    );
-    let reading = module.name();
-    module.add(
-        opcodes::LOAD,
-        &[read_one.number(), reading.number(), at.number()],
-    );
-
-    let got = module.name();
-    if matches!(named.kind, Kind::Vertex) {
-        /* Reading the whole picture rather than a smaller copy of it, said
-         * outright because nothing here can be worked out from the screen. */
-        module.add(
-            opcodes::IMAGE_SAMPLE_EXPLICIT_LOD,
-            &[
-                named.four.number(),
-                got.number(),
-                reading.number(),
-                across.number(),
-                2,
-                named.no_number.number(),
-            ],
-        );
-    } else {
-        module.add(
-            opcodes::IMAGE_SAMPLE_IMPLICIT_LOD,
-            &[
-                named.four.number(),
-                got.number(),
-                reading.number(),
-                across.number(),
-            ],
-        );
-    }
-
-    /* Which of the four numbers read the fetch puts where, and which it leaves
-     * alone. A shader that reads three pictures into three lanes of one
-     * register says so here and nowhere else, so writing the whole of what was
-     * read leaves only the last of the three: the other two are read and thrown
-     * away, and what the shader goes on to work out is two thirds wrong. */
-    let already = read_whole(module, named, fetch.destination(), true);
-    let swizzle = fetch.destination_swizzle();
-    let mut parts = Vec::new();
-    for step in 0..4u32 {
-        let says = u32::from((swizzle >> (step * 3)) & 7);
-        let part = module.name();
-        let (from, lane) = match says {
-            0..=3 => (got.number(), says),
-            5 => (named.all_ones.number(), step),
-            7 => (already, step),
-            _ => (named.nothing.number(), step),
-        };
-        module.add(
-            opcodes::COMPOSITE_EXTRACT,
-            &[named.float.number(), part.number(), from, lane],
-        );
-        parts.push(part.number());
-    }
-
-    let put = module.name();
-    let mut making = vec![named.four.number(), put.number()];
-    making.extend(parts);
-    module.add(opcodes::COMPOSITE_CONSTRUCT, &making);
-
-    let into = named
-        .indices
-        .get(usize::from(fetch.destination() % 64))
-        .ok_or(Refused::Fetch)?;
-    let where_to = module.name();
-    module.add(
-        opcodes::ACCESS_CHAIN,
-        &[
-            named.to_one.number(),
-            where_to.number(),
-            named.registers.number(),
-            into.number(),
-        ],
-    );
-    module.add(opcodes::STORE, &[where_to.number(), put.number()]);
-
-    Ok(())
-}
-
 /// Writes whichever of the two kinds of going and getting an instruction is.
 ///
 /// A fetch either reads a picture through the hardware that knows how one is
@@ -576,6 +450,7 @@ pub(crate) fn go_and_fetch(
     words: &[u32],
     which: usize,
     carried_over: &mut Option<(u32, u32)>,
+    runs: Runs,
 ) -> Result<(), Refused> {
     let Some(fetch) = Fetch::at(
         words,
@@ -584,8 +459,13 @@ pub(crate) fn go_and_fetch(
         return Err(Refused::NotAShader);
     };
 
-    if fetch.kind() == FetchKind::Texture {
-        return look_at_a_picture(module, named, fetch);
+    let runs = whether_a_fetch_runs(module, named, fetch, runs);
+    match fetch.kind() {
+        FetchKind::Texture => return look_at_a_picture(module, named, fetch, runs),
+        FetchKind::Level => return the_level_a_place_reads(module, named, fetch, runs),
+        FetchKind::Weights => return how_far_between_texels(module, named, fetch, runs),
+        FetchKind::SetLevel => return read_pictures_at_a_level(module, named, fetch, runs),
+        FetchKind::Vertex | FetchKind::Unknown(_) => {}
     }
 
     let (slot, stride) = what_it_reads_from(fetch, carried_over)?;

@@ -19,6 +19,14 @@ pub enum FetchKind {
     Vertex,
     /// A texture, which needs a sampler rather than an address.
     Texture,
+    /// Which of a texture's levels the hardware would read at a place, which
+    /// a shader asks for to choose one itself.
+    Level,
+    /// How far a place lies between the texels about it, across and down,
+    /// which is what a shader blending them itself weighs them by.
+    Weights,
+    /// Says which level of a texture the fetches after it that ask read at.
+    SetLevel,
     /// A number this crate has no reading of.
     Unknown(u8),
 }
@@ -28,6 +36,9 @@ impl FetchKind {
         match bits {
             0 => Self::Vertex,
             1 => Self::Texture,
+            17 => Self::Level,
+            19 => Self::Weights,
+            24 => Self::SetLevel,
             other => Self::Unknown(other),
         }
     }
@@ -177,6 +188,41 @@ impl Fetch {
     #[must_use]
     pub fn source_component(self) -> u8 {
         ((self.first >> 30) & 0x3) as u8
+    }
+
+    /// Which of the source register's four numbers each of the places a
+    /// picture is read at comes from, two bits for each in turn.
+    #[must_use]
+    pub fn source_swizzle(self) -> u8 {
+        ((self.first >> 26) & 0x3f) as u8
+    }
+
+    /// How far from the place it names a texture fetch reads, across and
+    /// down, in halves of a texel.
+    #[must_use]
+    pub fn moved_by(self) -> (i32, i32) {
+        let across = i32::from_ne_bytes((self.third << 11).to_ne_bytes()) >> 27;
+        let down = i32::from_ne_bytes((self.third << 6).to_ne_bytes()) >> 27;
+        (across, down)
+    }
+
+    /// Whether a texture fetch reads at the level a shader last said rather
+    /// than one the hardware chooses.
+    #[must_use]
+    pub fn reads_at_the_level_said(self) -> bool {
+        (self.second >> 29) & 1 == 1
+    }
+
+    /// Whether this runs only where the predicate is one way.
+    #[must_use]
+    pub fn is_predicated(self) -> bool {
+        (self.second >> 31) & 1 == 1
+    }
+
+    /// Which way the predicate has to be for a predicated fetch to run.
+    #[must_use]
+    pub fn predicate_holds(self) -> bool {
+        (self.third >> 31) & 1 == 1
     }
 
     /// The register what this brings back is put in.

@@ -13,6 +13,7 @@ use crate::fetching::go_and_fetch;
 use crate::layout::{Asking, Step, Stretch, WhereNext, stretches, stretches_that_jump};
 use crate::opcodes;
 use crate::operands::{read, read_a_constant};
+use crate::picture::Runs;
 use crate::plan::{Fetches, what_the_fetches_need};
 use crate::preamble::{Named, preamble};
 use crate::single_lane::{put_it_where_it_goes, single_lane, whether_it_runs};
@@ -42,7 +43,11 @@ fn one_instruction(
 ) -> Result<(), Refused> {
     let one = step.at;
     if step.fetches {
-        go_and_fetch(module, named, words, one, &mut carrying.carried_over)?;
+        let runs = Runs {
+            under: step.under,
+            predicate: carrying.predicate,
+        };
+        go_and_fetch(module, named, words, one, &mut carrying.carried_over, runs)?;
         return Ok(());
     }
 
