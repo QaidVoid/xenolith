@@ -468,6 +468,9 @@ xdg-shell-protocol.c:
 %.o: %.c lifted.h xenolith.h $(MADE)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# The runtime takes these in whole rather than having them built on their own.
+xenolith.o: drawing.c command_stream.c sound.c
+
 clean:
 	rm -f $(OBJECTS) $(MADE) lifted
 
