@@ -293,6 +293,10 @@ static void said_nothing_of_a_picture(uint32_t format) {
 
 #define XENOLITH_ALREADY_DIVIDED 0x100u
 
+/* How far across and down a draw in pixels is looked at, which is more than any
+ * grid of samples and no more than every host takes. */
+#define XENOLITH_PIXELS_STRETCH 4096.0f
+
 /* How many samples a place keeps for each of its pixels, in the two bits above
  * its row width: one, two or four. */
 #define XENOLITH_SAMPLES_SHIFT 16u
@@ -494,37 +498,42 @@ static void say_how_a_position_moves(const uint8_t *base) {
         return;
     }
 
-    /* Everything below leaves a position where the shader put it, and with the
-     * hardware told to do nothing to it, where the shader put it is a pixel:
-     * the parts the hardware would have applied are what turn a position
-     * between one and minus one into one. So what is looked at maps a position
-     * straight onto the pixel of that number. The console puts a pixel's middle
-     * on the whole number, where a host puts it half way between two, so half a
-     * pixel is added; and the samples grid is what is drawn onto.
+    /* Everything below is a position the hardware is told to do nothing to,
+     * which makes where the shader put it a pixel: the parts the hardware would
+     * have applied are what turn a position between one and minus one into one.
+     * A host does turn it into one, and keeps nothing outside the stretch it
+     * was told to draw onto, so a stretch larger than any grid of samples is
+     * looked at and each pixel is brought to where the host will put it back.
+     * The console puts a pixel's middle on the whole number, where a host puts
+     * it half way between two, so half a pixel is added; and the samples grid
+     * is what is drawn onto.
      *
-     * Read as between one and minus one instead, a rectangle a title draws over
-     * the whole of a place in pixels lands almost entirely off the edge, and
-     * the corner that is left is all that is drawn. */
+     * Looking at a stretch the size of one pixel instead, and leaving the
+     * position as it was, put the pixels in the right places and kept only the
+     * few of them inside that stretch: a title wiping the screen with a
+     * rectangle in pixels wiped a corner, and a film drawn over it after was
+     * thrown away as further off than the wipe that never reached it. */
     {
-        const float onto_pixels[4] = {(float)samples_across, (float)samples_down, 1.0f, 1.0f};
-        const float half_a_pixel[4] = {(0.5f + (float)corners_across) * (float)samples_across,
-                                       (0.5f + (float)corners_down) * (float)samples_down, 0.0f,
-                                       0.0f};
-        xenolith_look_at(onto_pixels, half_a_pixel);
-    }
+        const float half = XENOLITH_PIXELS_STRETCH / 2.0f;
+        const float stretch[4] = {half, half, 1.0f, 1.0f};
+        const float middle[4] = {half, half, 0.0f, 0.0f};
+        xenolith_look_at(stretch, middle);
 
-    if ((how & XENOLITH_ALREADY_DIVIDED) != 0) {
-        /* The shader has divided its position through already, so what it put
-         * out is between one and minus one and wants leaving where it is. What
-         * it must not meet is a host dividing it a second time, so the fourth
-         * is made one. */
-        const float as_it_stands[4] = {1.0f, 1.0f, 1.0f, 0.0f};
-        const float and_the_fourth_one[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-        xenolith_move_a_position_by(as_it_stands, and_the_fourth_one);
-        return;
+        float onto_pixels[4] = {(float)samples_across / half, (float)samples_down / half, 1.0f,
+                                1.0f};
+        float half_a_pixel[4] = {(0.5f + (float)corners_across) * (float)samples_across / half -
+                                     1.0f,
+                                 (0.5f + (float)corners_down) * (float)samples_down / half - 1.0f,
+                                 0.0f, 0.0f};
+        if ((how & XENOLITH_ALREADY_DIVIDED) != 0) {
+            /* The shader has divided its position through already, so what it
+             * must not meet is a host dividing it a second time: the fourth is
+             * made one. */
+            onto_pixels[3] = 0.0f;
+            half_a_pixel[3] = 1.0f;
+        }
+        xenolith_move_a_position_by(onto_pixels, half_a_pixel);
     }
-
-    xenolith_move_a_position_by(scale, offset);
 }
 
 static void say_what_was_drawn(uint32_t shape, uint32_t vertices, uint32_t vertex_shader,
