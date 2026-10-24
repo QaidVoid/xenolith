@@ -426,6 +426,13 @@ what it names now cannot be read, that is another of the title's own pictures
 drawn in its stead, which looks like a drawing gone wrong rather than like
 something not being read.
 
+## `xenolith_send_what_was_drawn`
+
+Hands over everything recorded so far without waiting for it to run, so that
+the device draws it while the next is recorded. What copies among it read
+reaches memory once a later wait, or a picture made out of that memory, asks
+for it.
+
 ## `xenolith_what_a_copy_reaches`
 
 How many bytes from where a copy starts it writes over, given the pitch it

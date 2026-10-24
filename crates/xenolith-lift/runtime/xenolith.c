@@ -2368,10 +2368,10 @@ static void *drain_the_ring(void *given) {
     while (graphics.read_back_at != 0) {
         uint32_t written = xenolith_load32(base, XENOLITH_RING_WRITE_POINTER);
         /* Nothing new written means a title waiting rather than writing, so
-         * what was recorded is handed over, and the copies in it reach memory
-         * before the title looks. */
+         * what was recorded is handed over for the device to get on with, and
+         * the copies of whatever has already run reach memory. */
         if (written == consumed) {
-            xenolith_wait_for_what_was_drawn();
+            xenolith_send_what_was_drawn();
         }
         consume_the_ring(base, written);
         xenolith_store32(base, graphics.read_back_at, consumed);

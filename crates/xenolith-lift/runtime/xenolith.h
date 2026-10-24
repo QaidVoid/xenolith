@@ -940,6 +940,12 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
  * memory holds what was copied once this has been asked for. */
 int xenolith_wait_for_what_was_drawn(void);
 
+/* Hands over everything recorded so far without waiting for it to run, so
+ * that the device draws it while the next is recorded. What copies among it
+ * read reaches memory once a later wait, or a picture made out of that memory,
+ * asks for it. */
+int xenolith_send_what_was_drawn(void);
+
 /* What is held down on the keyboard, as a controller's buttons and the two
  * thumbsticks. Returns zero where there is no window to read one from. */
 int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs);

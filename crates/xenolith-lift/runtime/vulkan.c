@@ -111,6 +111,12 @@ static int painting_over_everything(void) {
  * be rewritten under a draw that already used it. */
 #define XENOLITH_SAYINGS 4096
 
+/* How many lots of recorded commands there are, so that one can be recorded
+ * while the device runs the one before. Everything a lot's commands read while
+ * they run is kept apart for each lot, and a lot is only recorded into again
+ * once the device has finished with it. */
+#define XENOLITH_LOTS 2u
+
 static struct {
     VkInstance instance;
     VkPhysicalDevice adapter;
@@ -326,6 +332,31 @@ static int open_something_to_draw_with(void) {
  * surface is shown, which is what a title drawing at the display's size wants. */
 static uint32_t drawn_across;
 static uint32_t drawn_down;
+
+/* Each lot's own commands, how the device says it has run them, and what it
+ * has to keep until it has: the room a picture was handed over through. Pictures
+ * are handed over in a lot of their own that runs just before the lot's other
+ * commands, so that setting one up neither waits for the lot before nor breaks
+ * into the frame being recorded. */
+#define XENOLITH_HELD_FOR_A_LOT 1024u
+
+static struct {
+    VkCommandBuffer main;
+    VkCommandBuffer before;
+    int before_open;
+    VkFence done;
+    int in_flight;
+    unsigned long sent_at;
+    VkBuffer held[XENOLITH_HELD_FOR_A_LOT];
+    VkDeviceMemory held_memory[XENOLITH_HELD_FOR_A_LOT];
+    uint32_t holding;
+} lots[XENOLITH_LOTS];
+
+/* Which lot is being recorded into, or is next to be, and which was handed
+ * over last. */
+static uint32_t current_lot;
+static uint32_t last_sent_lot;
+static unsigned long lots_sent;
 
 /* What is drawn into, made once and kept. */
 static struct {
@@ -591,10 +622,17 @@ static int make_somewhere_to_draw(void) {
     one.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     one.commandBufferCount = 1;
 
-    if (vkAllocateCommandBuffers(drawing.device, &one, &surface.commands) != VK_SUCCESS) {
-        surface.refused = 1;
-        return 0;
+    VkFenceCreateInfo telling = {0};
+    telling.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    for (uint32_t lot = 0; lot < XENOLITH_LOTS; lot++) {
+        if (vkAllocateCommandBuffers(drawing.device, &one, &lots[lot].main) != VK_SUCCESS
+            || vkAllocateCommandBuffers(drawing.device, &one, &lots[lot].before) != VK_SUCCESS
+            || vkCreateFence(drawing.device, &telling, NULL, &lots[lot].done) != VK_SUCCESS) {
+            surface.refused = 1;
+            return 0;
+        }
     }
+    surface.commands = lots[0].main;
 
     surface.made = 1;
     fprintf(stderr, "xenolith: drawing into %u by %u\n", XENOLITH_GRID_ACROSS, XENOLITH_GRID_DOWN);
@@ -669,7 +707,7 @@ static struct {
      * is told the thing it was given has changed underneath it, and every draw
      * in the frame ends up reading whatever the last one said. So each saying
      * takes the next of these and leaves the ones already spoken for alone. */
-    VkDescriptorSet handed[XENOLITH_SAYINGS];
+    VkDescriptorSet handed[XENOLITH_SAYINGS * XENOLITH_LOTS];
     uint32_t saying_now;
     VkBuffer constants;
     VkDeviceMemory constant_memory;
@@ -782,6 +820,7 @@ static uint32_t sayings_taken;
  * frame handed over and waited for again and again. */
 static int anything_recorded;
 
+
 /* How many lots have been begun, which is how a picture says which one put a
  * copy into it. */
 static unsigned long batches_begun;
@@ -802,16 +841,16 @@ static struct {
     VkImage image;
     VkDeviceMemory memory;
     VkImageView view;
-} to_let_go_of[XENOLITH_LET_GO_OF];
-static uint32_t letting_go;
+} to_let_go_of[XENOLITH_LOTS][XENOLITH_LET_GO_OF];
+static uint32_t letting_go[XENOLITH_LOTS];
 
-static void let_go_of_what_is_finished(void) {
-    for (uint32_t at = 0; at < letting_go; at++) {
-        vkDestroyImageView(drawing.device, to_let_go_of[at].view, NULL);
-        vkDestroyImage(drawing.device, to_let_go_of[at].image, NULL);
-        vkFreeMemory(drawing.device, to_let_go_of[at].memory, NULL);
+static void let_go_of_what_is_finished(uint32_t lot) {
+    for (uint32_t at = 0; at < letting_go[lot]; at++) {
+        vkDestroyImageView(drawing.device, to_let_go_of[lot][at].view, NULL);
+        vkDestroyImage(drawing.device, to_let_go_of[lot][at].image, NULL);
+        vkFreeMemory(drawing.device, to_let_go_of[lot][at].memory, NULL);
     }
-    letting_go = 0;
+    letting_go[lot] = 0;
 }
 
 /* What a stretch of a title's memory adds up to.
@@ -1082,20 +1121,43 @@ static pthread_mutex_t one_drawing = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 static int xenolith_begin_a_frame_inside(void);
 static int xenolith_end_a_frame_inside(void);
 static int hand_over_what_was_recorded(void);
-static int a_copy_is_still_to_write(uint32_t from, uint32_t over);
+static int send_what_was_recorded(void);
+static VkCommandBuffer commands_to_set_up_with(void);
+static void hold_until_it_has_run(VkBuffer buffer, VkDeviceMemory memory);
+static int a_copy_is_still_to_write(uint32_t lot, uint32_t from, uint32_t over);
+static void wait_for_copies_into(uint32_t from, uint32_t over);
 
 /* Lets go of a picture once what has been recorded has run, handing that over
  * first where there is no room left to wait. */
 static void let_go_once_it_has_run(VkImage image, VkDeviceMemory memory, VkImageView view) {
     pthread_mutex_lock(&one_drawing);
-    if (letting_go >= XENOLITH_LET_GO_OF) {
+    /* Kept by the last lot that may read it: the one being recorded, or the
+     * one handed over last, which runs after every lot before it. */
+    uint32_t lot = batch_open || lots_sent == 0 ? current_lot : last_sent_lot;
+    if (letting_go[lot] >= XENOLITH_LET_GO_OF) {
         hand_over_what_was_recorded();
+        lot = current_lot;
     }
-    to_let_go_of[letting_go].image = image;
-    to_let_go_of[letting_go].memory = memory;
-    to_let_go_of[letting_go].view = view;
-    letting_go++;
+    to_let_go_of[lot][letting_go[lot]].image = image;
+    to_let_go_of[lot][letting_go[lot]].memory = memory;
+    to_let_go_of[lot][letting_go[lot]].view = view;
+    letting_go[lot]++;
     pthread_mutex_unlock(&one_drawing);
+}
+
+/* Keeps the room a picture was handed over through until the lot that hands it
+ * over has run. */
+static void hold_until_it_has_run(VkBuffer buffer, VkDeviceMemory memory) {
+    uint32_t lot = current_lot;
+    if (lots[lot].holding >= XENOLITH_HELD_FOR_A_LOT) {
+        hand_over_what_was_recorded();
+        vkDestroyBuffer(drawing.device, buffer, NULL);
+        vkFreeMemory(drawing.device, memory, NULL);
+        return;
+    }
+    lots[lot].held[lots[lot].holding] = buffer;
+    lots[lot].held_memory[lots[lot].holding] = memory;
+    lots[lot].holding++;
 }
 static int xenolith_draw_now_inside(uint32_t blending, uint32_t written, uint32_t how_far,
                                     uint32_t cut_off, uint32_t cut_off_at, uint32_t vertex_sum,
@@ -1823,7 +1885,7 @@ static int make_what_a_frame_goes_through(void) {
 
     VkBufferCreateInfo holding_constants = {0};
     holding_constants.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    holding_constants.size = XENOLITH_CONSTANT_ROOM;
+    holding_constants.size = (VkDeviceSize)XENOLITH_CONSTANT_ROOM * XENOLITH_LOTS;
     holding_constants.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     holding_constants.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -1835,7 +1897,7 @@ static int make_what_a_frame_goes_through(void) {
 
     VkBufferCreateInfo holding_vertices = {0};
     holding_vertices.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    holding_vertices.size = XENOLITH_VERTEX_ROOM;
+    holding_vertices.size = (VkDeviceSize)XENOLITH_VERTEX_ROOM * XENOLITH_LOTS;
     holding_vertices.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     holding_vertices.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -1885,9 +1947,11 @@ static int make_what_a_frame_goes_through(void) {
      * unmapping around each write costs more than the writing does. */
     void *vertex_room = NULL;
     void *constant_room = NULL;
-    if (vkMapMemory(drawing.device, through.vertex_memory, 0, XENOLITH_VERTEX_ROOM, 0, &vertex_room)
+    if (vkMapMemory(drawing.device, through.vertex_memory, 0,
+                    (VkDeviceSize)XENOLITH_VERTEX_ROOM * XENOLITH_LOTS, 0, &vertex_room)
             != VK_SUCCESS
-        || vkMapMemory(drawing.device, through.constant_memory, 0, XENOLITH_CONSTANT_ROOM, 0,
+        || vkMapMemory(drawing.device, through.constant_memory, 0,
+                       (VkDeviceSize)XENOLITH_CONSTANT_ROOM * XENOLITH_LOTS, 0,
                        &constant_room)
                != VK_SUCCESS) {
         through.refused = 1;
@@ -1908,15 +1972,15 @@ static int make_what_a_frame_goes_through(void) {
 
     VkDescriptorPoolSize enough[3] = {{0}, {0}, {0}};
     enough[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    enough[0].descriptorCount = XENOLITH_SAYINGS;
+    enough[0].descriptorCount = XENOLITH_SAYINGS * XENOLITH_LOTS;
     enough[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    enough[1].descriptorCount = XENOLITH_SAYINGS;
+    enough[1].descriptorCount = XENOLITH_SAYINGS * XENOLITH_LOTS;
     enough[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    enough[2].descriptorCount = XENOLITH_PICTURES * XENOLITH_SAYINGS;
+    enough[2].descriptorCount = XENOLITH_PICTURES * XENOLITH_SAYINGS * XENOLITH_LOTS;
 
     VkDescriptorPoolCreateInfo pool = {0};
     pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool.maxSets = XENOLITH_SAYINGS;
+    pool.maxSets = XENOLITH_SAYINGS * XENOLITH_LOTS;
     pool.poolSizeCount = 3;
     pool.pPoolSizes = enough;
 
@@ -1925,15 +1989,15 @@ static int make_what_a_frame_goes_through(void) {
         return 0;
     }
 
-    VkDescriptorSetLayout every[XENOLITH_SAYINGS];
-    for (uint32_t at = 0; at < XENOLITH_SAYINGS; at++) {
+    static VkDescriptorSetLayout every[XENOLITH_SAYINGS * XENOLITH_LOTS];
+    for (uint32_t at = 0; at < XENOLITH_SAYINGS * XENOLITH_LOTS; at++) {
         every[at] = through.shape;
     }
 
     VkDescriptorSetAllocateInfo taking = {0};
     taking.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     taking.descriptorPool = through.holding;
-    taking.descriptorSetCount = XENOLITH_SAYINGS;
+    taking.descriptorSetCount = XENOLITH_SAYINGS * XENOLITH_LOTS;
     taking.pSetLayouts = every;
 
     if (vkAllocateDescriptorSets(drawing.device, &taking, through.handed) != VK_SUCCESS) {
@@ -2159,9 +2223,7 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
 
     /* A copy recorded but not yet run is still to write this memory, and the
      * picture has to be what it writes rather than what was there before. */
-    if (a_copy_is_still_to_write(where, along * ((tall + 31u) & ~31u) * square_bytes)) {
-        xenolith_wait_for_what_was_drawn();
-    }
+    wait_for_copies_into(where, along * ((tall + 31u) & ~31u) * square_bytes);
 
     VkBufferCreateInfo holding = {0};
     holding.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -2325,8 +2387,12 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
                && vkBindImageMemory(drawing.device, made, its_own, 0) == VK_SUCCESS;
     }
 
+    /* Handed over with the lot being recorded, just ahead of its frames, and
+     * the room it is handed over through kept until that lot has run. */
+    int handed_over = 0;
     if (went) {
-        VkCommandBuffer one = begin_one_lot_of_commands();
+        pthread_mutex_lock(&one_drawing);
+        VkCommandBuffer one = commands_to_set_up_with();
         went = one != VK_NULL_HANDLE;
         if (went) {
             a_picture_becomes(one, made, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -2341,8 +2407,10 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
 
             a_picture_becomes(one, made, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            went = finish_one_lot_of_commands(one);
+            hold_until_it_has_run(through_it, its_memory);
+            handed_over = 1;
         }
+        pthread_mutex_unlock(&one_drawing);
     }
 
     if (went) {
@@ -2361,8 +2429,10 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
         went = vkCreateImageView(drawing.device, &seeing, NULL, &seen) == VK_SUCCESS;
     }
 
-    vkDestroyBuffer(drawing.device, through_it, NULL);
-    vkFreeMemory(drawing.device, its_memory, NULL);
+    if (!handed_over) {
+        vkDestroyBuffer(drawing.device, through_it, NULL);
+        vkFreeMemory(drawing.device, its_memory, NULL);
+    }
 
     if (!went) {
         vkDestroyImageView(drawing.device, seen, NULL);
@@ -2789,7 +2859,8 @@ uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
         return NULL;
     }
 
-    if (through.vertex_at + XENOLITH_VERTEX_BYTES > XENOLITH_VERTEX_ROOM) {
+    if (through.vertex_at + XENOLITH_VERTEX_BYTES
+        > (VkDeviceSize)(current_lot + 1u) * XENOLITH_VERTEX_ROOM) {
         more_than_a_frame_holds("vertices");
         /* Nothing, so the draw that asked for this reads nothing and is left
          * out. A caller given nothing does not draw. */
@@ -2846,14 +2917,17 @@ int xenolith_hand_over_constants(const uint8_t *from, const uint8_t *truths,
     /* Room for this draw's constants, its vertices and its saying, handed over
      * early where what has been recorded has used it up, so that nothing a draw
      * reads is given out again before the draw has run. */
-    if (through.constant_at + XENOLITH_CONSTANT_BYTES > XENOLITH_CONSTANT_ROOM
-        || through.vertex_at + XENOLITH_VERTEX_BYTES > XENOLITH_VERTEX_ROOM
+    if (through.constant_at + XENOLITH_CONSTANT_BYTES
+            > (VkDeviceSize)(current_lot + 1u) * XENOLITH_CONSTANT_ROOM
+        || through.vertex_at + XENOLITH_VERTEX_BYTES
+               > (VkDeviceSize)(current_lot + 1u) * XENOLITH_VERTEX_ROOM
         || sayings_taken + 1u >= XENOLITH_SAYINGS) {
         pthread_mutex_lock(&one_drawing);
-        hand_over_what_was_recorded();
+        send_what_was_recorded();
         pthread_mutex_unlock(&one_drawing);
     }
-    if (through.constant_at + XENOLITH_CONSTANT_BYTES > XENOLITH_CONSTANT_ROOM) {
+    if (through.constant_at + XENOLITH_CONSTANT_BYTES
+        > (VkDeviceSize)(current_lot + 1u) * XENOLITH_CONSTANT_ROOM) {
         more_than_a_frame_holds("shader constants");
         /* Refused rather than wrapped: a shader handed the room at the front of
          * the arena would read another draw's constants, which is a colour and
@@ -2986,13 +3060,16 @@ static void samples_become(VkCommandBuffer on, VkImage which, VkImageAspectFlags
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &turning);
 }
 
-/* Three shaders of the runtime's own, which move the samples of a place round
- * in one draw: one that covers the whole of what is drawn into with a single
- * triangle, and two that each put where a pixel is the sample read from the
- * place the console keeps it, a colour or how far away it is. They swap the
- * second and third of every four across, down, or both, as the two numbers
- * handed to them say, which is exchanging the lowest two bits of where the
- * pixel is. Made once, outside the build, from a few lines each. */
+/* Shaders of the runtime's own. One covers the whole of what is drawn into with
+ * a single triangle. Two move the samples of a place round in one draw, each
+ * putting where a pixel is the sample read from the place the console keeps
+ * it, a colour or how far away it is: they swap the second and third of every
+ * four across, down, or both, as the two numbers handed to them say, which is
+ * exchanging the lowest two bits of where the pixel is. The last turns how far
+ * away things are into the bytes a copy of it writes, three of distance over
+ * one of the stencil, counted as a fraction of the whole or as the console's
+ * small float as it is told, for a title that reads those bytes back as a
+ * picture. Made once, outside the build, from a few lines each. */
 static const uint32_t a_triangle_over_everything[] = {
     0x07230203u, 0x00010000u, 0x0008000bu, 0x0000002cu, 0x00000000u, 0x00020011u,
     0x00000001u, 0x0006000bu, 0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu,
@@ -3078,6 +3155,109 @@ static const uint32_t moving_colours_round[] = {
     0x0000003au, 0x000100fdu, 0x00010038u,
 };
 
+static const uint32_t distances_into_bytes[] = {
+    0x07230203u, 0x00010000u, 0x0008000bu, 0x000000d5u, 0x00000000u, 0x00020011u,
+    0x00000001u, 0x0006000bu, 0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu,
+    0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u, 0x0007000fu, 0x00000004u,
+    0x00000004u, 0x6e69616du, 0x00000000u, 0x00000053u, 0x00000083u, 0x00030010u,
+    0x00000004u, 0x00000007u, 0x00040047u, 0x0000004fu, 0x00000021u, 0x00000000u,
+    0x00040047u, 0x0000004fu, 0x00000022u, 0x00000000u, 0x00040047u, 0x00000053u,
+    0x0000000bu, 0x0000000fu, 0x00030047u, 0x00000059u, 0x00000002u, 0x00050048u,
+    0x00000059u, 0x00000000u, 0x00000023u, 0x00000000u, 0x00050048u, 0x00000059u,
+    0x00000001u, 0x00000023u, 0x00000008u, 0x00040047u, 0x00000083u, 0x0000001eu,
+    0x00000000u, 0x00020013u, 0x00000002u, 0x00030021u, 0x00000003u, 0x00000002u,
+    0x00030016u, 0x00000006u, 0x00000020u, 0x00040015u, 0x00000008u, 0x00000020u,
+    0x00000000u, 0x0004002bu, 0x00000006u, 0x0000000eu, 0x00000000u, 0x00020014u,
+    0x0000000fu, 0x0004002bu, 0x00000008u, 0x00000014u, 0x00000000u, 0x00040015u,
+    0x00000018u, 0x00000020u, 0x00000001u, 0x0004001eu, 0x0000001bu, 0x00000006u,
+    0x00000018u, 0x0004002bu, 0x00000018u, 0x00000021u, 0x00000001u, 0x0004002bu,
+    0x00000018u, 0x00000023u, 0x0000000fu, 0x0004002bu, 0x00000018u, 0x00000026u,
+    0x00000000u, 0x0004002bu, 0x00000018u, 0x0000002bu, 0x0000000eu, 0x0004002bu,
+    0x00000006u, 0x0000002du, 0x49800000u, 0x0004002bu, 0x00000008u, 0x00000030u,
+    0x000fffffu, 0x0004002bu, 0x00000008u, 0x00000037u, 0x00ffffffu, 0x0004002bu,
+    0x00000006u, 0x0000003cu, 0x40000000u, 0x0004002bu, 0x00000006u, 0x0000003eu,
+    0x3f800000u, 0x0004002bu, 0x00000018u, 0x00000045u, 0x00000014u, 0x00090019u,
+    0x0000004cu, 0x00000006u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000001u, 0x00000000u, 0x0003001bu, 0x0000004du, 0x0000004cu, 0x00040020u,
+    0x0000004eu, 0x00000000u, 0x0000004du, 0x0004003bu, 0x0000004eu, 0x0000004fu,
+    0x00000000u, 0x00040017u, 0x00000051u, 0x00000006u, 0x00000004u, 0x00040020u,
+    0x00000052u, 0x00000001u, 0x00000051u, 0x0004003bu, 0x00000052u, 0x00000053u,
+    0x00000001u, 0x00040017u, 0x00000054u, 0x00000006u, 0x00000002u, 0x00040017u,
+    0x00000057u, 0x00000018u, 0x00000002u, 0x0004001eu, 0x00000059u, 0x00000057u,
+    0x00000018u, 0x00040020u, 0x0000005au, 0x00000009u, 0x00000059u, 0x0004003bu,
+    0x0000005au, 0x0000005bu, 0x00000009u, 0x00040020u, 0x0000005cu, 0x00000009u,
+    0x00000057u, 0x00040020u, 0x00000063u, 0x00000009u, 0x00000018u, 0x0004002bu,
+    0x00000006u, 0x00000070u, 0x4b7fffffu, 0x00040020u, 0x00000082u, 0x00000003u,
+    0x00000051u, 0x0004003bu, 0x00000082u, 0x00000083u, 0x00000003u, 0x0004002bu,
+    0x00000008u, 0x00000085u, 0x000000ffu, 0x0004002bu, 0x00000018u, 0x00000089u,
+    0x00000008u, 0x0004002bu, 0x00000018u, 0x0000008eu, 0x00000010u, 0x0004002bu,
+    0x00000006u, 0x000000d3u, 0x3b808081u, 0x0007002cu, 0x00000051u, 0x000000d4u,
+    0x000000d3u, 0x000000d3u, 0x000000d3u, 0x000000d3u, 0x00050036u, 0x00000002u,
+    0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u, 0x00000005u, 0x0004003du,
+    0x0000004du, 0x00000050u, 0x0000004fu, 0x0004003du, 0x00000051u, 0x00000055u,
+    0x00000053u, 0x0007004fu, 0x00000054u, 0x00000056u, 0x00000055u, 0x00000055u,
+    0x00000000u, 0x00000001u, 0x0004006eu, 0x00000057u, 0x00000058u, 0x00000056u,
+    0x00050041u, 0x0000005cu, 0x0000005du, 0x0000005bu, 0x00000026u, 0x0004003du,
+    0x00000057u, 0x0000005eu, 0x0000005du, 0x00050084u, 0x00000057u, 0x0000005fu,
+    0x00000058u, 0x0000005eu, 0x00040064u, 0x0000004cu, 0x00000060u, 0x00000050u,
+    0x0007005fu, 0x00000051u, 0x00000061u, 0x00000060u, 0x0000005fu, 0x00000002u,
+    0x00000026u, 0x00050051u, 0x00000006u, 0x00000062u, 0x00000061u, 0x00000000u,
+    0x00050041u, 0x00000063u, 0x00000064u, 0x0000005bu, 0x00000021u, 0x0004003du,
+    0x00000018u, 0x00000065u, 0x00000064u, 0x000500abu, 0x0000000fu, 0x00000066u,
+    0x00000065u, 0x00000026u, 0x000300f7u, 0x00000068u, 0x00000000u, 0x000400fau,
+    0x00000066u, 0x00000067u, 0x0000006du, 0x000200f8u, 0x00000067u, 0x000300f7u,
+    0x000000cbu, 0x00000000u, 0x000300fbu, 0x00000014u, 0x000000a6u, 0x000200f8u,
+    0x000000a6u, 0x000500bdu, 0x0000000fu, 0x000000a9u, 0x00000062u, 0x0000000eu,
+    0x000300f7u, 0x000000abu, 0x00000000u, 0x000400fau, 0x000000a9u, 0x000000aau,
+    0x000000abu, 0x000200f8u, 0x000000aau, 0x000200f9u, 0x000000cbu, 0x000200f8u,
+    0x000000abu, 0x0006000cu, 0x0000001bu, 0x000000adu, 0x00000001u, 0x00000034u,
+    0x00000062u, 0x00050051u, 0x00000018u, 0x000000aeu, 0x000000adu, 0x00000001u,
+    0x00050051u, 0x00000006u, 0x000000afu, 0x000000adu, 0x00000000u, 0x00050080u,
+    0x00000018u, 0x000000b2u, 0x000000aeu, 0x0000002bu, 0x000500b3u, 0x0000000fu,
+    0x000000b4u, 0x000000b2u, 0x00000026u, 0x000300f7u, 0x000000bbu, 0x00000000u,
+    0x000400fau, 0x000000b4u, 0x000000b5u, 0x000000bbu, 0x000200f8u, 0x000000b5u,
+    0x0007000cu, 0x00000006u, 0x000000b7u, 0x00000001u, 0x00000035u, 0x00000062u,
+    0x0000002bu, 0x00050085u, 0x00000006u, 0x000000b8u, 0x000000b7u, 0x0000002du,
+    0x0004006du, 0x00000008u, 0x000000b9u, 0x000000b8u, 0x0007000cu, 0x00000008u,
+    0x000000bau, 0x00000001u, 0x00000026u, 0x000000b9u, 0x00000030u, 0x000200f9u,
+    0x000000cbu, 0x000200f8u, 0x000000bbu, 0x000500adu, 0x0000000fu, 0x000000bdu,
+    0x000000b2u, 0x00000023u, 0x000300f7u, 0x000000bfu, 0x00000000u, 0x000400fau,
+    0x000000bdu, 0x000000beu, 0x000000bfu, 0x000200f8u, 0x000000beu, 0x000200f9u,
+    0x000000cbu, 0x000200f8u, 0x000000bfu, 0x00050085u, 0x00000006u, 0x000000c1u,
+    0x000000afu, 0x0000003cu, 0x00050083u, 0x00000006u, 0x000000c2u, 0x000000c1u,
+    0x0000003eu, 0x00050085u, 0x00000006u, 0x000000c3u, 0x000000c2u, 0x0000002du,
+    0x0004006du, 0x00000008u, 0x000000c4u, 0x000000c3u, 0x0007000cu, 0x00000008u,
+    0x000000c5u, 0x00000001u, 0x00000026u, 0x000000c4u, 0x00000030u, 0x0004007cu,
+    0x00000008u, 0x000000c7u, 0x000000b2u, 0x000500c4u, 0x00000008u, 0x000000c8u,
+    0x000000c7u, 0x00000045u, 0x000500c5u, 0x00000008u, 0x000000cau, 0x000000c8u,
+    0x000000c5u, 0x000200f9u, 0x000000cbu, 0x000200f8u, 0x000000cbu, 0x000b00f5u,
+    0x00000008u, 0x000000cfu, 0x00000014u, 0x000000aau, 0x000000bau, 0x000000b5u,
+    0x00000037u, 0x000000beu, 0x000000cau, 0x000000bfu, 0x000200f9u, 0x00000068u,
+    0x000200f8u, 0x0000006du, 0x00050085u, 0x00000006u, 0x00000071u, 0x00000062u,
+    0x00000070u, 0x000500bcu, 0x0000000fu, 0x00000073u, 0x00000071u, 0x0000000eu,
+    0x000300f7u, 0x00000076u, 0x00000000u, 0x000400fau, 0x00000073u, 0x00000075u,
+    0x00000077u, 0x000200f8u, 0x00000075u, 0x000200f9u, 0x00000076u, 0x000200f8u,
+    0x00000077u, 0x000500beu, 0x0000000fu, 0x00000079u, 0x00000071u, 0x00000070u,
+    0x000300f7u, 0x0000007cu, 0x00000000u, 0x000400fau, 0x00000079u, 0x0000007bu,
+    0x0000007du, 0x000200f8u, 0x0000007bu, 0x000200f9u, 0x0000007cu, 0x000200f8u,
+    0x0000007du, 0x0004006du, 0x00000008u, 0x0000007fu, 0x00000071u, 0x000200f9u,
+    0x0000007cu, 0x000200f8u, 0x0000007cu, 0x000700f5u, 0x00000008u, 0x000000cdu,
+    0x00000037u, 0x0000007bu, 0x0000007fu, 0x0000007du, 0x000200f9u, 0x00000076u,
+    0x000200f8u, 0x00000076u, 0x000700f5u, 0x00000008u, 0x000000ceu, 0x00000014u,
+    0x00000075u, 0x000000cdu, 0x0000007cu, 0x000200f9u, 0x00000068u, 0x000200f8u,
+    0x00000068u, 0x000700f5u, 0x00000008u, 0x000000d0u, 0x000000cfu, 0x000000cbu,
+    0x000000ceu, 0x00000076u, 0x000500c7u, 0x00000008u, 0x00000086u, 0x000000d0u,
+    0x00000085u, 0x00040070u, 0x00000006u, 0x00000087u, 0x00000086u, 0x000500c2u,
+    0x00000008u, 0x0000008au, 0x000000d0u, 0x00000089u, 0x000500c7u, 0x00000008u,
+    0x0000008bu, 0x0000008au, 0x00000085u, 0x00040070u, 0x00000006u, 0x0000008cu,
+    0x0000008bu, 0x000500c2u, 0x00000008u, 0x0000008fu, 0x000000d0u, 0x0000008eu,
+    0x000500c7u, 0x00000008u, 0x00000090u, 0x0000008fu, 0x00000085u, 0x00040070u,
+    0x00000006u, 0x00000091u, 0x00000090u, 0x00070050u, 0x00000051u, 0x00000092u,
+    0x0000000eu, 0x00000087u, 0x0000008cu, 0x00000091u, 0x00050085u, 0x00000051u,
+    0x00000095u, 0x00000092u, 0x000000d4u, 0x0003003eu, 0x00000083u, 0x00000095u,
+    0x000100fdu, 0x00010038u,
+};
+
 static const uint32_t moving_distances_round[] = {
     0x07230203u, 0x00010000u, 0x0008000bu, 0x00000040u, 0x00000000u, 0x00020011u,
     0x00000001u, 0x0006000bu, 0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu,
@@ -3144,13 +3324,14 @@ static struct {
     uint32_t tall[2];
 } rearranging;
 
-static VkPipeline a_pipeline_for_moving_round(int how_far) {
+/* A pipeline drawing one triangle over the whole of what it draws into with a
+ * shader of the runtime's own, writing colours or how far away things are. */
+static VkPipeline a_pipeline_of_our_own(const uint32_t *pixel, uint32_t pixel_words,
+                                        VkPipelineLayout layout, VkRenderPass pass,
+                                        int how_far) {
     VkShaderModule first = module_of(a_triangle_over_everything,
                                      sizeof a_triangle_over_everything / 4u);
-    VkShaderModule second = how_far ? module_of(moving_distances_round,
-                                                sizeof moving_distances_round / 4u)
-                                    : module_of(moving_colours_round,
-                                                sizeof moving_colours_round / 4u);
+    VkShaderModule second = module_of(pixel, pixel_words);
     VkPipeline made = VK_NULL_HANDLE;
     if (first != VK_NULL_HANDLE && second != VK_NULL_HANDLE) {
         VkPipelineShaderStageCreateInfo stages[2] = {{0}, {0}};
@@ -3213,8 +3394,8 @@ static VkPipeline a_pipeline_for_moving_round(int how_far) {
         asking.pDepthStencilState = &how_near;
         asking.pColorBlendState = &mixing;
         asking.pDynamicState = &said_per_draw;
-        asking.layout = rearranging.layout;
-        asking.renderPass = through.pass;
+        asking.layout = layout;
+        asking.renderPass = pass;
         if (vkCreateGraphicsPipelines(drawing.device, VK_NULL_HANDLE, 1, &asking, NULL, &made)
             != VK_SUCCESS) {
             made = VK_NULL_HANDLE;
@@ -3323,7 +3504,13 @@ static int make_what_moving_round_takes(void) {
         return 0;
     }
     for (int how_far = 0; how_far < 2; how_far++) {
-        rearranging.pipeline[how_far] = a_pipeline_for_moving_round(how_far);
+        rearranging.pipeline[how_far] =
+            how_far ? a_pipeline_of_our_own(moving_distances_round,
+                                            sizeof moving_distances_round / 4u,
+                                            rearranging.layout, through.pass, 1)
+                    : a_pipeline_of_our_own(moving_colours_round,
+                                            sizeof moving_colours_round / 4u,
+                                            rearranging.layout, through.pass, 0);
         if (rearranging.pipeline[how_far] == VK_NULL_HANDLE) {
             return 0;
         }
@@ -3415,11 +3602,24 @@ static void move_round_what_is_waiting(VkCommandBuffer on) {
 }
 
 
+static void finish_the_lot(uint32_t lot);
+
+/* Gives the lot being recorded into its share of the room draws take. */
+static void give_out_the_room_again(void) {
+    through.vertex_at = (VkDeviceSize)current_lot * XENOLITH_VERTEX_ROOM;
+    through.constant_at = (VkDeviceSize)current_lot * XENOLITH_CONSTANT_ROOM;
+    sayings_taken = 0;
+}
+
+/* Begins recording into the lot whose turn it is, once the device has
+ * finished with what was recorded into it last. */
 static int begin_the_batch(void) {
     if (batch_open) {
         return 1;
     }
+    finish_the_lot(current_lot);
     batches_begun++;
+    surface.commands = lots[current_lot].main;
     vkResetCommandBuffer(surface.commands, 0);
     VkCommandBufferBeginInfo starting = {0};
     starting.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -3427,8 +3627,29 @@ static int begin_the_batch(void) {
     if (vkBeginCommandBuffer(surface.commands, &starting) != VK_SUCCESS) {
         return 0;
     }
+    give_out_the_room_again();
     batch_open = 1;
     return 1;
+}
+
+/* Where a picture being set up is handed over: the lot that runs just before
+ * the one being recorded into. */
+static VkCommandBuffer commands_to_set_up_with(void) {
+    if (!begin_the_batch()) {
+        return VK_NULL_HANDLE;
+    }
+    if (!lots[current_lot].before_open) {
+        vkResetCommandBuffer(lots[current_lot].before, 0);
+        VkCommandBufferBeginInfo starting = {0};
+        starting.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        starting.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(lots[current_lot].before, &starting) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        lots[current_lot].before_open = 1;
+    }
+    anything_recorded = 1;
+    return lots[current_lot].before;
 }
 
 static int xenolith_begin_a_frame_inside(void) {
@@ -3715,6 +3936,11 @@ static struct {
     VkSemaphore taken;
     VkSemaphore shown;
     VkCommandBuffer copying;
+    /* Says the last copy into the window has run, so that its commands can be
+     * recorded again. Waited for there rather than after every showing, which
+     * waited for everything the device had been given, the frame being drawn
+     * behind it included. */
+    VkFence copied;
     /* What the window manager may say to this window. A window that never
      * answers these is a window the rest of the desktop has to decide about on
      * its own, and what it decides is that the program is not answering. */
@@ -4423,7 +4649,11 @@ static int finish_opening_a_window(void) {
     taking.commandPool = surface.pool;
     taking.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     taking.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(drawing.device, &taking, &screen.copying) != VK_SUCCESS) {
+    VkFenceCreateInfo telling = {0};
+    telling.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    telling.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    if (vkAllocateCommandBuffers(drawing.device, &taking, &screen.copying) != VK_SUCCESS
+        || vkCreateFence(drawing.device, &telling, NULL, &screen.copied) != VK_SUCCESS) {
         screen.refused = 1;
         return 0;
     }
@@ -4563,6 +4793,8 @@ static void show_what_was_drawn_inside(VkImage what) {
         return;
     }
 
+    vkWaitForFences(drawing.device, 1, &screen.copied, VK_TRUE, UINT64_MAX);
+    vkResetFences(drawing.device, 1, &screen.copied);
     VkCommandBufferBeginInfo starting = {0};
     starting.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     starting.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -4650,7 +4882,7 @@ static void show_what_was_drawn_inside(VkImage what) {
     handing.pSignalSemaphores = &screen.shown;
 
     pthread_mutex_lock(&one_queue);
-    if (vkQueueSubmit(drawing.queue, 1, &handing, VK_NULL_HANDLE) != VK_SUCCESS) {
+    if (vkQueueSubmit(drawing.queue, 1, &handing, screen.copied) != VK_SUCCESS) {
         pthread_mutex_unlock(&one_queue);
         return;
     }
@@ -4663,7 +4895,6 @@ static void show_what_was_drawn_inside(VkImage what) {
     showing.pSwapchains = &screen.chain;
     showing.pImageIndices = &which;
     VkResult shown = vkQueuePresentKHR(drawing.queue, &showing);
-    vkQueueWaitIdle(drawing.queue);
     pthread_mutex_unlock(&one_queue);
     if (shown == VK_ERROR_OUT_OF_DATE_KHR || shown == VK_SUBOPTIMAL_KHR) {
         if (!make_a_chain_of_images()) {
@@ -4934,7 +5165,7 @@ int xenolith_draw_now_inside(uint32_t blending, uint32_t written, uint32_t how_f
     /* A set of this draw's own, holding where in the two arenas its words were
      * put and which pictures were handed over for it. Saying it again in the
      * one a draw already recorded would change what that draw reads. */
-    through.saying_now = (through.saying_now + 1u) % XENOLITH_SAYINGS;
+    through.saying_now = current_lot * XENOLITH_SAYINGS + sayings_taken;
     sayings_taken++;
     say_which_pictures_are_looked_at();
 
@@ -5009,7 +5240,7 @@ static int xenolith_end_a_frame_inside(void) {
 /* Shows whatever is on the drawing surface now. The swap falls back to this for
  * a title that does not copy its frame out before asking for it to be shown. */
 int xenolith_show_the_frame(void) {
-    xenolith_wait_for_what_was_drawn();
+    xenolith_send_what_was_drawn();
     __atomic_fetch_add(&frames_shown, 1ul, __ATOMIC_RELAXED);
     show_what_was_drawn(surface.image);
     return 1;
@@ -5146,7 +5377,7 @@ int xenolith_show_what_was_copied_to(uint32_t where) {
     if (!surface.made || found == 0) {
         return 0;
     }
-    xenolith_wait_for_what_was_drawn();
+    xenolith_send_what_was_drawn();
     /* Shown from where it is kept rather than put back into the surface
      * first. It is only the frame the title named for as long as nothing else
      * has been drawn, and the surface is what everything else draws into. */
@@ -5307,7 +5538,8 @@ static int somewhere_to_turn_a_copy(int blue_first) {
     wanted.arrayLayers = 1;
     wanted.samples = VK_SAMPLE_COUNT_1_BIT;
     wanted.tiling = VK_IMAGE_TILING_OPTIMAL;
-    wanted.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    wanted.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                   | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     wanted.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImage made = VK_NULL_HANDLE;
     if (vkCreateImage(drawing.device, &wanted, NULL, &made) != VK_SUCCESS) {
@@ -5628,32 +5860,241 @@ static uint32_t renew_the_distances_a_copy_writes(VkCommandBuffer one,
     return count;
 }
 
+/* What turning how far away things are into bytes takes: somewhere to draw
+ * the bytes, the one way of drawing there, and the pipeline that does it. */
+static struct {
+    VkRenderPass pass;
+    VkImageView seen;
+    VkFramebuffer target;
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+    int made;
+    int refused;
+} turning_distances;
+
+static int make_what_turning_distances_takes(void) {
+    if (turning_distances.made || turning_distances.refused) {
+        return turning_distances.made;
+    }
+    turning_distances.refused = 1;
+    if (!make_what_moving_round_takes() || !somewhere_to_turn_a_copy(0)) {
+        return 0;
+    }
+
+    VkAttachmentDescription bytes = {0};
+    bytes.format = VK_FORMAT_R8G8B8A8_UNORM;
+    bytes.samples = VK_SAMPLE_COUNT_1_BIT;
+    bytes.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    bytes.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    bytes.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    bytes.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    bytes.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bytes.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkAttachmentReference drawn_into = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription only = {0};
+    only.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    only.colorAttachmentCount = 1;
+    only.pColorAttachments = &drawn_into;
+    VkSubpassDependency around[2] = {{0}, {0}};
+    around[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    around[0].dstSubpass = 0;
+    around[0].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    around[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    around[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    around[1].srcSubpass = 0;
+    around[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    around[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    around[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    around[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    around[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    VkRenderPassCreateInfo passing = {0};
+    passing.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    passing.attachmentCount = 1;
+    passing.pAttachments = &bytes;
+    passing.subpassCount = 1;
+    passing.pSubpasses = &only;
+    passing.dependencyCount = 2;
+    passing.pDependencies = around;
+    if (vkCreateRenderPass(drawing.device, &passing, NULL, &turning_distances.pass)
+        != VK_SUCCESS) {
+        return 0;
+    }
+
+    VkImageViewCreateInfo seeing = {0};
+    seeing.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    seeing.image = turning[0].image;
+    seeing.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    seeing.format = VK_FORMAT_R8G8B8A8_UNORM;
+    seeing.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    seeing.subresourceRange.levelCount = 1;
+    seeing.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(drawing.device, &seeing, NULL, &turning_distances.seen) != VK_SUCCESS) {
+        return 0;
+    }
+    VkFramebufferCreateInfo framing = {0};
+    framing.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framing.renderPass = turning_distances.pass;
+    framing.attachmentCount = 1;
+    framing.pAttachments = &turning_distances.seen;
+    framing.width = XENOLITH_TURNING_ACROSS;
+    framing.height = XENOLITH_TURNING_DOWN;
+    framing.layers = 1;
+    if (vkCreateFramebuffer(drawing.device, &framing, NULL, &turning_distances.target)
+        != VK_SUCCESS) {
+        return 0;
+    }
+
+    VkPushConstantRange how = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 3u * sizeof(int32_t)};
+    VkPipelineLayoutCreateInfo outside = {0};
+    outside.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    outside.setLayoutCount = 1;
+    outside.pSetLayouts = &rearranging.shape;
+    outside.pushConstantRangeCount = 1;
+    outside.pPushConstantRanges = &how;
+    if (vkCreatePipelineLayout(drawing.device, &outside, NULL, &turning_distances.layout)
+        != VK_SUCCESS) {
+        return 0;
+    }
+    turning_distances.pipeline =
+        a_pipeline_of_our_own(distances_into_bytes, sizeof distances_into_bytes / 4u,
+                              turning_distances.layout, turning_distances.pass, 0);
+    if (turning_distances.pipeline == VK_NULL_HANDLE) {
+        return 0;
+    }
+    turning_distances.made = 1;
+    turning_distances.refused = 0;
+    return 1;
+}
+
+/* Puts a copy of how far away things are into every picture of four bytes to a
+ * part already turned out of the memory it writes, as the bytes the copy
+ * writes there, and says which pictures those were.
+ *
+ * A title copies how far away its scene is out and reads the same memory back
+ * as a picture of bytes, to work out from them how far away each pixel was.
+ * Turned again from memory, that picture waited every frame for everything
+ * recorded before it to run, the copy and the whole scene before it, which
+ * was the processor and the device waiting on one another again. So the
+ * distances are drawn into bytes on the device and put into the picture from
+ * there. What is drawn from is the first sample of each pixel, which is what
+ * the copy writes. */
+static uint32_t turn_distances_into_bytes(VkCommandBuffer one, const struct xenolith_copy *copy,
+                                          const VkBufferImageCopy *out, uint32_t right,
+                                          uint32_t bottom, uint32_t *renewed) {
+    uint32_t across = right - copy->left;
+    uint32_t down = bottom - copy->top;
+    if (across > XENOLITH_TURNING_ACROSS || down > XENOLITH_TURNING_DOWN) {
+        return 0;
+    }
+    uint32_t landing[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t across_at[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t down_at[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t lands_right[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t lands_bottom[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t count = 0;
+    for (uint32_t which = 0; which < XENOLITH_PICTURES_KEPT && count < XENOLITH_RENEWED_AT_ONCE;
+         which++) {
+        if (where_a_copy_lands(which, copy, right, bottom, XENOLITH_PICTURE_IN_FOURS,
+                               XENOLITH_PICTURE_IN_FOURS, &across_at[count], &down_at[count],
+                               &lands_right[count], &lands_bottom[count])) {
+            landing[count++] = which;
+        }
+    }
+    if (count == 0 || !make_what_turning_distances_takes()) {
+        return 0;
+    }
+
+    VkImage held = moving_round[1].image;
+    samples_become(one, held, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy taking = {0};
+    taking.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    taking.srcSubresource.layerCount = 1;
+    taking.dstSubresource = taking.srcSubresource;
+    taking.srcOffset = out->imageOffset;
+    taking.extent = out->imageExtent;
+    vkCmdCopyImage(one, through.how_far, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, held,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &taking);
+    samples_become(one, held, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    VkRenderPassBeginInfo into = {0};
+    into.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    into.renderPass = turning_distances.pass;
+    into.framebuffer = turning_distances.target;
+    into.renderArea.extent.width = across;
+    into.renderArea.extent.height = down;
+    vkCmdBeginRenderPass(one, &into, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport seen = {0};
+    seen.width = (float)across;
+    seen.height = (float)down;
+    seen.maxDepth = 1.0f;
+    VkRect2D kept = {0};
+    kept.extent.width = across;
+    kept.extent.height = down;
+    vkCmdSetViewport(one, 0, 1, &seen);
+    vkCmdSetScissor(one, 0, 1, &kept);
+    vkCmdBindPipeline(one, VK_PIPELINE_BIND_POINT_GRAPHICS, turning_distances.pipeline);
+    vkCmdBindDescriptorSets(one, VK_PIPELINE_BIND_POINT_GRAPHICS, turning_distances.layout, 0, 1,
+                            &rearranging.said[1], 0, NULL);
+    int32_t how[3] = {(int32_t)(out->imageExtent.width / across),
+                      (int32_t)(out->imageExtent.height / down), copy->how_far_as_a_float != 0};
+    vkCmdPushConstants(one, turning_distances.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof how,
+                       how);
+    vkCmdDraw(one, 3, 1, 0, 0);
+    vkCmdEndRenderPass(one);
+
+    for (uint32_t at = 0; at < count; at++) {
+        uint32_t which = landing[at];
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageCopy putting = {0};
+        putting.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        putting.srcSubresource.layerCount = 1;
+        putting.dstSubresource = putting.srcSubresource;
+        putting.dstOffset.x = (int32_t)(across_at[at] + copy->left);
+        putting.dstOffset.y = (int32_t)(down_at[at] + copy->top);
+        putting.extent.width = lands_right[at] - copy->left;
+        putting.extent.height = lands_bottom[at] - copy->top;
+        putting.extent.depth = 1;
+        vkCmdCopyImage(one, turning[0].image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       turned[which].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &putting);
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        renewed[at] = which;
+    }
+    return count;
+}
+
 /* A copy recorded and waiting for the lot it is in to run, so that what it
  * read back can be put where the title asked for it. */
 #define XENOLITH_WAITING_COPIES 512u
 
-static struct {
+struct a_waiting_copy {
     uint8_t *base;
     struct xenolith_copy copy;
     uint32_t right;
     uint32_t bottom;
     VkDeviceSize at;
     int in_bytes;
-    uint32_t renewed[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t renewed[XENOLITH_RENEWED_AT_ONCE * 2u];
     uint32_t renewing;
-} waiting[XENOLITH_WAITING_COPIES];
-static uint32_t copies_waiting;
+};
+static struct a_waiting_copy waiting[XENOLITH_LOTS][XENOLITH_WAITING_COPIES];
+static uint32_t copies_waiting[XENOLITH_LOTS];
 
-/* How much of the room for handing copies back the waiting ones have taken. */
-static VkDeviceSize handed_back_at;
+/* How much of each lot's share of the room for handing copies back its waiting
+ * copies have taken, counted from the front of the whole room. */
+#define XENOLITH_HANDED_BACK_A_LOT (XENOLITH_HANDED_BACK_ROOM / XENOLITH_LOTS)
+static VkDeviceSize handed_back_at[XENOLITH_LOTS];
 
 /* Whether memory a title might read a picture from is still to be written by
  * a copy that has not run yet. */
-static int a_copy_is_still_to_write(uint32_t from, uint32_t over) {
-    for (uint32_t which = 0; which < copies_waiting; which++) {
-        const struct xenolith_copy *copy = &waiting[which].copy;
-        uint32_t reaches =
-            xenolith_what_a_copy_reaches(copy->pitch, waiting[which].right, waiting[which].bottom);
+static int a_copy_is_still_to_write(uint32_t lot, uint32_t from, uint32_t over) {
+    for (uint32_t which = 0; which < copies_waiting[lot]; which++) {
+        const struct xenolith_copy *copy = &waiting[lot][which].copy;
+        uint32_t reaches = xenolith_what_a_copy_reaches(copy->pitch, waiting[lot][which].right,
+                                                        waiting[lot][which].bottom);
         if (copy->into < from + over && from < copy->into + reaches) {
             return 1;
         }
@@ -5710,18 +6151,21 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
         pthread_mutex_unlock(&one_drawing);
         return 0;
     }
-    if (copies_waiting >= XENOLITH_WAITING_COPIES
-        || handed_back_at + room > XENOLITH_HANDED_BACK_ROOM) {
-        hand_over_what_was_recorded();
+    if (batch_open
+        && (copies_waiting[current_lot] >= XENOLITH_WAITING_COPIES
+            || handed_back_at[current_lot] + room
+                   > (VkDeviceSize)(current_lot + 1u) * XENOLITH_HANDED_BACK_A_LOT)) {
+        send_what_was_recorded();
     }
     if (!begin_the_batch()) {
         pthread_mutex_unlock(&one_drawing);
         return 0;
     }
     VkCommandBuffer one = surface.commands;
+    uint32_t lot = current_lot;
 
     VkBufferImageCopy out = {0};
-    out.bufferOffset = handed_back_at;
+    out.bufferOffset = handed_back_at[lot];
     out.imageSubresource.aspectMask =
         copy->from_how_far ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     out.imageSubresource.layerCount = 1;
@@ -5734,14 +6178,14 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
         the_surface_reaches((uint32_t)out.imageOffset.y + grid_down);
     }
 
-    uint32_t slot = copies_waiting;
-    waiting[slot].base = base;
-    waiting[slot].copy = *copy;
-    waiting[slot].right = right;
-    waiting[slot].bottom = bottom;
-    waiting[slot].at = handed_back_at;
-    waiting[slot].in_bytes = 0;
-    waiting[slot].renewing = 0;
+    struct a_waiting_copy *pending = &waiting[lot][copies_waiting[lot]];
+    pending->base = base;
+    pending->copy = *copy;
+    pending->right = right;
+    pending->bottom = bottom;
+    pending->at = handed_back_at[lot];
+    pending->in_bytes = 0;
+    pending->renewing = 0;
     copies_counted++;
 
     /* How far away things came out is kept apart from their colours, and is
@@ -5766,6 +6210,8 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
 
         vkCmdCopyImageToBuffer(one, through.how_far, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                surface.readable, 1, &out);
+        uint32_t as_bytes =
+            turn_distances_into_bytes(one, copy, &out, right, bottom, pending->renewed);
 
         VkImageMemoryBarrier back_to_drawing = to_read;
         back_to_drawing.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -5775,15 +6221,16 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
         vkCmdPipelineBarrier(one, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1,
                              &back_to_drawing);
-        waiting[slot].renewing = renew_the_distances_a_copy_writes(
-            one, copy, handed_back_at, right, bottom, waiting[slot].renewed);
+        pending->renewing =
+            as_bytes + renew_the_distances_a_copy_writes(one, copy, handed_back_at[lot], right,
+                                                         bottom, pending->renewed + as_bytes);
     } else {
         VkImage bytes = copy->as_one_float
                             ? VK_NULL_HANDLE
                             : a_copy_made_into_bytes(one, copy, &out, across, down);
         if (bytes != VK_NULL_HANDLE) {
             VkBufferImageCopy made = {0};
-            made.bufferOffset = handed_back_at;
+            made.bufferOffset = handed_back_at[lot];
             made.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             made.imageSubresource.layerCount = 1;
             made.imageExtent.width = across;
@@ -5791,15 +6238,15 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
             made.imageExtent.depth = 1;
             vkCmdCopyImageToBuffer(one, bytes, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                    surface.readable, 1, &made);
-            waiting[slot].renewing = renew_the_pictures_a_copy_writes(
-                one, bytes, copy, right, bottom, waiting[slot].renewed);
-            waiting[slot].in_bytes = 1;
+            pending->renewing = renew_the_pictures_a_copy_writes(one, bytes, copy, right, bottom,
+                                                                 pending->renewed);
+            pending->in_bytes = 1;
         } else {
             vkCmdCopyImageToBuffer(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                    surface.readable, 1, &out);
             if (copy->as_one_float) {
-                waiting[slot].renewing = renew_the_floats_a_copy_writes(
-                    one, copy, &out, right, bottom, waiting[slot].renewed);
+                pending->renewing = renew_the_floats_a_copy_writes(one, copy, &out, right, bottom,
+                                                                   pending->renewed);
             }
         }
 
@@ -5833,15 +6280,15 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
         }
     }
 
-    for (uint32_t at = 0; at < waiting[slot].renewing; at++) {
-        uint32_t which = waiting[slot].renewed[at];
+    for (uint32_t at = 0; at < pending->renewing; at++) {
+        uint32_t which = pending->renewed[at];
         turned[which].renewed_by = copies_counted;
         turned[which].renewed_in = batches_begun;
         turned[which].stale = 0;
     }
-    copies_waiting++;
+    copies_waiting[lot]++;
     anything_recorded = 1;
-    handed_back_at = lined_up(handed_back_at + room, 256u);
+    handed_back_at[lot] = lined_up(handed_back_at[lot] + room, 256u);
     pthread_mutex_unlock(&one_drawing);
     return 1;
 }
@@ -6060,17 +6507,19 @@ static void put_back_in_parallel(const struct a_copy_put_back *putting, uint32_t
  * hands the same squared reading to the hardware either way. Written row by
  * row it came back through that reading scrambled, which is how a scene drawn
  * right ended up as a checkerboard behind everything else. */
-static void put_back_what_was_copied(void) {
-    if (copies_waiting == 0) {
+static void put_back_what_was_copied(uint32_t lot) {
+    handed_back_at[lot] = (VkDeviceSize)lot * XENOLITH_HANDED_BACK_A_LOT;
+    if (copies_waiting[lot] == 0) {
         return;
     }
+    struct a_waiting_copy *pending = waiting[lot];
     pthread_mutex_lock(&one_reading);
     void *mapped = NULL;
     if (vkMapMemory(drawing.device, surface.readable_memory, 0, VK_WHOLE_SIZE, 0, &mapped)
             != VK_SUCCESS
         || mapped == NULL) {
         pthread_mutex_unlock(&one_reading);
-        copies_waiting = 0;
+        copies_waiting[lot] = 0;
         return;
     }
     const unsigned char *pixels = mapped;
@@ -6078,15 +6527,15 @@ static void put_back_what_was_copied(void) {
     work_out_a_square();
     work_out_the_halves();
 
-    for (uint32_t which = 0; which < copies_waiting; which++) {
-        uint8_t *base = waiting[which].base;
-        const struct xenolith_copy *copy = &waiting[which].copy;
-        uint32_t right = waiting[which].right;
-        uint32_t bottom = waiting[which].bottom;
+    for (uint32_t which = 0; which < copies_waiting[lot]; which++) {
+        uint8_t *base = pending[which].base;
+        const struct xenolith_copy *copy = &pending[which].copy;
+        uint32_t right = pending[which].right;
+        uint32_t bottom = pending[which].bottom;
         uint32_t across_by = copy->samples_across != 0 ? copy->samples_across : 1u;
         uint32_t down_by = copy->samples_down != 0 ? copy->samples_down : 1u;
         uint32_t grid_across = (right - copy->left) * across_by;
-        int in_bytes = waiting[which].in_bytes;
+        int in_bytes = pending[which].in_bytes;
 
         /* A square holds four bytes here, and the squares are counted across a row
          * rounded up to the two and thirty a square's place is worked out in. */
@@ -6097,7 +6546,7 @@ static void put_back_what_was_copied(void) {
         struct a_copy_put_back putting = {
             .base = base,
             .copy = copy,
-            .from = pixels + waiting[which].at,
+            .from = pixels + pending[which].at,
             .right = right,
             .squares_a_row = squares_a_row,
             .across_by = across_by,
@@ -6113,68 +6562,147 @@ static void put_back_what_was_copied(void) {
     /* A picture put right on the device is no longer what its memory added up
      * to before, so that is worked out again, once copies stop going into it,
      * rather than its memory being taken for a title writing over it. */
-    for (uint32_t which = 0; which < copies_waiting; which++) {
-        for (uint32_t at = 0; at < waiting[which].renewing; at++) {
-            turned[waiting[which].renewed[at]].came_to_unknown = 1;
+    for (uint32_t which = 0; which < copies_waiting[lot]; which++) {
+        for (uint32_t at = 0; at < pending[which].renewing; at++) {
+            turned[pending[which].renewed[at]].came_to_unknown = 1;
         }
     }
 
     vkUnmapMemory(drawing.device, surface.readable_memory);
     pthread_mutex_unlock(&one_reading);
-    copies_waiting = 0;
+    copies_waiting[lot] = 0;
 }
 
-/* Hands over everything recorded since the last time, waits for it to run,
- * and puts what its copies read back in place.
+/* Hands over what has been recorded into the lot being recorded, without
+ * waiting for it to run, and goes on to the next lot.
  *
  * A frame being drawn when this is asked for is ended first and carries on in
  * the next lot, as though nothing had happened, so a draw part of the way
  * through being set up loses nothing. */
-static int hand_over_what_was_recorded(void) {
-    if (batch_open && !anything_recorded) {
-        return 1;
-    }
-    if (!batch_open) {
-        /* Nothing recorded reads the room, so all of it can be given out. */
-        through.vertex_at = 0;
-        through.constant_at = 0;
-        sayings_taken = 0;
+static int send_what_was_recorded(void) {
+    if (!batch_open || !anything_recorded) {
         return 1;
     }
     int was_recording = recording;
     if (was_recording) {
         xenolith_end_a_frame_inside();
     }
+    uint32_t lot = current_lot;
     batch_open = 0;
     anything_recorded = 0;
-    int handed = vkEndCommandBuffer(surface.commands) == VK_SUCCESS;
+
+    VkCommandBuffer handing_over[2];
+    uint32_t count = 0;
+    int handed = 1;
+    if (lots[lot].before_open) {
+        handed = vkEndCommandBuffer(lots[lot].before) == VK_SUCCESS;
+        handing_over[count++] = lots[lot].before;
+        lots[lot].before_open = 0;
+    }
+    handed = vkEndCommandBuffer(lots[lot].main) == VK_SUCCESS && handed;
+    handing_over[count++] = lots[lot].main;
     if (handed) {
         VkSubmitInfo handing = {0};
         handing.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        handing.commandBufferCount = 1;
-        handing.pCommandBuffers = &surface.commands;
+        handing.commandBufferCount = count;
+        handing.pCommandBuffers = handing_over;
+        vkResetFences(drawing.device, 1, &lots[lot].done);
         pthread_mutex_lock(&one_queue);
-        handed = !went_wrong(vkQueueSubmit(drawing.queue, 1, &handing, VK_NULL_HANDLE),
+        handed = !went_wrong(vkQueueSubmit(drawing.queue, 1, &handing, lots[lot].done),
                              "what was recorded");
-        if (handed) {
-            went_wrong(vkQueueWaitIdle(drawing.queue), "waiting for what was recorded");
-        }
         pthread_mutex_unlock(&one_queue);
     }
-    put_back_what_was_copied();
-    handed_back_at = 0;
-
-    /* What it was reading has run, so it can go, and the room its draws took
-     * can be given out again. */
-    let_go_of_what_is_finished();
-    through.vertex_at = 0;
-    through.constant_at = 0;
-    sayings_taken = 0;
+    lots[lot].in_flight = handed;
+    lots[lot].sent_at = ++lots_sent;
+    last_sent_lot = lot;
+    current_lot = (lot + 1u) % XENOLITH_LOTS;
 
     if (was_recording) {
         return xenolith_begin_a_frame_inside() && handed;
     }
     return handed;
+}
+
+/* Waits for a lot handed over to have run, after any handed over before it,
+ * and then puts back what its copies read, lets go of what it was the last to
+ * read, and frees the room its pictures were handed over through. */
+static void finish_the_lot(uint32_t lot) {
+    for (uint32_t other = 0; other < XENOLITH_LOTS; other++) {
+        if (other != lot && lots[other].in_flight && lots[other].sent_at < lots[lot].sent_at) {
+            finish_the_lot(other);
+        }
+    }
+    if (lots[lot].in_flight) {
+        went_wrong(vkWaitForFences(drawing.device, 1, &lots[lot].done, VK_TRUE, UINT64_MAX),
+                   "waiting for what was recorded");
+        lots[lot].in_flight = 0;
+    }
+    put_back_what_was_copied(lot);
+    let_go_of_what_is_finished(lot);
+    for (uint32_t at = 0; at < lots[lot].holding; at++) {
+        vkDestroyBuffer(drawing.device, lots[lot].held[at], NULL);
+        vkFreeMemory(drawing.device, lots[lot].held_memory[at], NULL);
+    }
+    lots[lot].holding = 0;
+}
+
+/* Finishes every lot that has already run, oldest first, without waiting for
+ * one that has not. */
+static void finish_what_has_run(void) {
+    for (;;) {
+        uint32_t oldest = XENOLITH_LOTS;
+        for (uint32_t lot = 0; lot < XENOLITH_LOTS; lot++) {
+            if (lots[lot].in_flight
+                && (oldest == XENOLITH_LOTS || lots[lot].sent_at < lots[oldest].sent_at)) {
+                oldest = lot;
+            }
+        }
+        if (oldest == XENOLITH_LOTS
+            || vkGetFenceStatus(drawing.device, lots[oldest].done) != VK_SUCCESS) {
+            return;
+        }
+        finish_the_lot(oldest);
+    }
+}
+
+/* Hands over everything recorded so far, waits for all of it to run, and puts
+ * what its copies read back in place. */
+static int hand_over_what_was_recorded(void) {
+    int handed = send_what_was_recorded();
+    for (uint32_t lot = 0; lot < XENOLITH_LOTS; lot++) {
+        if (!(batch_open && lot == current_lot)) {
+            finish_the_lot(lot);
+        }
+    }
+    if (!batch_open) {
+        /* Nothing recorded reads the room, so all of it can be given out. */
+        give_out_the_room_again();
+    }
+    return handed;
+}
+
+/* Waits for whatever copies are still to write memory a title is about to
+ * read a picture out of, and only for those. */
+static void wait_for_copies_into(uint32_t from, uint32_t over) {
+    pthread_mutex_lock(&one_drawing);
+    for (uint32_t lot = 0; lot < XENOLITH_LOTS; lot++) {
+        if (!a_copy_is_still_to_write(lot, from, over)) {
+            continue;
+        }
+        if (batch_open && lot == current_lot) {
+            send_what_was_recorded();
+        }
+        finish_the_lot(lot);
+    }
+    pthread_mutex_unlock(&one_drawing);
+}
+
+int xenolith_send_what_was_drawn(void) {
+    pthread_mutex_lock(&one_drawing);
+    int went = send_what_was_recorded();
+    finish_what_has_run();
+    pthread_mutex_unlock(&one_drawing);
+    return went;
 }
 
 int xenolith_wait_for_what_was_drawn(void) {
@@ -6265,6 +6793,8 @@ void xenolith_forget_pictures_at(uint32_t where, uint32_t bytes) {
 }
 
 int xenolith_wait_for_what_was_drawn(void) { return 0; }
+
+int xenolith_send_what_was_drawn(void) { return 0; }
 
 uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
     (void)how_many;
