@@ -427,6 +427,12 @@ something not being read.
 Says what shape of place a title is about to draw into, so that what each of
 them holds is kept apart from what the others hold.
 
+## `xenolith_find_the_pixel_in`
+
+Says which register the next draw's pixel shader finds where its pixel is in,
+which a title asks the hardware for rather than working out, or all ones where
+it asks for none.
+
 ## `xenolith_wipe_how_far_after_a_copy`
 
 Says whether the copy just made asked for how far away things are to start

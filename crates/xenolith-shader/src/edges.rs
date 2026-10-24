@@ -190,6 +190,7 @@ pub(crate) fn what_a_shader_starts_with(
         all_ones,
         how_big,
         which_vertex,
+        where_the_pixel_is,
     } = *at_the_edges;
 
     /* One pixel across, said before anything else because a shader that never
@@ -223,6 +224,10 @@ pub(crate) fn what_a_shader_starts_with(
             );
             module.add(opcodes::STORE, &[where_to.number(), read.number()]);
         }
+    }
+
+    if let Some(asked) = where_the_pixel_is {
+        where_the_pixel_goes(module, float, four, to_one, registers, asked);
     }
 
     /* The number of the vertex, put where the hardware puts it. */
@@ -278,20 +283,34 @@ pub(crate) struct Edges {
     pub(crate) all_ones: crate::spirv::Name,
     pub(crate) how_big: Option<crate::spirv::Name>,
     pub(crate) which_vertex: Option<(crate::spirv::Name, crate::spirv::Name)>,
+    pub(crate) where_the_pixel_is: Option<WhereThePixelIs>,
+}
+
+/// What putting where the pixel being drawn is into a register needs: where a
+/// host says it is, which register a title asked for it in, and the values the
+/// two are worked into the console's terms with.
+#[derive(Clone, Copy)]
+pub(crate) struct WhereThePixelIs {
+    pub(crate) said: crate::spirv::Name,
+    pub(crate) into: crate::spirv::Name,
+    pub(crate) whole: crate::spirv::Name,
+    pub(crate) boolean: crate::spirv::Name,
+    pub(crate) four_bools: crate::spirv::Name,
+    pub(crate) registers_there_are: crate::spirv::Name,
+    pub(crate) first: crate::spirv::Name,
+    pub(crate) half: crate::spirv::Name,
+    pub(crate) zero: crate::spirv::Name,
 }
 
 /// Makes what a shader says at its edges: how big a point is, which vertex this
-/// is, and what it carries on to whatever runs after it.
+/// is, where the pixel being drawn is, and what it carries on to whatever runs
+/// after it.
 pub(crate) fn what_a_shader_says(
     module: &mut Module,
     kind: Kind,
     model: u32,
     names: &[crate::spirv::Name; 5],
-) -> (
-    Vec<crate::spirv::Name>,
-    Option<crate::spirv::Name>,
-    Option<(crate::spirv::Name, crate::spirv::Name)>,
-) {
+) -> Said {
     let [to_size, to_out, to_carried, out, entry] = *names;
     /* How big a point is, which a shader has to say whenever what is being
      * drawn is points.
@@ -321,6 +340,15 @@ pub(crate) fn what_a_shader_says(
         (one, counting)
     });
 
+    /* Where on what is drawn into the pixel being drawn is, which a pixel
+     * shader can ask the hardware to put in one of its registers. */
+    let where_it_is = matches!(kind, Kind::Pixel).then(|| {
+        let one = module.name();
+        module.add(opcodes::VARIABLE, &[to_carried.number(), one.number(), 1]);
+        module.annotate(71, &[one.number(), 11, 15]);
+        one
+    });
+
     let carried = the_outputs(
         module,
         kind,
@@ -332,11 +360,141 @@ pub(crate) fn what_a_shader_says(
         out,
         entry,
         model,
-        &[which_vertex.map(|(one, _)| one), how_big]
+        &[which_vertex.map(|(one, _)| one), how_big, where_it_is]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>(),
     );
 
-    (carried, how_big, which_vertex)
+    Said {
+        carried,
+        how_big,
+        which_vertex,
+        where_it_is,
+    }
+}
+
+/// What [`what_a_shader_says`] made.
+pub(crate) struct Said {
+    pub(crate) carried: Vec<crate::spirv::Name>,
+    pub(crate) how_big: Option<crate::spirv::Name>,
+    pub(crate) which_vertex: Option<(crate::spirv::Name, crate::spirv::Name)>,
+    pub(crate) where_it_is: Option<crate::spirv::Name>,
+}
+
+/// Puts where the pixel being drawn is into the register a title asked for it
+/// in, where it asked for one.
+///
+/// The console counts a pixel from its top left corner where a host counts it
+/// from its middle, so half a pixel comes off; a title adds the half back itself
+/// before reading a picture of the same size at that place. Where a title asked
+/// for no register, the first is written with what it already held, which
+/// leaves the register as it was without a branch for a driver to follow.
+fn where_the_pixel_goes(
+    module: &mut Module,
+    float: crate::spirv::Name,
+    four: crate::spirv::Name,
+    to_one: crate::spirv::Name,
+    registers: crate::spirv::Name,
+    asked: WhereThePixelIs,
+) {
+    let wanted = module.name();
+    module.add(
+        opcodes::UNSIGNED_LESS_THAN,
+        &[
+            asked.boolean.number(),
+            wanted.number(),
+            asked.into.number(),
+            asked.registers_there_are.number(),
+        ],
+    );
+    let which = module.name();
+    module.add(
+        opcodes::SELECT,
+        &[
+            asked.whole.number(),
+            which.number(),
+            wanted.number(),
+            asked.into.number(),
+            asked.first.number(),
+        ],
+    );
+    let where_to = module.name();
+    module.add(
+        opcodes::ACCESS_CHAIN,
+        &[
+            to_one.number(),
+            where_to.number(),
+            registers.number(),
+            which.number(),
+        ],
+    );
+    let held = module.name();
+    module.add(
+        opcodes::LOAD,
+        &[four.number(), held.number(), where_to.number()],
+    );
+
+    let said = module.name();
+    module.add(
+        opcodes::LOAD,
+        &[four.number(), said.number(), asked.said.number()],
+    );
+    let lane = |module: &mut Module, which: u32| {
+        let one = module.name();
+        module.add(
+            opcodes::COMPOSITE_EXTRACT,
+            &[float.number(), one.number(), said.number(), which],
+        );
+        let moved = module.name();
+        module.add(
+            opcodes::FLOAT_SUBTRACT,
+            &[
+                float.number(),
+                moved.number(),
+                one.number(),
+                asked.half.number(),
+            ],
+        );
+        moved.number()
+    };
+    let across = lane(module, 0);
+    let down = lane(module, 1);
+    let position = module.name();
+    module.add(
+        opcodes::COMPOSITE_CONSTRUCT,
+        &[
+            four.number(),
+            position.number(),
+            across,
+            down,
+            asked.zero.number(),
+            asked.zero.number(),
+        ],
+    );
+
+    let every_lane = module.name();
+    module.add(
+        opcodes::COMPOSITE_CONSTRUCT,
+        &[
+            asked.four_bools.number(),
+            every_lane.number(),
+            wanted.number(),
+            wanted.number(),
+            wanted.number(),
+            wanted.number(),
+        ],
+    );
+    let written = module.name();
+    module.add(
+        opcodes::SELECT,
+        &[
+            four.number(),
+            written.number(),
+            every_lane.number(),
+            position.number(),
+            held.number(),
+        ],
+    );
+    module.add(opcodes::STORE, &[where_to.number(), written.number()]);
 }

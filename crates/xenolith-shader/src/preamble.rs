@@ -12,9 +12,13 @@
 use crate::Kind;
 use crate::bindings::{what_a_fetch_reads, what_a_shader_is_handed, what_a_shader_looks_at};
 use crate::constants::{
-    DRAWN_WHATEVER_IT_IS, REGISTERS, SAID_WHEN_BUILT, WHAT_IT_IS_AGAINST, WHICH_TEST,
+    DRAWN_WHATEVER_IT_IS, NO_REGISTER, REGISTERS, SAID_WHEN_BUILT, WHAT_IT_IS_AGAINST,
+    WHERE_THE_PIXEL_GOES, WHICH_TEST,
 };
-use crate::edges::{Edges, Standing, the_values, what_a_shader_says, what_a_shader_starts_with};
+use crate::edges::{
+    Edges, Said, Standing, WhereThePixelIs, the_values, what_a_shader_says,
+    what_a_shader_starts_with,
+};
 use crate::opcodes;
 use crate::spirv::Module;
 
@@ -179,7 +183,12 @@ pub(crate) fn preamble(
     let (to_carried, to_size) =
         where_a_shader_works(module, &[count, four, float, bank, to_bank, to_out, out]);
 
-    let (carried, how_big, which_vertex) = what_a_shader_says(
+    let Said {
+        carried,
+        how_big,
+        which_vertex,
+        where_it_is,
+    } = what_a_shader_says(
         module,
         kind,
         model,
@@ -295,6 +304,34 @@ pub(crate) fn preamble(
         Kind::Vertex => None,
     };
 
+    /* Which register a title asked for where the pixel being drawn is, which
+     * is the hardware's to say rather than the shader's and so is settled when
+     * a pair of shaders is built. */
+    let where_the_pixel_is = where_it_is.and_then(|said| {
+        let into = module.name();
+        module.add(
+            opcodes::SPEC_CONSTANT,
+            &[count.number(), into.number(), NO_REGISTER],
+        );
+        module.annotate(71, &[into.number(), SAID_WHEN_BUILT, WHERE_THE_PIXEL_GOES]);
+        let half = module.name();
+        module.add(
+            opcodes::CONSTANT,
+            &[float.number(), half.number(), 0x3f00_0000],
+        );
+        Some(WhereThePixelIs {
+            said,
+            into,
+            whole: count,
+            boolean,
+            four_bools,
+            registers_there_are: *indices.get(REGISTERS as usize)?,
+            first: *indices.first()?,
+            half,
+            zero: no_number,
+        })
+    });
+
     module.add(
         opcodes::FUNCTION,
         &[void.number(), entry.number(), 0, signature.number()],
@@ -356,6 +393,7 @@ pub(crate) fn preamble(
             all_ones,
             how_big,
             which_vertex,
+            where_the_pixel_is,
         },
         &indices,
         &carried,

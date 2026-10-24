@@ -252,3 +252,6 @@ pub const FLOAT_ORDERED_NOT_EQUAL: u16 = 182;
 
 /// `OpFOrdLessThan`.
 pub const FLOAT_ORDERED_LESS_THAN: u16 = 184;
+
+/// `OpULessThan`.
+pub const UNSIGNED_LESS_THAN: u16 = 176;

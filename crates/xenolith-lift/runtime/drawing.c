@@ -385,6 +385,19 @@ static uint32_t samples_down = 1;
  */
 #define XENOLITH_SLOTS_SHOWN 12u
 
+/* Where a title says whether the hardware puts where a pixel is in one of a
+ * pixel shader's registers, and which. */
+#define XENOLITH_PROGRAM_CONTROL 0x2180u
+#define XENOLITH_PIXEL_IS_GIVEN (1u << 18)
+#define XENOLITH_SHADER_MISCELLANY 0x2181u
+
+static void say_where_the_pixel_goes(const uint8_t *base) {
+    uint32_t control = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_PROGRAM_CONTROL * 4u);
+    uint32_t which =
+        (xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_SHADER_MISCELLANY * 4u) >> 8) & 0xffu;
+    xenolith_find_the_pixel_in((control & XENOLITH_PIXEL_IS_GIVEN) != 0 ? which : 0xffffffffu);
+}
+
 /* Says which of a title's places the next draw goes into, and starts a frame
  * in it, ending the one before where that was drawing into another.
  *
@@ -1701,6 +1714,7 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
              * put it. Handed over before each draw because a title writes
              * these between draws as readily as before them. */
             say_how_a_position_moves(base);
+            say_where_the_pixel_goes(base);
             xenolith_clip_to(kept_left * samples_across, kept_top * samples_down,
                              kept_right * samples_across, kept_bottom * samples_down);
             xenolith_hand_over_constants(

@@ -1274,7 +1274,7 @@ static int worth_mixing(uint32_t blending) {
  * own again, which costs more than the drawing does. So it is kept by what it
  * adds up to rather than looked through from the start. */
 #define XENOLITH_PIPELINES 4096u
-#define XENOLITH_PIPELINE_SAID 8u
+#define XENOLITH_PIPELINE_SAID 9u
 static struct {
     uint32_t said[XENOLITH_PIPELINE_SAID];
     VkPipeline pipeline;
@@ -1297,6 +1297,11 @@ static uint32_t where_a_pipeline_is_kept(const uint32_t *said) {
     return XENOLITH_PIPELINES;
 }
 
+/* Which register a pixel shader is to find where its pixel is in, or none. */
+#define XENOLITH_NO_REGISTER 0xffffffffu
+static uint32_t pixel_goes_into = XENOLITH_NO_REGISTER;
+
+void xenolith_find_the_pixel_in(uint32_t which) { pixel_goes_into = which; }
 
 /* How far away a place on the surface is, kept as a plain number between one
  * end of the view and the other.
@@ -2284,7 +2289,7 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
                                const uint32_t *pixel, uint32_t pixel_length, uint32_t kind) {
     const uint32_t built_for[XENOLITH_PIPELINE_SAID] = {vertex_sum, pixel_sum, kind,
                                                         blending, written, how_far,
-                                                        cut_off, cut_off_at};
+                                                        cut_off, cut_off_at, pixel_goes_into};
     uint32_t kept_at = where_a_pipeline_is_kept(built_for);
     if (kept_at < XENOLITH_PIPELINES && built[kept_at].taken) {
         return built[kept_at].pipeline;
@@ -2314,17 +2319,17 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
      * was written to make but not told the terms of. Settling it here rather
      * than when the shader was read is what lets one reading serve every test,
      * and a driver folds the test away where it draws everything. */
-    uint32_t the_test[2] = {cut_off, cut_off_at};
-    VkSpecializationMapEntry each_part[2] = {{0}, {0}};
-    each_part[0].constantID = 0;
-    each_part[0].offset = 0;
-    each_part[0].size = sizeof the_test[0];
-    each_part[1].constantID = 1;
-    each_part[1].offset = sizeof the_test[0];
-    each_part[1].size = sizeof the_test[1];
+    /* Beside it, which register the shader finds where its pixel is in. */
+    uint32_t the_test[3] = {cut_off, cut_off_at, pixel_goes_into};
+    VkSpecializationMapEntry each_part[3] = {{0}, {0}, {0}};
+    for (uint32_t one = 0; one < 3u; one++) {
+        each_part[one].constantID = one;
+        each_part[one].offset = one * (uint32_t)sizeof the_test[0];
+        each_part[one].size = sizeof the_test[0];
+    }
 
     VkSpecializationInfo settled = {0};
-    settled.mapEntryCount = 2;
+    settled.mapEntryCount = 3;
     settled.pMapEntries = each_part;
     settled.dataSize = sizeof the_test;
     settled.pData = the_test;
@@ -4860,6 +4865,8 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
 void xenolith_look_at_nothing(uint32_t slot) { (void)slot; }
 
 void xenolith_drawing_into(uint32_t shaped) { (void)shaped; }
+
+void xenolith_find_the_pixel_in(uint32_t which) { (void)which; }
 
 void xenolith_wipe_how_far_after_a_copy(int wipe, float to) {
     (void)wipe;

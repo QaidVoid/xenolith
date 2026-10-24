@@ -5870,6 +5870,57 @@ fn a_colour_exported_before_a_predicate_that_does_not_hold_stands() {
     );
 }
 
+/// A pixel shader that asks for where its pixel is finds it in the register
+/// it asked for, counted in pixels from the top left.
+///
+/// A title's shader that reads a picture the size of the frame works out where
+/// to read it from this, and handed anything else it reads one corner of the
+/// picture everywhere. The shader below puts out where its pixel is, scaled to
+/// the frame, so a pixel's colour says where it was drawn. Needs a device to
+/// draw on, and returns where there is none.
+#[test]
+fn a_pixel_shader_finds_where_its_pixel_is() {
+    /* One stretch of one instruction that ends the shader: the first register,
+     * where the position is asked for, times the first constant, into the
+     * colour. */
+    let run = (2u64 << 44) | (1u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    words.extend([
+        (1u32 << 15) | (0xf << 16) | (50 << 26),
+        0,
+        (1u32 << 24) | (1 << 31),
+    ]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    let program = a_triangle_drawn_by(
+        "{1.0f / 1280.0f, 1.0f / 720.0f, 0.0f, 0.0f}, {0.0f}, {0.0f}",
+        "xenolith_find_the_pixel_in(0u);",
+    );
+    let ran = draw_with("the_pixel_position", &pixel.words, &program).expect("the draw ran");
+    if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+        return;
+    }
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("the_pixel_position");
+    let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+    /* Three places inside the triangle. */
+    for (across, down) in [(640usize, 360usize), (560, 400), (700, 250)] {
+        let colour = a_pixel_of(&picture, across, down).expect("the frame is too short");
+        let wanted = [across * 255 / 1280, down * 255 / 720];
+        for (lane, was) in wanted.iter().enumerate() {
+            assert!(
+                usize::from(colour[lane]).abs_diff(*was) <= 1,
+                "the pixel at {across},{down} came out {colour:?} rather than near {wanted:?}"
+            );
+        }
+    }
+}
+
 /// A draw with a real pair of shaders puts something on the surface.
 ///
 /// Everything before this proves a piece works on its own: the renderer opens a

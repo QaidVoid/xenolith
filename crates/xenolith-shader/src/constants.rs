@@ -14,9 +14,14 @@ pub(crate) const TEXTURES: u32 = 32;
 /// built rather than when the module is written.
 pub(crate) const SAID_WHEN_BUILT: u32 = 1;
 
-/// The numbers the two settled constants are asked for by.
+/// The numbers the settled constants are asked for by.
 pub(crate) const WHICH_TEST: u32 = 0;
 pub(crate) const WHAT_IT_IS_AGAINST: u32 = 1;
+pub(crate) const WHERE_THE_PIXEL_GOES: u32 = 2;
+
+/// What the register a pixel's position goes into is settled as where a title
+/// asks for it in none.
+pub(crate) const NO_REGISTER: u32 = u32::MAX;
 
 /// The test that draws a place however solid it is, which is what a title that
 /// asks for no test at all comes to. Its three bits stand for drawing a place

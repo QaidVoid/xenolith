@@ -800,6 +800,11 @@ void xenolith_look_at_nothing(uint32_t slot);
  * them holds is kept apart from what the others hold. */
 void xenolith_drawing_into(uint32_t shaped);
 
+/* Says which register the next draw's pixel shader finds where its pixel is
+ * in, which a title asks the hardware for rather than working out, or all ones
+ * where it asks for none. */
+void xenolith_find_the_pixel_in(uint32_t which);
+
 /* Says whether the copy just made asked for how far away things are to start
  * again before the next drawing, and what to start it as. */
 void xenolith_wipe_how_far_after_a_copy(int wipe, float to);
