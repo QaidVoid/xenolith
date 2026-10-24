@@ -1449,6 +1449,13 @@ static void take_the_shader_in_hand(uint8_t *base, uint32_t which_kind, uint32_t
 #define XENOLITH_COPY_DEST_PITCH 0x231au
 #define XENOLITH_COPY_DEST_INFO 0x231bu
 #define XENOLITH_DEPTH_CLEAR 0x231du
+
+/* How the place a title keeps how far away things are holds it, and the bit of
+ * that saying it holds the console's small float rather than a fraction of the
+ * whole. A copy hands it back as it is held, whatever kind of picture the copy
+ * goes into, so the title reads it back the way it was drawn. */
+#define XENOLITH_HOW_FAR_IS_KEPT 0x2002u
+#define XENOLITH_KEPT_AS_A_FLOAT (1u << 16)
 #define XENOLITH_COLOUR_CLEAR 0x231eu
 
 /* Which of what was drawn a copy takes when it takes how far away things are
@@ -1525,7 +1532,8 @@ static void copy_what_was_drawn(uint8_t *base) {
     copy.samples_down = samples != 0u ? 2u : 1u;
     copy.as_one_float = format == XENOLITH_PICTURE_IN_FLOATS;
     copy.from_how_far = (control & 7u) == XENOLITH_COPY_FROM_HOW_FAR;
-    copy.how_far_as_a_float = format == XENOLITH_PICTURE_HOW_FAR_AS_A_FLOAT;
+    copy.how_far_as_a_float =
+        (a_register(base, XENOLITH_HOW_FAR_IS_KEPT) & XENOLITH_KEPT_AS_A_FLOAT) != 0;
     what_a_copy_takes(base, &copy);
 
     finish_the_frame();
