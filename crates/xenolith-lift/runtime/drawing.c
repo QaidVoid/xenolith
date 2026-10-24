@@ -21,7 +21,7 @@ static float moved_depth_by, moved_depth_to;
  * A draw uses whichever pair was last set up, because that is how a title says
  * which: it hands them over and then draws, rather than naming them in the
  * draw. */
-static struct {
+struct a_shader_in_hand {
     uint32_t sum;
     uint32_t words;
     const uint32_t *said;
@@ -33,7 +33,29 @@ static struct {
     uint32_t streams;
     const uint32_t *looks;
     uint32_t pictures;
-} in_hand[2];
+};
+static struct a_shader_in_hand in_hand[2];
+
+/* What each shader a title hands over came to, by where it is, how long it is
+ * and what all its words add up to.
+ *
+ * Finding a shader in the table means adding up its words one at a time and
+ * looking for each running total among every shader there is, because the
+ * table knows a shader by how many of its words it takes, and a title hands
+ * over more words than that. Doing so again for every draw, for the same few
+ * hundred shaders, came to a seventh of what reading a title's commands cost.
+ * Adding up all of its words is a fraction of that, and says whether it is
+ * still the shader it was. */
+#define XENOLITH_SHADERS_REMEMBERED 4096u
+
+static struct {
+    int taken;
+    uint32_t kind;
+    uint32_t where;
+    uint32_t how_many;
+    uint32_t all_of_it;
+    struct a_shader_in_hand came_to;
+} shaders_remembered[XENOLITH_SHADERS_REMEMBERED];
 
 /* What the last draw was clipped to, how it asked for a position to be moved,
  * and what it drew into. A census reads these, and saying where a position
@@ -1439,13 +1461,41 @@ static int say_it_now(const uint8_t *base, uint32_t which_kind, uint32_t where,
 #endif
 }
 
+static void take_the_shader_in_hand_again(uint8_t *base, uint32_t which_kind, uint32_t where,
+                                          uint32_t how_many);
+
 static void take_the_shader_in_hand(uint8_t *base, uint32_t which_kind, uint32_t where,
                                     uint32_t how_many) {
-    uint32_t sum = 0x811c9dc5u;
-
     if (which_kind > 1) {
         return;
     }
+    uint32_t all_of_it = 0x811c9dc5u;
+    for (uint32_t k = 0; k < how_many; k++) {
+        all_of_it = (all_of_it ^ xenolith_load32(base, where + k * 4)) * 0x01000193u;
+    }
+    uint32_t slot =
+        ((all_of_it ^ where ^ (how_many << 16) ^ which_kind) * 0x9e3779b1u) >> 20;
+    slot %= XENOLITH_SHADERS_REMEMBERED;
+    if (shaders_remembered[slot].taken && shaders_remembered[slot].kind == which_kind
+        && shaders_remembered[slot].where == where
+        && shaders_remembered[slot].how_many == how_many
+        && shaders_remembered[slot].all_of_it == all_of_it) {
+        in_hand[which_kind] = shaders_remembered[slot].came_to;
+        return;
+    }
+    take_the_shader_in_hand_again(base, which_kind, where, how_many);
+    shaders_remembered[slot].taken = 1;
+    shaders_remembered[slot].kind = which_kind;
+    shaders_remembered[slot].where = where;
+    shaders_remembered[slot].how_many = how_many;
+    shaders_remembered[slot].all_of_it = all_of_it;
+    shaders_remembered[slot].came_to = in_hand[which_kind];
+}
+
+/* Finds the shader a title handed over in the table, or says it now. */
+static void take_the_shader_in_hand_again(uint8_t *base, uint32_t which_kind, uint32_t where,
+                                          uint32_t how_many) {
+    uint32_t sum = 0x811c9dc5u;
 
     for (uint32_t k = 0; k < how_many; k++) {
         uint32_t word = xenolith_load32(base, where + k * 4);

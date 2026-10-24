@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#include <sched.h>
 #include <time.h>
 
 /* How many calls a trace reports before giving up.
@@ -2259,6 +2260,30 @@ static void show_a_frame(uint32_t front) {
     }
 }
 
+/* How many times something waiting on another thread looks again straight
+ * away before it starts sleeping between looks, which comes to about half a
+ * millisecond.
+ *
+ * A title and the commands it writes take turns: the title waits to see the
+ * commands read up to a point before it writes more, and the commands wait to
+ * see a word the title writes once it has. Sleeping a tenth of a millisecond
+ * at every look put that much on both sides of every turn, and there are over
+ * a hundred turns a frame. */
+#define XENOLITH_LOOKS_BEFORE_SLEEPING 1000u
+
+/* Lets a moment pass between two looks at something another thread changes,
+ * saying whether it slept rather than only stepping aside. */
+static int a_moment_passes(unsigned long *looked) {
+    if (*looked < XENOLITH_LOOKS_BEFORE_SLEEPING) {
+        (*looked)++;
+        sched_yield();
+        return 0;
+    }
+    struct timespec briefly = {0, 100000};
+    nanosleep(&briefly, NULL);
+    return 1;
+}
+
 #include "command_stream.c"
 
 #include "sound.c"
@@ -2285,8 +2310,10 @@ static void consume_the_ring(uint8_t *base, uint32_t written) {
     }
 
     if (written < consumed) {
+        ring_read_from = consumed;
         consumed += walk_the_commands(base, graphics.ring_at + consumed * 4,
                                       graphics.ring_words - consumed, 0);
+        ring_read_from = XENOLITH_NOT_THE_RING;
         if (consumed < graphics.ring_words) {
             uint32_t left = graphics.ring_words - consumed;
             uint32_t whole = packet_words(xenolith_load32(base, graphics.ring_at + consumed * 4));
@@ -2316,8 +2343,10 @@ static void consume_the_ring(uint8_t *base, uint32_t written) {
         return;
     }
 
+    ring_read_from = consumed;
     consumed += walk_the_commands(base, graphics.ring_at + consumed * 4,
                                   written - consumed, 0);
+    ring_read_from = XENOLITH_NOT_THE_RING;
 }
 
 /* Says that the display finished a frame, sixty times a second, on a thread of
@@ -2364,6 +2393,7 @@ static void *drain_the_ring(void *given) {
             "alternative is a title waiting forever");
 
     unsigned long reported_at = 0;
+    unsigned long looked = 0;
 
     while (graphics.read_back_at != 0) {
         uint32_t written = xenolith_load32(base, XENOLITH_RING_WRITE_POINTER);
@@ -2373,8 +2403,13 @@ static void *drain_the_ring(void *given) {
         if (written == consumed) {
             xenolith_send_what_was_drawn();
         }
+        uint32_t was_at = consumed;
         consume_the_ring(base, written);
         xenolith_store32(base, graphics.read_back_at, consumed);
+        if (consumed != was_at) {
+            looked = 0;
+            continue;
+        }
 
         /* A display finishes a frame sixty times a second. This one finishes
          * nothing, at the same rate.
@@ -2387,13 +2422,11 @@ static void *drain_the_ring(void *given) {
          * any hardware. */
         /* What has been read, once a second, so that a run says what it found
          * rather than only what it did not draw. */
-        if (read_so_far.packets != reported_at && ++ticks % 600 == 0) {
+        if (a_moment_passes(&looked) && read_so_far.packets != reported_at
+            && ++ticks % 600 == 0) {
             reported_at = read_so_far.packets;
             say_what_was_read();
         }
-
-        struct timespec briefly = {0, 100000};
-        nanosleep(&briefly, NULL);
     }
     return NULL;
 }

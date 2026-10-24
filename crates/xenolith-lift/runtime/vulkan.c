@@ -798,6 +798,10 @@ static struct {
     int stale;
 } turned[XENOLITH_PICTURES_KEPT];
 
+/* How many frames have been shown, which is what a span of held buttons can be
+ * counted in instead of seconds. */
+static unsigned long frames_shown;
+
 /* How many copies out of what was drawn there have been. */
 static unsigned long copies_counted;
 
@@ -825,9 +829,6 @@ static int anything_recorded;
  * copy into it. */
 static unsigned long batches_begun;
 
-/* Which frame is being drawn, counted here so that a picture is checked against
- * its memory once a frame rather than once for every draw that reads it. */
-static unsigned long frames_begun;
 
 /* Pictures whose memory a title has written over since they were turned.
  *
@@ -2148,7 +2149,7 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
             int written_over = turned[at].stale;
             int kept_up_by_copies =
                 turned[at].renewed_in != 0 && turned[at].renewed_in + 2u >= batches_begun;
-            if (!written_over && turned[at].over != 0 && turned[at].checked_in != frames_begun
+            if (!written_over && turned[at].over != 0 && turned[at].checked_in != frames_shown
                 && !kept_up_by_copies) {
                 uint32_t adds_up_to = what_the_memory_adds_up_to(from, where, turned[at].over);
                 if (turned[at].came_to_unknown) {
@@ -2172,7 +2173,7 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
                 memset(&turned[at], 0, sizeof turned[at]);
                 break;
             }
-            turned[at].checked_in = frames_begun;
+            turned[at].checked_in = frames_shown;
             pictures[slot] = at + 1;
             return 1;
         }
@@ -3653,8 +3654,6 @@ static VkCommandBuffer commands_to_set_up_with(void) {
 }
 
 static int xenolith_begin_a_frame_inside(void) {
-    frames_begun++;
-
     if (recording || !make_what_a_frame_goes_through() || !begin_the_batch()) {
         return 0;
     }
@@ -4908,9 +4907,6 @@ static void show_what_was_drawn_inside(VkImage what) {
 
 #endif
 
-/* How many frames have been shown, which is what a span of held buttons can be
- * counted in instead of seconds. */
-static unsigned long frames_shown;
 
 #ifdef XENOLITH_WITH_WINDOW
 

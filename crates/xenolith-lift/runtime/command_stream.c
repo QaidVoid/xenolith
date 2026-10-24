@@ -275,6 +275,16 @@ static uint32_t packet_words(uint32_t header) {
  * Returns how many words it read, which is every word it was given: a packet
  * that runs past the end is the rest of it not having been written yet, and the
  * walk stops there rather than reading whatever follows. */
+/* Where in the ring the commands being walked began, or nothing where they are
+ * not the ring's own.
+ *
+ * The hardware says how far through the ring it has read as it reads, and a
+ * title waits on that before it writes over what was read. Said only once a
+ * whole run of commands had been walked, which can be the whole of a frame, a
+ * title spent most of its time waiting to be told what had long been read. */
+#define XENOLITH_NOT_THE_RING UINT32_MAX
+static uint32_t ring_read_from = XENOLITH_NOT_THE_RING;
+
 static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words,
                                   unsigned depth) {
     uint32_t at = 0;
@@ -419,10 +429,9 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
                 uint32_t against = xenolith_load32(base, stream + (at + 3) * 4);
                 uint32_t mask = xenolith_load32(base, stream + (at + 4) * 4);
                 unsigned long waited = 0;
+                unsigned long looked = 0;
                 while (!it_holds(how, the_value_looked_at(base, how, where), against, mask)) {
-                    struct timespec briefly = {0, 100000};
-                    nanosleep(&briefly, NULL);
-                    if (++waited == 20000u) {
+                    if (a_moment_passes(&looked) && ++waited == 20000u) {
                         say_a_report("the commands at %#010x have waited two seconds for %s "
                                      "%#x to stand against %#x, and wait on",
                                      stream + at * 4, (how & 0x10u) ? "memory at" : "register",
@@ -608,6 +617,11 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
         }
 
         at += 1 + follows;
+        if (depth == 0 && ring_read_from != XENOLITH_NOT_THE_RING
+            && graphics.read_back_at != 0) {
+            xenolith_store32(base, graphics.read_back_at,
+                             (ring_read_from + at) % graphics.ring_words);
+        }
     }
 
     return at;
