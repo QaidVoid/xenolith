@@ -4879,6 +4879,15 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         /* How far playback has got, in samples the device has taken. */
         ctx->r[3] = how_far_playback_has_got();
         return 1;
+    case 503:
+        /* Which kinds of sound have had their loudness changed since a title
+         * last asked, as a mask written where it points. Nothing changes the
+         * loudness of anything here, so none have. */
+        if ((uint32_t)ctx->r[4] != 0) {
+            xenolith_store32(base, (uint32_t)ctx->r[4], 0);
+        }
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
     case 504:
         /* How loud a kind of sound should be, written where a title points.
          *
