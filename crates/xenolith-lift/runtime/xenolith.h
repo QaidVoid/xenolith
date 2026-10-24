@@ -869,17 +869,37 @@ int xenolith_show_the_frame(void);
  * Nothing said means the whole of what is drawn into. */
 void xenolith_look_at(const float *scale, const float *offset);
 
-/* Hands what was drawn back into a title's own memory, where it said to put it,
- * a row at a time. Returns zero where there is nothing to hand back.
+/* What a title asked to have copied out of what it drew, and where to.
+ *
+ * The rectangle is in the pixels of the place drawn into, and is where it lands
+ * in the picture copied into as well: a title drawing a frame in parts moves
+ * where the picture starts for each part rather than the rectangle. How many
+ * samples a place keeps across and down for each pixel says how much of the
+ * surface one pixel covers, and those are averaged into it on the way out.
  *
  * A title asks for how far away things came out as often as it asks for their
  * colours, and reads that back as a picture to work out haze, fog and what is
  * out of focus. Handed the colours instead it draws none of those, so which of
  * the two is wanted is said here. How far away is kept either as a fraction of
- * the whole or as the console's small float, which is the other flag. */
-int xenolith_hand_back_what_was_drawn(uint8_t *base, uint32_t into, uint32_t across,
-                                      uint32_t down, int as_one_float, int from_how_far,
-                                      int how_far_as_a_float);
+ * the whole or as the console's small float. */
+struct xenolith_copy {
+    uint32_t into;
+    uint32_t pitch;
+    uint32_t height;
+    uint32_t left;
+    uint32_t top;
+    uint32_t right;
+    uint32_t bottom;
+    uint32_t samples_across;
+    uint32_t samples_down;
+    int as_one_float;
+    int from_how_far;
+    int how_far_as_a_float;
+};
+
+/* Hands what was drawn back into a title's own memory, as the copy says.
+ * Returns zero where there is nothing to hand back. */
+int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy *copy);
 
 /* What is held down on the keyboard, as a controller's buttons and the two
  * thumbsticks. Returns zero where there is no window to read one from. */

@@ -152,6 +152,52 @@ static void said_nothing_of_a_shader(uint32_t sum, uint32_t words) {
 #define XENOLITH_WINDOW_EDGE 0x7fffu
 #define XENOLITH_WINDOW_STARTS 0x2081u
 #define XENOLITH_WINDOW_STOPS 0x2082u
+
+/* Where a title says the part of a frame being drawn sits in the memory beside
+ * the hardware, as how far to move it across and down.
+ *
+ * A title whose frame does not fit in that memory draws it a part at a time,
+ * each time moving what it draws so that the part it means lands at the top
+ * left. Whether a shape's corners are moved is a bit of its own, and whether
+ * what a draw is kept to is moved is a bit of what it is kept to. */
+#define XENOLITH_WINDOW_OFFSET 0x2080u
+#define XENOLITH_HOW_SHAPES_ARE_FILLED 0x2205u
+#define XENOLITH_CORNERS_ARE_MOVED (1u << 16)
+#define XENOLITH_KEPT_WHERE_IT_IS (1u << 31)
+
+/* One of the two halves of a place's move, which are fifteen bits each and
+ * may be less than nought. */
+static int32_t moved_by(uint32_t said, unsigned int shift) {
+    return (int32_t)(((said >> shift) & XENOLITH_WINDOW_EDGE) << 17) >> 17;
+}
+
+/* How far a shape's corners are moved across and down, which is nothing where
+ * a title has not asked for them to be. */
+static void how_far_corners_move(const uint8_t *base, int32_t *across, int32_t *down) {
+    uint32_t said = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WINDOW_OFFSET * 4u);
+    uint32_t filled =
+        xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_HOW_SHAPES_ARE_FILLED * 4u);
+    int moved = (filled & XENOLITH_CORNERS_ARE_MOVED) != 0;
+    *across = moved ? moved_by(said, 0) : 0;
+    *down = moved ? moved_by(said, 16) : 0;
+}
+
+/* What a draw is kept to, in the place drawn into. */
+static void where_a_draw_is_kept(const uint8_t *base, int32_t *left, int32_t *top,
+                                 int32_t *right, int32_t *bottom) {
+    uint32_t from = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WINDOW_STARTS * 4u);
+    uint32_t to = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WINDOW_STOPS * 4u);
+    uint32_t said = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WINDOW_OFFSET * 4u);
+    int32_t across = (from & XENOLITH_KEPT_WHERE_IT_IS) != 0 ? 0 : moved_by(said, 0);
+    int32_t down = (from & XENOLITH_KEPT_WHERE_IT_IS) != 0 ? 0 : moved_by(said, 16);
+
+    *left = (int32_t)(from & XENOLITH_WINDOW_EDGE) + across;
+    *top = (int32_t)((from >> 16) & XENOLITH_WINDOW_EDGE) + down;
+    *right = (int32_t)(to & XENOLITH_WINDOW_EDGE) + across;
+    *bottom = (int32_t)((to >> 16) & XENOLITH_WINDOW_EDGE) + down;
+}
+
+static uint32_t not_below_nought(int32_t at) { return at < 0 ? 0u : (uint32_t)at; }
 #define XENOLITH_PACKET_DRAW 0x36u
 #define XENOLITH_PACKET_DRAW_INDEXED 0x22u
 
@@ -385,6 +431,8 @@ static void say_how_a_position_moves(const uint8_t *base) {
 
     float scale[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     float offset[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    int32_t corners_across, corners_down;
+    how_far_corners_move(base, &corners_across, &corners_down);
 
     if ((how & XENOLITH_MOVING_ANY) != 0) {
         /* The hardware is to do it, and what it does is exactly what a host
@@ -404,6 +452,8 @@ static void say_how_a_position_moves(const uint8_t *base) {
                 base, XENOLITH_REGISTERS + (XENOLITH_VIEWPORT_SCALE_X + at * 2u + 1u) * 4u);
             memcpy(&offset[at], &held, sizeof offset[at]);
         }
+        offset[0] += (float)corners_across;
+        offset[1] += (float)corners_down;
         scale[0] *= (float)samples_across;
         offset[0] *= (float)samples_across;
         scale[1] *= (float)samples_down;
@@ -428,8 +478,9 @@ static void say_how_a_position_moves(const uint8_t *base) {
      * the corner that is left is all that is drawn. */
     {
         const float onto_pixels[4] = {(float)samples_across, (float)samples_down, 1.0f, 1.0f};
-        const float half_a_pixel[4] = {0.5f * (float)samples_across,
-                                       0.5f * (float)samples_down, 0.0f, 0.0f};
+        const float half_a_pixel[4] = {(0.5f + (float)corners_across) * (float)samples_across,
+                                       (0.5f + (float)corners_down) * (float)samples_down, 0.0f,
+                                       0.0f};
         xenolith_look_at(onto_pixels, half_a_pixel);
     }
 
@@ -1392,6 +1443,48 @@ static uint32_t a_register(const uint8_t *base, uint32_t which) {
     return xenolith_load32(base, XENOLITH_REGISTERS + which * 4u);
 }
 
+/* Where a copy's rectangle is said: the first fetch, which a title points at
+ * three of its corners, two floats each, before drawing it. */
+#define XENOLITH_COPY_CORNERS 0x4800u
+
+static int32_t a_corner_rounded(float at) { return (int32_t)floorf(at + 0.5f); }
+
+/* The rectangle a copy takes, in the place drawn into, kept to what the copy
+ * is kept to. A rectangle reaching nowhere comes out empty. */
+static void what_a_copy_takes(const uint8_t *base, struct xenolith_copy *copy) {
+    uint32_t corners = a_register(base, XENOLITH_COPY_CORNERS) & ~3u;
+    float at[6] = {0};
+    if (corners != 0) {
+        for (unsigned int one = 0; one < 6u; one++) {
+            uint32_t word = xenolith_load32(base, corners + one * 4u);
+            memcpy(&at[one], &word, sizeof at[one]);
+        }
+    }
+    float least_across = fminf(fminf(at[0], at[2]), at[4]);
+    float most_across = fmaxf(fmaxf(at[0], at[2]), at[4]);
+    float least_down = fminf(fminf(at[1], at[3]), at[5]);
+    float most_down = fmaxf(fmaxf(at[1], at[3]), at[5]);
+
+    int32_t across, down;
+    how_far_corners_move(base, &across, &down);
+    int32_t left = a_corner_rounded(least_across) + across;
+    int32_t right = a_corner_rounded(most_across) + across;
+    int32_t top = a_corner_rounded(least_down) + down;
+    int32_t bottom = a_corner_rounded(most_down) + down;
+
+    int32_t kept_from_left, kept_from_top, kept_to_right, kept_to_bottom;
+    where_a_draw_is_kept(base, &kept_from_left, &kept_from_top, &kept_to_right, &kept_to_bottom);
+    left = left > kept_from_left ? left : kept_from_left;
+    top = top > kept_from_top ? top : kept_from_top;
+    right = right < kept_to_right ? right : kept_to_right;
+    bottom = bottom < kept_to_bottom ? bottom : kept_to_bottom;
+
+    copy->left = not_below_nought(left);
+    copy->top = not_below_nought(top);
+    copy->right = not_below_nought(right);
+    copy->bottom = not_below_nought(bottom);
+}
+
 /* Carries out a copy out of the hardware, which a title asks for as a draw.
  *
  * The draw is a rectangle over what is to be copied, made while the mode says
@@ -1404,20 +1497,26 @@ static uint32_t a_register(const uint8_t *base, uint32_t which) {
  */
 static void copy_what_was_drawn(uint8_t *base) {
     uint32_t control = a_register(base, XENOLITH_COPY_CONTROL);
-    uint32_t into = a_register(base, XENOLITH_COPY_DEST_BASE);
     uint32_t size = a_register(base, XENOLITH_COPY_DEST_PITCH);
-    uint32_t info = a_register(base, XENOLITH_COPY_DEST_INFO);
-    uint32_t across = size & 0x3fffu;
-    uint32_t down = (size >> 16) & 0x3fffu;
-    uint32_t format = (info >> 7) & 0x3fu;
-    int from_how_far = (control & 7u) == XENOLITH_COPY_FROM_HOW_FAR;
+    uint32_t format = (a_register(base, XENOLITH_COPY_DEST_INFO) >> 7) & 0x3fu;
+    uint32_t samples = (a_register(base, 0x2000u) >> XENOLITH_SAMPLES_SHIFT) & 3u;
+
+    struct xenolith_copy copy = {0};
+    copy.into = a_register(base, XENOLITH_COPY_DEST_BASE);
+    copy.pitch = size & 0x3fffu;
+    copy.height = (size >> 16) & 0x3fffu;
+    copy.samples_across = samples == 2u ? 2u : 1u;
+    copy.samples_down = samples != 0u ? 2u : 1u;
+    copy.as_one_float = format == XENOLITH_PICTURE_IN_FLOATS;
+    copy.from_how_far = (control & 7u) == XENOLITH_COPY_FROM_HOW_FAR;
+    copy.how_far_as_a_float = format == XENOLITH_PICTURE_HOW_FAR_AS_A_FLOAT;
+    what_a_copy_takes(base, &copy);
 
     finish_the_frame();
-    if (into != 0 && across != 0 && down != 0) {
-        xenolith_hand_back_what_was_drawn(base, into, across, down,
-                                          format == XENOLITH_PICTURE_IN_FLOATS, from_how_far,
-                                          format == XENOLITH_PICTURE_HOW_FAR_AS_A_FLOAT);
-        xenolith_forget_pictures_at(into, across * down * 4u);
+    if (copy.into != 0 && copy.pitch != 0 && copy.height != 0) {
+        xenolith_hand_back_what_was_drawn(base, &copy);
+        xenolith_forget_pictures_at(copy.into, ((copy.pitch + 31u) & ~31u)
+                                                   * ((copy.bottom + 31u) & ~31u) * 4u);
     }
 
     uint32_t depth = a_register(base, XENOLITH_DEPTH_CLEAR);
@@ -1548,14 +1647,12 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
              * rather than anywhere on it, and without this those went
              * wherever their vertices put them. */
             {
-                uint32_t from =
-                    xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WINDOW_STARTS * 4u);
-                uint32_t to =
-                    xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WINDOW_STOPS * 4u);
-                kept_left = from & XENOLITH_WINDOW_EDGE;
-                kept_top = (from >> 16) & XENOLITH_WINDOW_EDGE;
-                kept_right = to & XENOLITH_WINDOW_EDGE;
-                kept_bottom = (to >> 16) & XENOLITH_WINDOW_EDGE;
+                int32_t left, top, right, bottom;
+                where_a_draw_is_kept(base, &left, &top, &right, &bottom);
+                kept_left = not_below_nought(left);
+                kept_top = not_below_nought(top);
+                kept_right = not_below_nought(right);
+                kept_bottom = not_below_nought(bottom);
             }
 
             /* What a shader reads from outside, taken from where a title

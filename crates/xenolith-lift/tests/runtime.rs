@@ -5819,6 +5819,29 @@ xenolith_function xenolith_lookup(uint32_t address) {
     return 0;
 }
 
+static void put_corners(uint8_t *base, uint32_t at, const float corners[3][2]) {
+    for (unsigned one = 0; one < 3; one++) {
+        uint32_t across, down;
+        __builtin_memcpy(&across, &corners[one][0], 4);
+        __builtin_memcpy(&down, &corners[one][1], 4);
+        xenolith_store32(base, at + one * 8u, across);
+        xenolith_store32(base, at + one * 8u + 4u, down);
+    }
+}
+
+/* Writes one copy into the ring and waits for it to be read. */
+static void copy_now(uint8_t *base, uint32_t ring, uint32_t *written) {
+    xenolith_store32(base, ring + *written * 4u, (3u << 30) | (0x36u << 8));
+    xenolith_store32(base, ring + *written * 4u + 4u, (3u << 16) | 8u);
+    *written += 2u;
+    xenolith_store32(base, 0x7fc80714u, *written);
+    for (int waited = 0; waited < 2000; waited++) {
+        if (xenolith_load32(base, 0x02100000u) == *written) { break; }
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+}
+
 int main(void) {
     const char *path = "image.bin";
     FILE *made = fopen(path, "wb");
@@ -5881,39 +5904,98 @@ int main(void) {
     printf("drawn\n");
 
     /* And copied out the way a title copies a frame: a draw made while the mode
-     * says copy, after the registers say where to and how big. What was drawn
-     * has to arrive there, and the rectangle the copy is asked for with must
-     * not be drawn. */
+     * says copy, after the registers say where to and how big, with the first
+     * fetch pointing at the rectangle to copy and the copy kept to the frame.
+     * What was drawn has to arrive there, and the rectangle the copy is asked
+     * for with must not be drawn. */
     uint32_t into = 0x03000000u;
+    uint32_t rectangle = 0x01100000u;
+    static const float whole[3][2] = {{0.0f, 0.0f}, {1280.0f, 0.0f}, {1280.0f, 720.0f}};
+    put_corners(base, rectangle, whole);
+    xenolith_store32(base, 0x7fc80000u + 0x4800u * 4u, rectangle | 3u);
+    xenolith_store32(base, 0x7fc80000u + 0x2082u * 4u, (720u << 16) | 1280u);
     xenolith_store32(base, 0x7fc80000u + 0x2208u * 4u, 6u);
     xenolith_store32(base, 0x7fc80000u + 0x2318u * 4u, 0x00100000u);
     xenolith_store32(base, 0x7fc80000u + 0x2319u * 4u, into);
     xenolith_store32(base, 0x7fc80000u + 0x231au * 4u, (720u << 16) | 1280u);
     xenolith_store32(base, 0x7fc80000u + 0x231bu * 4u, 6u << 7);
     uint32_t ring = 0x02000000u;
-    xenolith_store32(base, ring, (3u << 30) | (0x36u << 8));
-    xenolith_store32(base, ring + 4u, (3u << 16) | 8u);
     xenolith_context ctx = {0};
     ctx.r[3] = ring;
     ctx.r[4] = 16;
     xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
     ctx.r[3] = 0x02100000u;
     xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
-    xenolith_store32(base, 0x7fc80714u, 2u);
-    for (int waited = 0; waited < 2000; waited++) {
-        if (xenolith_load32(base, 0x02100000u) == 2u) { break; }
-        struct timespec once = {0, 1000000};
-        nanosleep(&once, NULL);
+    /* What nothing copied leaves, so that whether a copy reached a word is
+     * plain from the word. */
+    uint32_t bytes = 1280u * 736u * 4u;
+    for (uint32_t word = 0; word < bytes / 4u; word++) {
+        xenolith_store32(base, into + word * 4u, 0x12345678u);
     }
+    uint32_t written = 0;
+    copy_now(base, ring, &written);
     uint32_t lit = 0;
     for (uint32_t word = 0; word < 1280u * 720u; word += 7u) {
-        lit += xenolith_load32(base, into + word * 4u) != 0u;
+        lit += xenolith_load32(base, into + word * 4u) != 0x12345678u;
     }
     if (lit == 0) {
         fprintf(stderr, "nothing that was drawn arrived where the copy was to go\n");
         return 7;
     }
     printf("copied\n");
+
+    /* The same frame drawn and copied a half at a time, the way a title too
+     * big for the memory beside the hardware copies it: the left half where it
+     * is, wiping what was drawn after it, then the frame drawn again moved left
+     * by the window and the right half copied into a picture that starts one
+     * column of squares further on. The two halves together have to be the
+     * whole. */
+    uint32_t halves = 0x04000000u;
+    for (uint32_t word = 0; word < bytes / 4u; word++) {
+        xenolith_store32(base, halves + word * 4u, 0x12345678u);
+    }
+    static const float left[3][2] = {{0.0f, 0.0f}, {640.0f, 0.0f}, {640.0f, 720.0f}};
+    put_corners(base, rectangle, left);
+    xenolith_store32(base, 0x7fc80000u + 0x2082u * 4u, (720u << 16) | 640u);
+    xenolith_store32(base, 0x7fc80000u + 0x2319u * 4u, halves);
+    xenolith_store32(base, 0x7fc80000u + 0x2318u * 4u, 0x00100100u);
+    xenolith_store32(base, 0x7fc80000u + 0x231eu * 4u, 0xff000000u);
+    copy_now(base, ring, &written);
+    xenolith_store32(base, 0x7fc80000u + 0x2318u * 4u, 0x00100000u);
+
+    static const float moved_scale[4] = {640.0f, 360.0f, 1.0f, 1.0f};
+    static const float moved_offset[4] = {0.0f, 360.0f, 0.0f, 0.0f};
+    xenolith_store32(base, 0x7fc80000u + 0x4800u * 4u, at | 3u);
+    if (!xenolith_begin_a_frame()) { return 9; }
+    xenolith_look_at(moved_scale, moved_offset);
+    xenolith_clip_to(0u, 0u, 1279u, 719u);
+    xenolith_hand_over_constants(base + 0x7fc80000u + 0x4000u * 4u,
+                                 base + 0x7fc80000u + 0x4900u * 4u,
+                                 base + 0x7fc80000u + 0x4908u * 4u);
+    if (!xenolith_draw_now(0x00010001u, 0xfu, 0u, XENOLITH_DRAWN_HOWEVER_SOLID, 0u, 0u, vertex,
+                           vertex_length, 0u, pixel, pixel_length, 3u,
+                           XENOLITH_SHAPE_TRIANGLES)) {
+        return 10;
+    }
+    if (!xenolith_end_a_frame()) { return 11; }
+    xenolith_store32(base, 0x7fc80000u + 0x4800u * 4u, rectangle | 3u);
+
+    static const float right[3][2] = {{640.0f, 0.0f}, {1280.0f, 0.0f}, {1280.0f, 720.0f}};
+    put_corners(base, rectangle, right);
+    xenolith_store32(base, 0x7fc80000u + 0x2080u * 4u, 0x7d80u);
+    xenolith_store32(base, 0x7fc80000u + 0x2205u * 4u, 1u << 16);
+    xenolith_store32(base, 0x7fc80000u + 0x2081u * 4u, 640u);
+    xenolith_store32(base, 0x7fc80000u + 0x2082u * 4u, (720u << 16) | 1280u);
+    xenolith_store32(base, 0x7fc80000u + 0x2319u * 4u, halves + 20u * 4096u);
+    copy_now(base, ring, &written);
+
+    for (uint32_t word = 0; word < bytes / 4u; word++) {
+        if (xenolith_load32(base, halves + word * 4u) != xenolith_load32(base, into + word * 4u)) {
+            fprintf(stderr, "the halves differ from the whole at byte %u\n", word * 4u);
+            return 8;
+        }
+    }
+    printf("copied in halves\n");
     return 0;
 }
 "#;
@@ -5955,6 +6037,10 @@ int main(void) {
     assert!(
         said.contains("copied"),
         "the frame was not copied out: {said}"
+    );
+    assert!(
+        said.contains("copied in halves"),
+        "the frame copied in halves was not the whole: {said}"
     );
     let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
     assert!(picture.starts_with(b"P6\n"), "the frame is not a picture");
