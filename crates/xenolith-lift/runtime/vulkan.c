@@ -4530,6 +4530,29 @@ static uint32_t a_part_as_a_byte(float part) {
     return (uint32_t)(part * 255.0f + 0.5f);
 }
 
+/* Every half float as a whole one and as a byte, worked out once.
+ *
+ * A copy turns every part of every pixel it takes, a few million of them for
+ * each frame a title copies out, and working each out on its own came to most
+ * of what a copy cost. There are only sixty five thousand of them. */
+static float halves_as_floats[65536];
+static uint8_t halves_as_bytes[65536];
+
+static void work_out_the_halves(void) {
+    static int worked_out;
+    if (worked_out) {
+        return;
+    }
+    for (uint32_t one = 0; one < 65536u; one++) {
+        uint16_t half = (uint16_t)one;
+        unsigned char at[2];
+        memcpy(at, &half, sizeof at);
+        halves_as_floats[one] = a_half(at);
+        halves_as_bytes[one] = (uint8_t)a_part_as_a_byte(halves_as_floats[one]);
+    }
+    worked_out = 1;
+}
+
 /* Turns how far away a thing is into the console's small float, four bits of
  * exponent over twenty of mantissa, which is the other way it keeps one. */
 static uint32_t a_short_float_from_how_far(float away) {
@@ -4706,6 +4729,7 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
     size_t sample_bytes = copy->from_how_far ? 4u : XENOLITH_SURFACE_BYTES;
 
     work_out_a_square();
+    work_out_the_halves();
 
     const unsigned char *from = pixels;
     for (uint32_t row = copy->top; row < bottom; row++) {
@@ -4747,22 +4771,34 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
                 }
                 colour = held << 8;
             } else {
-                float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                for (uint32_t down_in = 0; down_in < down_by; down_in++) {
-                    const unsigned char *sample =
-                        one_sample + (size_t)down_in * grid_across * sample_bytes;
-                    for (uint32_t across_in = 0; across_in < across_by; across_in++) {
-                        for (uint32_t part = 0; part < 4u; part++) {
-                            sum[part] += a_half(sample + across_in * sample_bytes + part * 2u);
+                uint32_t part_of[4];
+                float bright;
+                if (samples == 1u) {
+                    uint16_t halves[4];
+                    memcpy(halves, one_sample, sizeof halves);
+                    for (uint32_t part = 0; part < 4u; part++) {
+                        part_of[part] = halves_as_bytes[halves[part]];
+                    }
+                    bright = halves_as_floats[halves[0]];
+                } else {
+                    float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                    for (uint32_t down_in = 0; down_in < down_by; down_in++) {
+                        const unsigned char *sample =
+                            one_sample + (size_t)down_in * grid_across * sample_bytes;
+                        for (uint32_t across_in = 0; across_in < across_by; across_in++) {
+                            uint16_t halves[4];
+                            memcpy(halves, sample + across_in * sample_bytes, sizeof halves);
+                            for (uint32_t part = 0; part < 4u; part++) {
+                                sum[part] += halves_as_floats[halves[part]];
+                            }
                         }
                     }
-                }
-                uint32_t part_of[4];
-                for (uint32_t part = 0; part < 4u; part++) {
-                    part_of[part] = a_part_as_a_byte(sum[part] / (float)samples);
+                    for (uint32_t part = 0; part < 4u; part++) {
+                        part_of[part] = a_part_as_a_byte(sum[part] / (float)samples);
+                    }
+                    bright = sum[0] / (float)samples;
                 }
                 if (copy->as_one_float) {
-                    float bright = sum[0] / (float)samples;
                     memcpy(&colour, &bright, sizeof colour);
                 } else if (copy->red_and_blue_swapped) {
                     colour = (part_of[3] << 24) | (part_of[0] << 16) | (part_of[1] << 8)
