@@ -515,6 +515,59 @@ int main(void) {
     }
 }
 
+/// A context for the sound decoder that is let go can be made again.
+///
+/// A title makes one for every compressed sound it plays and lets it go when the
+/// sound ends, many times a minute. Never taken back, they ran out, and the
+/// title went on to use a voice it had failed to make.
+#[test]
+fn a_sound_context_let_go_is_made_again() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <sys/mman.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    uint8_t *base = mmap(NULL, (size_t)1 << 32, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) {
+        return 6;
+    }
+    uint32_t first = 0;
+    for (int round = 0; round < 1000; round++) {
+        xenolith_context ctx = {0};
+        ctx.r[3] = 64;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 548, "XMACreateContext");
+        uint32_t made = xenolith_load32(base, 64);
+        if (ctx.r[3] != 0u || made == 0) {
+            fprintf(stderr, "round %d made no context\n", round);
+            return 1;
+        }
+        if (round == 0) {
+            first = made;
+        } else if (made != first) {
+            fprintf(stderr, "round %d made %#x rather than the one let go, %#x\n", round,
+                    made, first);
+            return 2;
+        }
+        ctx.r[3] = made;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 550, "XMAReleaseContext");
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("sound_contexts", program) {
+        panic!("a sound context let go was not made again:\n{complaint}");
+    }
+}
+
 /// A read that begins in the last bytes of the guest span lands on something.
 ///
 /// Guest addresses are four bytes wide and a read works out where it is reading

@@ -360,6 +360,9 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* How large a context for the sound decoder is: sixteen words. */
 #define XENOLITH_SOUND_CONTEXT 64u
 
+/* How many of them there are, which is how many the console's decoder keeps. */
+#define XENOLITH_SOUND_CONTEXTS 320u
+
 /* What a call given an argument it cannot use reports. */
 #define XENOLITH_STATUS_INVALID_PARAMETER 0xC000000Du
 
@@ -489,6 +492,51 @@ static uint32_t take_guest_memory(uint32_t size, uint32_t alignment) {
     handed_out = at + rounded;
     pthread_mutex_unlock(&handing_out);
     return at;
+}
+
+/* The contexts for the sound decoder, kept in one table as the console keeps
+ * them, and which of them are in use.
+ *
+ * A title makes one for every compressed sound it plays and lets it go when the
+ * sound ends. Each taken from the heap and never given back, a title playing a
+ * few sounds a second ran the heap dry within minutes, and the voice it then
+ * failed to make was one it went on to use as though it had been made. */
+static uint32_t sound_contexts;
+static uint8_t sound_context_taken[XENOLITH_SOUND_CONTEXTS];
+static pthread_mutex_t sound_contexts_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Hands out a context cleared to nothing, or nought where every one is taken. */
+static uint32_t take_a_sound_context(uint8_t *base) {
+    uint32_t context = 0;
+    pthread_mutex_lock(&sound_contexts_lock);
+    if (sound_contexts == 0) {
+        sound_contexts = take_guest_memory(XENOLITH_SOUND_CONTEXTS * XENOLITH_SOUND_CONTEXT, 0);
+    }
+    for (uint32_t at = 0; sound_contexts != 0 && at < XENOLITH_SOUND_CONTEXTS; at++) {
+        if (!sound_context_taken[at]) {
+            sound_context_taken[at] = 1;
+            context = sound_contexts + at * XENOLITH_SOUND_CONTEXT;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&sound_contexts_lock);
+    for (uint32_t word = 0; context != 0 && word < XENOLITH_SOUND_CONTEXT; word += 4u) {
+        xenolith_store32(base, context + word, 0);
+    }
+    return context;
+}
+
+/* Takes a context back. One this did not hand out is left alone. */
+static void give_back_a_sound_context(uint32_t context) {
+    pthread_mutex_lock(&sound_contexts_lock);
+    if (sound_contexts != 0 && context >= sound_contexts) {
+        uint32_t at = (context - sound_contexts) / XENOLITH_SOUND_CONTEXT;
+        if (at < XENOLITH_SOUND_CONTEXTS &&
+            context == sound_contexts + at * XENOLITH_SOUND_CONTEXT) {
+            sound_context_taken[at] = 0;
+        }
+    }
+    pthread_mutex_unlock(&sound_contexts_lock);
 }
 
 /* Reserving and committing guest memory.
@@ -4849,7 +4897,7 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
                          "voices are not heard");
         }
         uint32_t into = (uint32_t)ctx->r[3];
-        uint32_t context = take_guest_memory(XENOLITH_SOUND_CONTEXT, 0);
+        uint32_t context = take_a_sound_context(base);
         if (into == 0 || context == 0) {
             ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
             return 1;
@@ -4859,7 +4907,8 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
         return 1;
     }
     case 550:
-        /* Letting a context go. Memory here is never given back. */
+        /* Letting a context go, so that it can be handed out again. */
+        give_back_a_sound_context((uint32_t)ctx->r[3]);
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 499: {
