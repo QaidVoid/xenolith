@@ -4711,6 +4711,43 @@ static VkImage a_copy_made_into_bytes(VkCommandBuffer one, const struct xenolith
     return bytes;
 }
 
+/* Puts a copy already made into bytes where the title asked for it, in
+ * squares.
+ *
+ * Four parts side by side in a square are four words side by side in memory,
+ * so they go across together, each word turned round to the larger end first,
+ * and where they go is worked out once for the four. */
+static void put_a_copy_in_squares(uint8_t *base, const struct xenolith_copy *copy,
+                                  const unsigned char *from, uint32_t right, uint32_t bottom,
+                                  uint32_t squares_a_row) {
+    uint32_t across = right - copy->left;
+    for (uint32_t row = copy->top; row < bottom; row++) {
+        uint32_t down_to = (row / XENOLITH_A_SQUARE_ACROSS) * squares_a_row
+                           * XENOLITH_WHAT_A_SQUARE_HOLDS;
+        const uint32_t *in_the_square =
+            &where_in_a_square[(row % XENOLITH_A_SQUARE_ACROSS) * XENOLITH_A_SQUARE_ACROSS];
+        const unsigned char *line = from + (size_t)(row - copy->top) * across * 4u;
+        uint32_t at = copy->left;
+        while (at < right) {
+            uint32_t run = 4u - (at & 3u);
+            if (run > right - at) {
+                run = right - at;
+            }
+            uint8_t *to = base + copy->into + down_to
+                          + (at / XENOLITH_A_SQUARE_ACROSS) * XENOLITH_WHAT_A_SQUARE_HOLDS
+                          + in_the_square[at % XENOLITH_A_SQUARE_ACROSS];
+            const unsigned char *was = line + (size_t)(at - copy->left) * 4u;
+            for (uint32_t byte = 0; byte < run * 4u; byte += 4u) {
+                to[byte] = was[byte + 3u];
+                to[byte + 1u] = was[byte + 2u];
+                to[byte + 2u] = was[byte + 1u];
+                to[byte + 3u] = was[byte];
+            }
+            at += run;
+        }
+    }
+}
+
 /* Puts a copy made into bytes into every picture already turned out of the
  * memory it writes, and says which pictures those were.
  *
@@ -4850,8 +4887,9 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1,
                              &back_to_drawing);
     } else {
-        VkImage bytes =
-            copy->as_one_float ? VK_NULL_HANDLE : a_copy_made_into_bytes(one, copy, &out, across, down);
+        VkImage bytes = copy->as_one_float
+                            ? VK_NULL_HANDLE
+                            : a_copy_made_into_bytes(one, copy, &out, across, down);
         if (bytes != VK_NULL_HANDLE) {
             VkBufferImageCopy made = {0};
             made.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -4922,88 +4960,90 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
     work_out_the_halves();
 
     const unsigned char *from = pixels;
-    for (uint32_t row = copy->top; row < bottom; row++) {
-        uint32_t down_to = (row / XENOLITH_A_SQUARE_ACROSS) * squares_a_row
-                           * XENOLITH_WHAT_A_SQUARE_HOLDS;
-        const uint32_t *in_the_square =
-            &where_in_a_square[(row % XENOLITH_A_SQUARE_ACROSS) * XENOLITH_A_SQUARE_ACROSS];
-        const unsigned char *first_row =
-            from + (size_t)(row - copy->top) * down_by * grid_across * sample_bytes;
+    if (in_bytes) {
+        put_a_copy_in_squares(base, copy, from, right, bottom, squares_a_row);
+    } else {
+        for (uint32_t row = copy->top; row < bottom; row++) {
+            uint32_t down_to = (row / XENOLITH_A_SQUARE_ACROSS) * squares_a_row
+                               * XENOLITH_WHAT_A_SQUARE_HOLDS;
+            const uint32_t *in_the_square =
+                &where_in_a_square[(row % XENOLITH_A_SQUARE_ACROSS) * XENOLITH_A_SQUARE_ACROSS];
+            const unsigned char *first_row =
+                from + (size_t)(row - copy->top) * down_by * grid_across * sample_bytes;
 
-        for (uint32_t at = copy->left; at < right; at++) {
-            const unsigned char *one_sample =
-                first_row + (size_t)(at - copy->left) * across_by * sample_bytes;
-            /* A place holding one float rather than four colours takes the
-             * brightness on its own, which is what a title puts in such a
-             * place: it works out how bright the whole scene came out by
-             * halving a picture of it down to a single reading, and reads that
-             * back to decide how bright to show the scene. Handed the four
-             * colours packed instead, it reads their bytes as a float, which is
-             * a number nothing sensible comes of, and the scene it then shows
-             * is white. */
-            uint32_t colour;
-            if (in_bytes) {
-                memcpy(&colour, from + ((size_t)(row - copy->top) * across + (at - copy->left)) * 4u,
-                       sizeof colour);
-            } else if (copy->from_how_far) {
-                /* Kept as a whole float on this side and as the console keeps
-                 * it on the other: three bytes of it over one of the stencil a
-                 * title tests against, which nothing here draws with. How far
-                 * away is not averaged, because a place half way between two
-                 * things is at neither. */
-                float away;
-                memcpy(&away, one_sample, sizeof away);
-                uint32_t held;
-                if (copy->how_far_as_a_float) {
-                    held = a_short_float_from_how_far(away);
-                } else {
-                    float counted = away * 16777215.0f;
-                    held = counted <= 0.0f ? 0u
-                           : counted >= 16777215.0f ? 0xffffffu
-                                                    : (uint32_t)counted;
-                }
-                colour = held << 8;
-            } else {
-                uint32_t part_of[4];
-                float bright;
-                if (samples == 1u) {
-                    uint16_t halves[4];
-                    memcpy(halves, one_sample, sizeof halves);
-                    for (uint32_t part = 0; part < 4u; part++) {
-                        part_of[part] = halves_as_bytes[halves[part]];
+            for (uint32_t at = copy->left; at < right; at++) {
+                const unsigned char *one_sample =
+                    first_row + (size_t)(at - copy->left) * across_by * sample_bytes;
+                /* A place holding one float rather than four colours takes the
+                 * brightness on its own, which is what a title puts in such a
+                 * place: it works out how bright the whole scene came out by
+                 * halving a picture of it down to a single reading, and reads that
+                 * back to decide how bright to show the scene. Handed the four
+                 * colours packed instead, it reads their bytes as a float, which is
+                 * a number nothing sensible comes of, and the scene it then shows
+                 * is white. */
+                uint32_t colour;
+                if (copy->from_how_far) {
+                    /* Kept as a whole float on this side and as the console keeps
+                     * it on the other: three bytes of it over one of the stencil a
+                     * title tests against, which nothing here draws with. How far
+                     * away is not averaged, because a place half way between two
+                     * things is at neither. */
+                    float away;
+                    memcpy(&away, one_sample, sizeof away);
+                    uint32_t held;
+                    if (copy->how_far_as_a_float) {
+                        held = a_short_float_from_how_far(away);
+                    } else {
+                        float counted = away * 16777215.0f;
+                        held = counted <= 0.0f ? 0u
+                               : counted >= 16777215.0f ? 0xffffffu
+                                                        : (uint32_t)counted;
                     }
-                    bright = halves_as_floats[halves[0]];
+                    colour = held << 8;
                 } else {
-                    float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                    for (uint32_t down_in = 0; down_in < down_by; down_in++) {
-                        const unsigned char *sample =
-                            one_sample + (size_t)down_in * grid_across * sample_bytes;
-                        for (uint32_t across_in = 0; across_in < across_by; across_in++) {
-                            uint16_t halves[4];
-                            memcpy(halves, sample + across_in * sample_bytes, sizeof halves);
-                            for (uint32_t part = 0; part < 4u; part++) {
-                                sum[part] += halves_as_floats[halves[part]];
+                    uint32_t part_of[4];
+                    float bright;
+                    if (samples == 1u) {
+                        uint16_t halves[4];
+                        memcpy(halves, one_sample, sizeof halves);
+                        for (uint32_t part = 0; part < 4u; part++) {
+                            part_of[part] = halves_as_bytes[halves[part]];
+                        }
+                        bright = halves_as_floats[halves[0]];
+                    } else {
+                        float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        for (uint32_t down_in = 0; down_in < down_by; down_in++) {
+                            const unsigned char *sample =
+                                one_sample + (size_t)down_in * grid_across * sample_bytes;
+                            for (uint32_t across_in = 0; across_in < across_by; across_in++) {
+                                uint16_t halves[4];
+                                memcpy(halves, sample + across_in * sample_bytes, sizeof halves);
+                                for (uint32_t part = 0; part < 4u; part++) {
+                                    sum[part] += halves_as_floats[halves[part]];
+                                }
                             }
                         }
+                        for (uint32_t part = 0; part < 4u; part++) {
+                            part_of[part] = a_part_as_a_byte(sum[part] / (float)samples);
+                        }
+                        bright = sum[0] / (float)samples;
                     }
-                    for (uint32_t part = 0; part < 4u; part++) {
-                        part_of[part] = a_part_as_a_byte(sum[part] / (float)samples);
+                    if (copy->as_one_float) {
+                        memcpy(&colour, &bright, sizeof colour);
+                    } else if (copy->red_and_blue_swapped) {
+                        colour = (part_of[3] << 24) | (part_of[0] << 16) | (part_of[1] << 8)
+                                 | part_of[2];
+                    } else {
+                        colour = (part_of[3] << 24) | (part_of[2] << 16) | (part_of[1] << 8)
+                                 | part_of[0];
                     }
-                    bright = sum[0] / (float)samples;
                 }
-                if (copy->as_one_float) {
-                    memcpy(&colour, &bright, sizeof colour);
-                } else if (copy->red_and_blue_swapped) {
-                    colour = (part_of[3] << 24) | (part_of[0] << 16) | (part_of[1] << 8)
-                             | part_of[2];
-                } else {
-                    colour = (part_of[3] << 24) | (part_of[2] << 16) | (part_of[1] << 8)
-                             | part_of[0];
-                }
+                uint32_t sits = down_to
+                                + (at / XENOLITH_A_SQUARE_ACROSS) * XENOLITH_WHAT_A_SQUARE_HOLDS
+                                + in_the_square[at % XENOLITH_A_SQUARE_ACROSS];
+                xenolith_store32(base, copy->into + sits, colour);
             }
-            uint32_t sits = down_to + (at / XENOLITH_A_SQUARE_ACROSS) * XENOLITH_WHAT_A_SQUARE_HOLDS
-                            + in_the_square[at % XENOLITH_A_SQUARE_ACROSS];
-            xenolith_store32(base, copy->into + sits, colour);
         }
     }
 
