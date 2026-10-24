@@ -827,20 +827,40 @@ static void one_corner_over(uint32_t *window, uint32_t room, uint32_t from, uint
     }
 }
 
+/* Where a title says what number in its list starts a run of shapes again,
+ * and the bit of how shapes are filled that says to look for it at all. The
+ * hardware reads only the low twenty four bits of a number four bytes wide,
+ * and the number that starts a run again is compared as it is read. */
+#define XENOLITH_RUNS_START_AGAIN_AT 0x2103u
+#define XENOLITH_RUNS_CAN_START_AGAIN (1u << 21)
+#define XENOLITH_A_WIDE_NUMBER 0xffffffu
+
 static uint32_t a_corner_named(const uint8_t *base, uint32_t listed_at, int wide, uint32_t which) {
     if (wide) {
-        return xenolith_load32(base, listed_at + which * 4u);
+        return xenolith_load32(base, listed_at + which * 4u) & XENOLITH_A_WIDE_NUMBER;
     }
     return xenolith_load16(base, listed_at + which * 2u);
 }
 
-static uint32_t breaks_a_run(int wide) {
-    return wide ? 0xffffffffu : 0xffffu;
+/* The number in a title's list that starts a run of shapes again, or one no
+ * number read from a list can be where the title has not asked for any.
+ *
+ * A title says which. One that keeps a grid of lines as runs in a list four
+ * bytes to a number ends each with sixteen million less one, and taking only
+ * all ones as the end of a run drew every run on to a vertex that far into the
+ * buffer, a spray of lines out of one point. */
+static uint32_t breaks_a_run(const uint8_t *base, int wide) {
+    if ((register_says(base, XENOLITH_HOW_SHAPES_ARE_FILLED) & XENOLITH_RUNS_CAN_START_AGAIN)
+        == 0) {
+        return 0xffffffffu;
+    }
+    uint32_t at = register_says(base, XENOLITH_RUNS_START_AGAIN_AT);
+    return wide ? at & XENOLITH_A_WIDE_NUMBER : at & 0xffffu;
 }
 
 static void look_over_the_list(const uint8_t *base, uint32_t listed_at, int wide,
                                uint32_t listed_count, uint32_t *comes_to, uint32_t *furthest) {
-    uint32_t breaks = breaks_a_run(wide);
+    uint32_t breaks = breaks_a_run(base, wide);
     uint32_t most = 0;
     uint32_t held = 0;
     uint32_t made = 0;
@@ -876,7 +896,7 @@ static uint32_t order_the_corners(const uint8_t *base, uint32_t *window, uint32_
                                   int wide, int a_run, uint32_t adds) {
     uint32_t done[XENOLITH_FETCH_SLOTS];
     uint32_t doing = 0;
-    uint32_t breaks = breaks_a_run(wide);
+    uint32_t breaks = breaks_a_run(base, wide);
 
     for (uint32_t one = 0; one < streams; one++) {
         uint32_t slot = reads[one * 4];
