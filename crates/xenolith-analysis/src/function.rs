@@ -790,8 +790,10 @@ fn claim_run(
 
 /// How far after the instruction holding the top half of an address the one
 /// adding the bottom half is looked for. A compiler puts the two close together
-/// but not always next to each other.
-const HALVES_APART: u32 = 8;
+/// but not always next to each other: one title fills a table of ten addresses
+/// with every top half loaded first and the bottom halves added fifteen
+/// instructions on.
+const HALVES_APART: u32 = 16;
 
 /// Returns the addresses the code puts together out of two halves.
 ///
@@ -803,6 +805,12 @@ const HALVES_APART: u32 = 8;
 /// it: the same three things a table's addresses are held to, and the last of
 /// them keeps an address built to point inside a function, as a label's is,
 /// from being taken for a function of its own.
+///
+/// Inside something already walked is allowed where the walk only ever branched
+/// there, so that a block starts at it and nothing falls into it. That is a
+/// function another one hands over to with a plain branch, which a walk takes
+/// for part of whatever branched, and one title calls such a function through
+/// the address it built and nothing else.
 ///
 /// Most addresses built this way are of data, and data placed just after a
 /// function decodes as often as not. So what is found must also look like a
@@ -819,6 +827,7 @@ fn scan_for_constructed(
 ) -> Vec<u32> {
     let starts: BTreeSet<u32> = walked.keys().copied().collect();
     let claimed = claimed_instructions(walked);
+    let branched_to: BTreeSet<u32> = walked.values().flatten().map(|block| block.start).collect();
     let mut found = BTreeSet::new();
 
     for section in image.executable_sections() {
@@ -852,7 +861,7 @@ fn scan_for_constructed(
                     if let Some(target) = low {
                         if names_code(image, target)
                             && !starts.contains(&target)
-                            && !claimed.contains(&target)
+                            && (!claimed.contains(&target) || branched_to.contains(&target))
                             && nothing_falls_into(image, target)
                             && (prologue_signals(image, target, helpers) >= PROLOGUE_SIGNALS
                                 || reads_as_a_leaf(image, target, &starts, &starts).is_some()
@@ -1737,6 +1746,34 @@ mod tests {
 
         assert_eq!(
             program.function_at(0x8200_0010).map(|one| one.origin),
+            Some(Origin::Constructed)
+        );
+    }
+
+    /// One built for a leaf that another function hands over to with a plain
+    /// branch names a function, though the walk of the one that branches took
+    /// the leaf for its own. The halves are far apart, as a compiler leaves
+    /// them when it loads every top half of a table first.
+    #[test]
+    fn an_address_built_for_a_leaf_branched_to_names_a_function() {
+        let mut words = vec![encode::addis(8, 0, 0x8200)];
+        words.extend(std::iter::repeat_n(encode::addi(4, 5, 1), 14));
+        words.extend([
+            encode::addi(10, 8, 0x58),
+            encode::std(10, 11, 0),
+            encode::bl(0x8),
+            encode::blr(),
+            encode::addi(4, 0, 0),
+            encode::b(0x8),
+            encode::blr(),
+            encode::addi(3, 3, 1),
+            encode::blr(),
+        ]);
+
+        let program = analyze(&image(&words), &[]);
+
+        assert_eq!(
+            program.function_at(0x8200_0058).map(|one| one.origin),
             Some(Origin::Constructed)
         );
     }
