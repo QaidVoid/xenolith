@@ -441,6 +441,80 @@ int main(void) {
     }
 }
 
+/// A thread a title asks to run on one processor is told it is on that one.
+///
+/// A title's sound engine makes a thread for a processor, has it mark that
+/// processor's place, and waits until every place it made a thread for is
+/// marked. A thread told it is on some other processor marks the wrong place
+/// and the wait never ends. The processor is asked for in the top byte of how
+/// the thread is made, and again later by the object a title holds for it.
+#[test]
+fn a_thread_is_on_the_processor_a_title_asked_for() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <sys/mman.h>
+#include <time.h>
+
+static volatile uint32_t block;
+static volatile int done;
+
+void sub_82000000(xenolith_context *ctx, uint8_t *base) {
+    (void)base;
+    block = (uint32_t)ctx->r[13];
+    done = 1;
+}
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    return address == 0x82000000u ? sub_82000000 : 0;
+}
+
+int main(void) {
+    uint8_t *base = mmap(NULL, (size_t)1 << 32, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) {
+        return 6;
+    }
+
+    /* Made for the fifth processor, and not suspended. */
+    xenolith_context ctx = {0};
+    ctx.r[3] = 64;
+    ctx.r[7] = 0x82000000u;
+    ctx.r[9] = 0x10000000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 13, "ExCreateThread");
+    for (int waited = 0; waited < 2000 && done == 0; waited++) {
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    if (done == 0 || block == 0) {
+        fprintf(stderr, "the thread never ran\n");
+        return 1;
+    }
+    if (xenolith_load8(base, block + 268u) != 4u) {
+        fprintf(stderr, "the thread was told it is on processor %u\n",
+                (unsigned)xenolith_load8(base, block + 268u));
+        return 2;
+    }
+
+    /* Moved to the second processor by the object a title holds for it. */
+    ctx.r[3] = xenolith_load32(base, 64);
+    ctx.r[4] = 0x2u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 151, "KeSetAffinityThread");
+    if (xenolith_load8(base, block + 268u) != 1u) {
+        fprintf(stderr, "after moving, the thread was told it is on processor %u\n",
+                (unsigned)xenolith_load8(base, block + 268u));
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("on_its_processor", program) {
+        panic!("a thread was not on the processor asked for:\n{complaint}");
+    }
+}
+
 /// A read that begins in the last bytes of the guest span lands on something.
 ///
 /// Guest addresses are four bytes wide and a read works out where it is reading

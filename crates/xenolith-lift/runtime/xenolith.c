@@ -806,6 +806,10 @@ struct object {
     uint32_t entry;
     uint32_t argument;
     uint8_t *base;
+    /* Which of the six processors a title asked a thread to run on, a bit
+     * each, or none, and the block that says which one it is on. */
+    uint32_t processors;
+    uint32_t block;
 };
 
 static struct object objects[XENOLITH_OBJECTS];
@@ -1199,6 +1203,23 @@ static void *count_the_ticks(void *given) {
     return NULL;
 }
 
+/* Says in a thread's block that it is on the processor a title asked for, where
+ * it asked for one.
+ *
+ * A title reads which processor it is on and acts on it: its sound engine has
+ * each of its threads mark its own processor's place and then waits until the
+ * places of every processor it made a thread for are marked. A thread told it
+ * was on some other processor marks the wrong place, and the wait never ends.
+ * Where a title asked for more than one, the first is taken. */
+static void put_the_thread_on_its_processor(struct object *thread) {
+    uint32_t wanted = thread->processors & ((1u << XENOLITH_PROCESSORS) - 1u);
+    if (wanted == 0 || thread->block == 0) {
+        return;
+    }
+    xenolith_store8(thread->base, thread->block + XENOLITH_PROCESSOR_NUMBER,
+                    (uint8_t)__builtin_ctz(wanted));
+}
+
 /* Hands out a block for a guest thread, all of them sharing the one count. */
 static uint32_t take_processor_block(uint8_t *base) {
     pthread_mutex_lock(&starting_the_count);
@@ -1368,6 +1389,8 @@ static void *run_guest_thread(void *given) {
     }
     state.r[1] = stack - 64;
     state.r[13] = take_processor_block(self->base);
+    self->block = (uint32_t)state.r[13];
+    put_the_thread_on_its_processor(self);
     if (self->startup != 0) {
         state.r[3] = self->entry;
         state.r[4] = self->argument;
@@ -1532,6 +1555,7 @@ static void create_thread(xenolith_context *ctx, uint8_t *base) {
     made->argument = (uint32_t)ctx->r[8];
     made->base = base;
     made->suspended = ((uint32_t)ctx->r[9] & 1) != 0;
+    made->processors = (uint32_t)ctx->r[9] >> 24;
 
     if (handle_at != 0) {
         xenolith_store32(base, handle_at, handle);
@@ -3925,8 +3949,24 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
     case 13:
         create_thread(ctx, base);
         return 1;
+    case 151: {
+        /* Which processors a thread may run on, named by the object a title
+         * holds for it. Which host processor runs it is the host's to decide,
+         * but which one the thread is told it is on is the title's, and what
+         * comes back is what it was told before. */
+        struct object *thread = object_of((uint32_t)ctx->r[3]);
+        uint32_t before = (1u << XENOLITH_PROCESSORS) - 1u;
+        if (thread != NULL && thread->kind == OBJECT_THREAD) {
+            if (thread->processors != 0) {
+                before = thread->processors;
+            }
+            thread->processors = (uint32_t)ctx->r[4];
+            put_the_thread_on_its_processor(thread);
+        }
+        ctx->r[3] = before;
+        return 1;
+    }
     case 129:
-    case 151:
     case 153:
         /* How a thread should be scheduled, which a host decides. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
