@@ -385,18 +385,38 @@ static uint32_t samples_down = 1;
  */
 #define XENOLITH_SLOTS_SHOWN 12u
 
+/* Says which of a title's places the next draw goes into, and starts a frame
+ * in it, ending the one before where that was drawing into another.
+ *
+ * Which place is how wide a row of it is and how many samples to a pixel,
+ * beside what each of them holds. It is settled before the frame starts,
+ * because starting one is what brings the place a title turned to back onto
+ * the surface. Settled after, each frame took up the place the draw before it
+ * went into: a pass drawn at half the size of the frame after one drawn at the
+ * whole size went into the whole one, a quarter of the way across it. */
+static void start_the_frame_in_its_place(const uint8_t *base) {
+    static uint32_t shaped_as;
+
+    drawn_laid_out = xenolith_load32(base, XENOLITH_REGISTERS + 0x2000u * 4u);
+    drawn_onto = xenolith_load32(base, XENOLITH_REGISTERS + 0x2001u * 4u);
+    uint32_t samples = (drawn_laid_out >> XENOLITH_SAMPLES_SHIFT) & 3u;
+    samples_across = samples == 2u ? 2u : 1u;
+    samples_down = samples != 0u ? 2u : 1u;
+
+    uint32_t shaped = (drawn_laid_out & 0x3ffffu) | ((drawn_onto & 0xf0000u) << 2);
+    if (shaped != shaped_as) {
+        finish_the_frame();
+        shaped_as = shaped;
+    }
+    xenolith_drawing_into(shaped);
+    start_the_frame();
+}
+
 static void say_how_a_position_moves(const uint8_t *base) {
     uint32_t how = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_MOVING_A_POSITION * 4u);
 
     moved_how = how;
     drawn_in_mode = xenolith_load32(base, XENOLITH_REGISTERS + 0x2208u * 4u) & 7u;
-    drawn_laid_out = xenolith_load32(base, XENOLITH_REGISTERS + 0x2000u * 4u);
-    {
-        uint32_t samples = (drawn_laid_out >> XENOLITH_SAMPLES_SHIFT) & 3u;
-        samples_across = samples == 2u ? 2u : 1u;
-        samples_down = samples != 0u ? 2u : 1u;
-    }
-    drawn_onto = xenolith_load32(base, XENOLITH_REGISTERS + 0x2001u * 4u);
     drawn_depth_onto = xenolith_load32(base, XENOLITH_REGISTERS + 0x2002u * 4u);
     drawn_offset_by = xenolith_load32(base, XENOLITH_REGISTERS + 0x2080u * 4u);
     drawn_blending = xenolith_load32(base, XENOLITH_REGISTERS + 0x2201u * 4u);
@@ -409,10 +429,6 @@ static void say_how_a_position_moves(const uint8_t *base) {
                         ? drawn_colour_control & 7u
                         : XENOLITH_DRAWN_HOWEVER_SOLID;
     drawn_cut_off_at = xenolith_load32(base, XENOLITH_REGISTERS + 0x210eu * 4u);
-
-    /* Which of a title's places this drawing goes into: how wide a row of it is
-     * and how many readings to a place, beside what each of them holds. */
-    xenolith_drawing_into((drawn_laid_out & 0x3ffffu) | ((drawn_onto & 0xf0000u) << 2));
 
     /* Whether a title wants how far away a thing is looked at before it is
      * drawn over what is already there, and which way round. */
@@ -1640,7 +1656,7 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
                 hand_over_the_pictures(base, looks, pictures);
             }
 
-            start_the_frame();
+            start_the_frame_in_its_place(base);
 
             /* What a title said to keep, which it changes between draws.
              * Some of what it draws belongs in a corner of the screen
