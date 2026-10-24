@@ -750,6 +750,9 @@ static struct {
      * has run, its memory is still to be written, and what the memory adds up
      * to says nothing about the picture. */
     unsigned long renewed_in;
+    /* Whether what its memory adds up to is still to be worked out, because a
+     * copy put into it on the device has written that memory since. */
+    int came_to_unknown;
     /* Whether a copy has written its memory in a way that could not be put
      * into it on the device. It is kept rather than let go of, because the
      * next copy into it usually can be, and turned again only if it is read
@@ -2073,11 +2076,23 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
              * draw instead reads the whole of every picture every time it is
              * read from, which came to a hundred and twenty nine gigabytes in
              * one mission to find three thousand changes. */
+            /* One a copy keeps putting into on the device is not added up at
+             * all: its memory is what the copy wrote, and adding up a frame's
+             * worth of whole scenes after every copy cost more than the
+             * copies. Once copies stop going into it, what its memory adds up
+             * to is worked out the next time it is checked. */
             int written_over = turned[at].stale;
+            int kept_up_by_copies =
+                turned[at].renewed_in != 0 && turned[at].renewed_in + 2u >= batches_begun;
             if (!written_over && turned[at].over != 0 && turned[at].checked_in != frames_begun
-                && !(batch_open && turned[at].renewed_in == batches_begun)) {
-                written_over =
-                    what_the_memory_adds_up_to(from, where, turned[at].over) != turned[at].came_to;
+                && !kept_up_by_copies) {
+                uint32_t adds_up_to = what_the_memory_adds_up_to(from, where, turned[at].over);
+                if (turned[at].came_to_unknown) {
+                    turned[at].came_to = adds_up_to;
+                    turned[at].came_to_unknown = 0;
+                } else {
+                    written_over = adds_up_to != turned[at].came_to;
+                }
             }
             if (written_over) {
                 /* Written over since. It is turned again, and the one that was
@@ -2396,6 +2411,7 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
     turned[room].order = order;
     turned[room].renewed_by = 0;
     turned[room].renewed_in = 0;
+    turned[room].came_to_unknown = 0;
     turned[room].stale = 0;
     turned[room].way = a_way_of_reading(held_how & XENOLITH_HOW_IT_IS_READ);
     /* How much of a title's memory this was read out of, which is not how much
@@ -2919,7 +2935,8 @@ static VkImage somewhere_to_move_samples_round(int how_far) {
     wanted.arrayLayers = 1;
     wanted.samples = VK_SAMPLE_COUNT_1_BIT;
     wanted.tiling = VK_IMAGE_TILING_OPTIMAL;
-    wanted.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    wanted.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                   | VK_IMAGE_USAGE_SAMPLED_BIT;
     wanted.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImage made = VK_NULL_HANDLE;
     if (vkCreateImage(drawing.device, &wanted, NULL, &made) != VK_SUCCESS) {
@@ -2947,7 +2964,8 @@ static VkImage somewhere_to_move_samples_round(int how_far) {
     return made;
 }
 
-/* Says an image moved round is to be used next for something else. */
+/* Says an image moved round is to be used next for something else, waiting for
+ * whatever touched it last however it touched it. */
 static void samples_become(VkCommandBuffer on, VkImage which, VkImageAspectFlags aspect,
                            VkImageLayout was, VkImageLayout now) {
     VkImageMemoryBarrier turning = {0};
@@ -2960,19 +2978,363 @@ static void samples_become(VkCommandBuffer on, VkImage which, VkImageAspectFlags
     turning.subresourceRange.aspectMask = aspect;
     turning.subresourceRange.levelCount = 1;
     turning.subresourceRange.layerCount = 1;
-    turning.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    turning.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(on, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
-                         NULL, 0, NULL, 1, &turning);
+    turning.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT
+                            | VK_ACCESS_SHADER_READ_BIT;
+    turning.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT
+                            | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(on, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &turning);
 }
 
-/* How many columns and rows of samples are moved in one go. */
-#define XENOLITH_SAMPLES_MOVED ((XENOLITH_GRID_ACROSS > XENOLITH_GRID_DOWN ? XENOLITH_GRID_ACROSS \
-                                                                           : XENOLITH_GRID_DOWN) \
-                                / 2u)
+/* Three shaders of the runtime's own, which move the samples of a place round
+ * in one draw: one that covers the whole of what is drawn into with a single
+ * triangle, and two that each put where a pixel is the sample read from the
+ * place the console keeps it, a colour or how far away it is. They swap the
+ * second and third of every four across, down, or both, as the two numbers
+ * handed to them say, which is exchanging the lowest two bits of where the
+ * pixel is. Made once, outside the build, from a few lines each. */
+static const uint32_t a_triangle_over_everything[] = {
+    0x07230203u, 0x00010000u, 0x0008000bu, 0x0000002cu, 0x00000000u, 0x00020011u,
+    0x00000001u, 0x0006000bu, 0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu,
+    0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u, 0x0007000fu, 0x00000000u,
+    0x00000004u, 0x6e69616du, 0x00000000u, 0x0000000cu, 0x0000001du, 0x00040047u,
+    0x0000000cu, 0x0000000bu, 0x0000002au, 0x00030047u, 0x0000001bu, 0x00000002u,
+    0x00050048u, 0x0000001bu, 0x00000000u, 0x0000000bu, 0x00000000u, 0x00050048u,
+    0x0000001bu, 0x00000001u, 0x0000000bu, 0x00000001u, 0x00050048u, 0x0000001bu,
+    0x00000002u, 0x0000000bu, 0x00000003u, 0x00050048u, 0x0000001bu, 0x00000003u,
+    0x0000000bu, 0x00000004u, 0x00020013u, 0x00000002u, 0x00030021u, 0x00000003u,
+    0x00000002u, 0x00030016u, 0x00000006u, 0x00000020u, 0x00040017u, 0x00000007u,
+    0x00000006u, 0x00000002u, 0x00040015u, 0x0000000au, 0x00000020u, 0x00000001u,
+    0x00040020u, 0x0000000bu, 0x00000001u, 0x0000000au, 0x0004003bu, 0x0000000bu,
+    0x0000000cu, 0x00000001u, 0x0004002bu, 0x0000000au, 0x0000000eu, 0x00000001u,
+    0x0004002bu, 0x0000000au, 0x00000010u, 0x00000002u, 0x00040017u, 0x00000017u,
+    0x00000006u, 0x00000004u, 0x00040015u, 0x00000018u, 0x00000020u, 0x00000000u,
+    0x0004002bu, 0x00000018u, 0x00000019u, 0x00000001u, 0x0004001cu, 0x0000001au,
+    0x00000006u, 0x00000019u, 0x0006001eu, 0x0000001bu, 0x00000017u, 0x00000006u,
+    0x0000001au, 0x0000001au, 0x00040020u, 0x0000001cu, 0x00000003u, 0x0000001bu,
+    0x0004003bu, 0x0000001cu, 0x0000001du, 0x00000003u, 0x0004002bu, 0x0000000au,
+    0x0000001eu, 0x00000000u, 0x0004002bu, 0x00000006u, 0x00000020u, 0x40000000u,
+    0x0004002bu, 0x00000006u, 0x00000022u, 0x3f800000u, 0x0004002bu, 0x00000006u,
+    0x00000025u, 0x00000000u, 0x00040020u, 0x00000029u, 0x00000003u, 0x00000017u,
+    0x0005002cu, 0x00000007u, 0x0000002bu, 0x00000022u, 0x00000022u, 0x00050036u,
+    0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u, 0x00000005u,
+    0x0004003du, 0x0000000au, 0x0000000du, 0x0000000cu, 0x000500c4u, 0x0000000au,
+    0x0000000fu, 0x0000000du, 0x0000000eu, 0x000500c7u, 0x0000000au, 0x00000011u,
+    0x0000000fu, 0x00000010u, 0x0004006fu, 0x00000006u, 0x00000012u, 0x00000011u,
+    0x000500c7u, 0x0000000au, 0x00000014u, 0x0000000du, 0x00000010u, 0x0004006fu,
+    0x00000006u, 0x00000015u, 0x00000014u, 0x00050050u, 0x00000007u, 0x00000016u,
+    0x00000012u, 0x00000015u, 0x0005008eu, 0x00000007u, 0x00000021u, 0x00000016u,
+    0x00000020u, 0x00050083u, 0x00000007u, 0x00000024u, 0x00000021u, 0x0000002bu,
+    0x00050051u, 0x00000006u, 0x00000026u, 0x00000024u, 0x00000000u, 0x00050051u,
+    0x00000006u, 0x00000027u, 0x00000024u, 0x00000001u, 0x00070050u, 0x00000017u,
+    0x00000028u, 0x00000026u, 0x00000027u, 0x00000025u, 0x00000022u, 0x00050041u,
+    0x00000029u, 0x0000002au, 0x0000001du, 0x0000001eu, 0x0003003eu, 0x0000002au,
+    0x00000028u, 0x000100fdu, 0x00010038u,
+};
 
-/* Swaps the second and third column, or row, of every four, in an image the
- * frame being built holds for writing, and leaves it so.
+static const uint32_t moving_colours_round[] = {
+    0x07230203u, 0x00010000u, 0x0008000bu, 0x0000003du, 0x00000000u, 0x00020011u,
+    0x00000001u, 0x0006000bu, 0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu,
+    0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u, 0x0007000fu, 0x00000004u,
+    0x00000004u, 0x6e69616du, 0x00000000u, 0x0000000du, 0x00000025u, 0x00030010u,
+    0x00000004u, 0x00000007u, 0x00040047u, 0x0000000du, 0x0000000bu, 0x0000000fu,
+    0x00040047u, 0x00000025u, 0x0000001eu, 0x00000000u, 0x00040047u, 0x00000029u,
+    0x00000021u, 0x00000000u, 0x00040047u, 0x00000029u, 0x00000022u, 0x00000000u,
+    0x00030047u, 0x0000002du, 0x00000002u, 0x00050048u, 0x0000002du, 0x00000000u,
+    0x00000023u, 0x00000000u, 0x00020013u, 0x00000002u, 0x00030021u, 0x00000003u,
+    0x00000002u, 0x00040015u, 0x00000006u, 0x00000020u, 0x00000001u, 0x00040017u,
+    0x00000007u, 0x00000006u, 0x00000002u, 0x00030016u, 0x0000000au, 0x00000020u,
+    0x00040017u, 0x0000000bu, 0x0000000au, 0x00000004u, 0x00040020u, 0x0000000cu,
+    0x00000001u, 0x0000000bu, 0x0004003bu, 0x0000000cu, 0x0000000du, 0x00000001u,
+    0x00040017u, 0x0000000eu, 0x0000000au, 0x00000002u, 0x0004002bu, 0x00000006u,
+    0x00000014u, 0xfffffffcu, 0x0004002bu, 0x00000006u, 0x00000018u, 0x00000001u,
+    0x00040020u, 0x00000024u, 0x00000003u, 0x0000000bu, 0x0004003bu, 0x00000024u,
+    0x00000025u, 0x00000003u, 0x00090019u, 0x00000026u, 0x0000000au, 0x00000001u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x0003001bu,
+    0x00000027u, 0x00000026u, 0x00040020u, 0x00000028u, 0x00000000u, 0x00000027u,
+    0x0004003bu, 0x00000028u, 0x00000029u, 0x00000000u, 0x0003001eu, 0x0000002du,
+    0x00000007u, 0x00040020u, 0x0000002eu, 0x00000009u, 0x0000002du, 0x0004003bu,
+    0x0000002eu, 0x0000002fu, 0x00000009u, 0x0004002bu, 0x00000006u, 0x00000030u,
+    0x00000000u, 0x00040020u, 0x00000031u, 0x00000009u, 0x00000007u, 0x0005002cu,
+    0x00000007u, 0x00000034u, 0x00000030u, 0x00000030u, 0x00020014u, 0x00000035u,
+    0x00040017u, 0x00000036u, 0x00000035u, 0x00000002u, 0x0005002cu, 0x00000007u,
+    0x0000003bu, 0x00000014u, 0x00000014u, 0x0005002cu, 0x00000007u, 0x0000003cu,
+    0x00000018u, 0x00000018u, 0x00050036u, 0x00000002u, 0x00000004u, 0x00000000u,
+    0x00000003u, 0x000200f8u, 0x00000005u, 0x0004003du, 0x0000000bu, 0x0000000fu,
+    0x0000000du, 0x0007004fu, 0x0000000eu, 0x00000010u, 0x0000000fu, 0x0000000fu,
+    0x00000000u, 0x00000001u, 0x0004006eu, 0x00000007u, 0x00000011u, 0x00000010u,
+    0x000500c7u, 0x00000007u, 0x00000016u, 0x00000011u, 0x0000003bu, 0x000500c7u,
+    0x00000007u, 0x0000001au, 0x00000011u, 0x0000003cu, 0x000500c4u, 0x00000007u,
+    0x0000001cu, 0x0000001au, 0x0000003cu, 0x000500c5u, 0x00000007u, 0x0000001du,
+    0x00000016u, 0x0000001cu, 0x000500c3u, 0x00000007u, 0x00000020u, 0x00000011u,
+    0x0000003cu, 0x000500c7u, 0x00000007u, 0x00000022u, 0x00000020u, 0x0000003cu,
+    0x000500c5u, 0x00000007u, 0x00000023u, 0x0000001du, 0x00000022u, 0x0004003du,
+    0x00000027u, 0x0000002au, 0x00000029u, 0x00050041u, 0x00000031u, 0x00000032u,
+    0x0000002fu, 0x00000030u, 0x0004003du, 0x00000007u, 0x00000033u, 0x00000032u,
+    0x000500abu, 0x00000036u, 0x00000037u, 0x00000033u, 0x00000034u, 0x000600a9u,
+    0x00000007u, 0x00000038u, 0x00000037u, 0x00000023u, 0x00000011u, 0x00040064u,
+    0x00000026u, 0x00000039u, 0x0000002au, 0x0007005fu, 0x0000000bu, 0x0000003au,
+    0x00000039u, 0x00000038u, 0x00000002u, 0x00000030u, 0x0003003eu, 0x00000025u,
+    0x0000003au, 0x000100fdu, 0x00010038u,
+};
+
+static const uint32_t moving_distances_round[] = {
+    0x07230203u, 0x00010000u, 0x0008000bu, 0x00000040u, 0x00000000u, 0x00020011u,
+    0x00000001u, 0x0006000bu, 0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu,
+    0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u, 0x0007000fu, 0x00000004u,
+    0x00000004u, 0x6e69616du, 0x00000000u, 0x0000000du, 0x00000025u, 0x00030010u,
+    0x00000004u, 0x00000007u, 0x00030010u, 0x00000004u, 0x0000000cu, 0x00040047u,
+    0x0000000du, 0x0000000bu, 0x0000000fu, 0x00040047u, 0x00000025u, 0x0000000bu,
+    0x00000016u, 0x00040047u, 0x00000029u, 0x00000021u, 0x00000000u, 0x00040047u,
+    0x00000029u, 0x00000022u, 0x00000000u, 0x00030047u, 0x0000002du, 0x00000002u,
+    0x00050048u, 0x0000002du, 0x00000000u, 0x00000023u, 0x00000000u, 0x00020013u,
+    0x00000002u, 0x00030021u, 0x00000003u, 0x00000002u, 0x00040015u, 0x00000006u,
+    0x00000020u, 0x00000001u, 0x00040017u, 0x00000007u, 0x00000006u, 0x00000002u,
+    0x00030016u, 0x0000000au, 0x00000020u, 0x00040017u, 0x0000000bu, 0x0000000au,
+    0x00000004u, 0x00040020u, 0x0000000cu, 0x00000001u, 0x0000000bu, 0x0004003bu,
+    0x0000000cu, 0x0000000du, 0x00000001u, 0x00040017u, 0x0000000eu, 0x0000000au,
+    0x00000002u, 0x0004002bu, 0x00000006u, 0x00000014u, 0xfffffffcu, 0x0004002bu,
+    0x00000006u, 0x00000018u, 0x00000001u, 0x00040020u, 0x00000024u, 0x00000003u,
+    0x0000000au, 0x0004003bu, 0x00000024u, 0x00000025u, 0x00000003u, 0x00090019u,
+    0x00000026u, 0x0000000au, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000001u, 0x00000000u, 0x0003001bu, 0x00000027u, 0x00000026u, 0x00040020u,
+    0x00000028u, 0x00000000u, 0x00000027u, 0x0004003bu, 0x00000028u, 0x00000029u,
+    0x00000000u, 0x0003001eu, 0x0000002du, 0x00000007u, 0x00040020u, 0x0000002eu,
+    0x00000009u, 0x0000002du, 0x0004003bu, 0x0000002eu, 0x0000002fu, 0x00000009u,
+    0x0004002bu, 0x00000006u, 0x00000030u, 0x00000000u, 0x00040020u, 0x00000031u,
+    0x00000009u, 0x00000007u, 0x0005002cu, 0x00000007u, 0x00000034u, 0x00000030u,
+    0x00000030u, 0x00020014u, 0x00000035u, 0x00040017u, 0x00000036u, 0x00000035u,
+    0x00000002u, 0x0005002cu, 0x00000007u, 0x0000003eu, 0x00000014u, 0x00000014u,
+    0x0005002cu, 0x00000007u, 0x0000003fu, 0x00000018u, 0x00000018u, 0x00050036u,
+    0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u, 0x00000005u,
+    0x0004003du, 0x0000000bu, 0x0000000fu, 0x0000000du, 0x0007004fu, 0x0000000eu,
+    0x00000010u, 0x0000000fu, 0x0000000fu, 0x00000000u, 0x00000001u, 0x0004006eu,
+    0x00000007u, 0x00000011u, 0x00000010u, 0x000500c7u, 0x00000007u, 0x00000016u,
+    0x00000011u, 0x0000003eu, 0x000500c7u, 0x00000007u, 0x0000001au, 0x00000011u,
+    0x0000003fu, 0x000500c4u, 0x00000007u, 0x0000001cu, 0x0000001au, 0x0000003fu,
+    0x000500c5u, 0x00000007u, 0x0000001du, 0x00000016u, 0x0000001cu, 0x000500c3u,
+    0x00000007u, 0x00000020u, 0x00000011u, 0x0000003fu, 0x000500c7u, 0x00000007u,
+    0x00000022u, 0x00000020u, 0x0000003fu, 0x000500c5u, 0x00000007u, 0x00000023u,
+    0x0000001du, 0x00000022u, 0x0004003du, 0x00000027u, 0x0000002au, 0x00000029u,
+    0x00050041u, 0x00000031u, 0x00000032u, 0x0000002fu, 0x00000030u, 0x0004003du,
+    0x00000007u, 0x00000033u, 0x00000032u, 0x000500abu, 0x00000036u, 0x00000037u,
+    0x00000033u, 0x00000034u, 0x000600a9u, 0x00000007u, 0x00000038u, 0x00000037u,
+    0x00000023u, 0x00000011u, 0x00040064u, 0x00000026u, 0x00000039u, 0x0000002au,
+    0x0007005fu, 0x0000000bu, 0x0000003au, 0x00000039u, 0x00000038u, 0x00000002u,
+    0x00000030u, 0x00050051u, 0x0000000au, 0x0000003du, 0x0000003au, 0x00000000u,
+    0x0003003eu, 0x00000025u, 0x0000003du, 0x000100fdu, 0x00010038u,
+};
+
+/* What moving samples round in a draw takes: the images to read from as
+ * pictures, a pipeline for each, and what the frame being begun still has to
+ * move round once its pass has begun. */
+static struct {
+    VkImageView seen[2];
+    VkSampler way;
+    VkDescriptorSetLayout shape;
+    VkDescriptorPool holding;
+    VkDescriptorSet said[2];
+    VkPipelineLayout layout;
+    VkPipeline pipeline[2];
+    int made;
+    int refused;
+    int waiting[2];
+    int32_t swapped[2][2];
+    uint32_t wide[2];
+    uint32_t tall[2];
+} rearranging;
+
+static VkPipeline a_pipeline_for_moving_round(int how_far) {
+    VkShaderModule first = module_of(a_triangle_over_everything,
+                                     sizeof a_triangle_over_everything / 4u);
+    VkShaderModule second = how_far ? module_of(moving_distances_round,
+                                                sizeof moving_distances_round / 4u)
+                                    : module_of(moving_colours_round,
+                                                sizeof moving_colours_round / 4u);
+    VkPipeline made = VK_NULL_HANDLE;
+    if (first != VK_NULL_HANDLE && second != VK_NULL_HANDLE) {
+        VkPipelineShaderStageCreateInfo stages[2] = {{0}, {0}};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = first;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = second;
+        stages[1].pName = "main";
+
+        VkPipelineVertexInputStateCreateInfo nothing_fetched = {0};
+        nothing_fetched.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkPipelineInputAssemblyStateCreateInfo shape = {0};
+        shape.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        shape.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo where = {0};
+        where.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        where.viewportCount = 1;
+        where.scissorCount = 1;
+        const VkDynamicState changes[] = {VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VIEWPORT};
+        VkPipelineDynamicStateCreateInfo said_per_draw = {0};
+        said_per_draw.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        said_per_draw.dynamicStateCount = 2;
+        said_per_draw.pDynamicStates = changes;
+        VkPipelineRasterizationStateCreateInfo filling = {0};
+        filling.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        filling.polygonMode = VK_POLYGON_MODE_FILL;
+        filling.cullMode = VK_CULL_MODE_NONE;
+        filling.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo once = {0};
+        once.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        once.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState keeping = {0};
+        keeping.colorWriteMask = how_far ? 0u
+                                         : VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                                               | VK_COLOR_COMPONENT_B_BIT
+                                               | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo mixing = {0};
+        mixing.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        mixing.attachmentCount = 1;
+        mixing.pAttachments = &keeping;
+        VkPipelineDepthStencilStateCreateInfo how_near = {0};
+        how_near.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        how_near.depthTestEnable = how_far ? VK_TRUE : VK_FALSE;
+        how_near.depthWriteEnable = how_far ? VK_TRUE : VK_FALSE;
+        how_near.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+        how_near.maxDepthBounds = 1.0f;
+
+        VkGraphicsPipelineCreateInfo asking = {0};
+        asking.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        asking.stageCount = 2;
+        asking.pStages = stages;
+        asking.pVertexInputState = &nothing_fetched;
+        asking.pInputAssemblyState = &shape;
+        asking.pViewportState = &where;
+        asking.pRasterizationState = &filling;
+        asking.pMultisampleState = &once;
+        asking.pDepthStencilState = &how_near;
+        asking.pColorBlendState = &mixing;
+        asking.pDynamicState = &said_per_draw;
+        asking.layout = rearranging.layout;
+        asking.renderPass = through.pass;
+        if (vkCreateGraphicsPipelines(drawing.device, VK_NULL_HANDLE, 1, &asking, NULL, &made)
+            != VK_SUCCESS) {
+            made = VK_NULL_HANDLE;
+        }
+    }
+    if (first != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(drawing.device, first, NULL);
+    }
+    if (second != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(drawing.device, second, NULL);
+    }
+    return made;
+}
+
+static int make_what_moving_round_takes(void) {
+    if (rearranging.made || rearranging.refused) {
+        return rearranging.made;
+    }
+    rearranging.refused = 1;
+    for (int how_far = 0; how_far < 2; how_far++) {
+        VkImage held = somewhere_to_move_samples_round(how_far);
+        if (held == VK_NULL_HANDLE) {
+            return 0;
+        }
+        VkImageViewCreateInfo seeing = {0};
+        seeing.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        seeing.image = held;
+        seeing.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        seeing.format = how_far ? XENOLITH_HOW_FAR_FORMAT : XENOLITH_SURFACE_FORMAT;
+        seeing.subresourceRange.aspectMask =
+            how_far ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+        seeing.subresourceRange.levelCount = 1;
+        seeing.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(drawing.device, &seeing, NULL, &rearranging.seen[how_far])
+            != VK_SUCCESS) {
+            return 0;
+        }
+    }
+
+    VkSamplerCreateInfo reading = {0};
+    reading.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    reading.magFilter = VK_FILTER_NEAREST;
+    reading.minFilter = VK_FILTER_NEAREST;
+    reading.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    reading.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    reading.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(drawing.device, &reading, NULL, &rearranging.way) != VK_SUCCESS) {
+        return 0;
+    }
+
+    VkDescriptorSetLayoutBinding one_picture = {0};
+    one_picture.binding = 0;
+    one_picture.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    one_picture.descriptorCount = 1;
+    one_picture.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo shaped = {0};
+    shaped.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    shaped.bindingCount = 1;
+    shaped.pBindings = &one_picture;
+    if (vkCreateDescriptorSetLayout(drawing.device, &shaped, NULL, &rearranging.shape)
+        != VK_SUCCESS) {
+        return 0;
+    }
+
+    VkDescriptorPoolSize enough = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+    VkDescriptorPoolCreateInfo pool = {0};
+    pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool.maxSets = 2;
+    pool.poolSizeCount = 1;
+    pool.pPoolSizes = &enough;
+    if (vkCreateDescriptorPool(drawing.device, &pool, NULL, &rearranging.holding) != VK_SUCCESS) {
+        return 0;
+    }
+    VkDescriptorSetLayout both[2] = {rearranging.shape, rearranging.shape};
+    VkDescriptorSetAllocateInfo taking = {0};
+    taking.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    taking.descriptorPool = rearranging.holding;
+    taking.descriptorSetCount = 2;
+    taking.pSetLayouts = both;
+    if (vkAllocateDescriptorSets(drawing.device, &taking, rearranging.said) != VK_SUCCESS) {
+        return 0;
+    }
+    for (int how_far = 0; how_far < 2; how_far++) {
+        VkDescriptorImageInfo picture = {0};
+        picture.sampler = rearranging.way;
+        picture.imageView = rearranging.seen[how_far];
+        picture.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet saying = {0};
+        saying.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        saying.dstSet = rearranging.said[how_far];
+        saying.descriptorCount = 1;
+        saying.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        saying.pImageInfo = &picture;
+        vkUpdateDescriptorSets(drawing.device, 1, &saying, 0, NULL);
+    }
+
+    VkPushConstantRange which_ways = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 2u * sizeof(int32_t)};
+    VkPipelineLayoutCreateInfo outside = {0};
+    outside.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    outside.setLayoutCount = 1;
+    outside.pSetLayouts = &rearranging.shape;
+    outside.pushConstantRangeCount = 1;
+    outside.pPushConstantRanges = &which_ways;
+    if (vkCreatePipelineLayout(drawing.device, &outside, NULL, &rearranging.layout)
+        != VK_SUCCESS) {
+        return 0;
+    }
+    for (int how_far = 0; how_far < 2; how_far++) {
+        rearranging.pipeline[how_far] = a_pipeline_for_moving_round(how_far);
+        if (rearranging.pipeline[how_far] == VK_NULL_HANDLE) {
+            return 0;
+        }
+    }
+    rearranging.made = 1;
+    rearranging.refused = 0;
+    return 1;
+}
+
+/* Gets ready to lay the samples an image holds out the way the next draw wants
+ * them, from the way the draws that made it had them.
  *
  * The console keeps the samples of a pixel drawn as more than one in a run of
  * four with its neighbour's: the first sample of each, then the second of
@@ -2982,30 +3344,32 @@ static void samples_become(VkCommandBuffer on, VkImage which, VkImageAspectFlags
  * and a title relies on it: it lays a scene down a pixel at a time already
  * rearranged so that drawing over it with four samples to a pixel lines up.
  * Swapping the two each time the way of drawing changes is the same in both
- * directions. */
-static void swap_the_middle_of_every_four(VkCommandBuffer on, VkImage image, int how_far,
-                                          int across, uint32_t wide, uint32_t tall) {
-    VkImage held = somewhere_to_move_samples_round(how_far);
-    if (held == VK_NULL_HANDLE) {
+ * directions.
+ *
+ * As much of the image as the place covers is copied aside here, while the
+ * image is somewhere to copy into, and put back moved round by a draw once the
+ * frame's pass has begun. Done with a copy for every column instead, it was
+ * most of what a frame cost the device. */
+static void ready_to_move_round(VkCommandBuffer on, VkImage image, int how_far, uint32_t was,
+                                uint32_t now, uint32_t wide, uint32_t tall) {
+    rearranging.waiting[how_far] = 0;
+    if (was == now || wide == 0 || tall == 0) {
+        return;
+    }
+    anything_recorded = 1;
+    if (!make_what_moving_round_takes()) {
         return;
     }
     VkImageAspectFlags aspect = how_far ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
-    static VkImageCopy moves[XENOLITH_SAMPLES_MOVED];
-
     VkImageCopy all = {0};
     all.srcSubresource.aspectMask = aspect;
     all.srcSubresource.layerCount = 1;
     all.dstSubresource = all.srcSubresource;
-    all.extent.width = (wide + 3u) & ~3u;
-    all.extent.height = (tall + 3u) & ~3u;
+    all.extent.width = wide < XENOLITH_GRID_ACROSS ? wide : XENOLITH_GRID_ACROSS;
+    all.extent.height = tall < XENOLITH_GRID_DOWN ? tall : XENOLITH_GRID_DOWN;
     all.extent.depth = 1;
-    if (all.extent.width > XENOLITH_GRID_ACROSS) {
-        all.extent.width = XENOLITH_GRID_ACROSS;
-    }
-    if (all.extent.height > XENOLITH_GRID_DOWN) {
-        all.extent.height = XENOLITH_GRID_DOWN;
-    }
 
+    VkImage held = moving_round[how_far].image;
     samples_become(on, image, aspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     samples_become(on, held, aspect, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -3013,49 +3377,40 @@ static void swap_the_middle_of_every_four(VkCommandBuffer on, VkImage image, int
     vkCmdCopyImage(on, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, held,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &all);
     samples_become(on, held, aspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     samples_become(on, image, aspect, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    uint32_t lines = across ? all.extent.width : all.extent.height;
-    uint32_t count = 0;
-    for (uint32_t four = 0; four + 4u <= lines; four += 4u) {
-        for (uint32_t one = 1; one <= 2u; one++) {
-            VkImageCopy line = all;
-            uint32_t from = four + one;
-            uint32_t to = four + 3u - one;
-            if (across) {
-                line.srcOffset.x = (int32_t)from;
-                line.dstOffset.x = (int32_t)to;
-                line.extent.width = 1;
-            } else {
-                line.srcOffset.y = (int32_t)from;
-                line.dstOffset.y = (int32_t)to;
-                line.extent.height = 1;
-            }
-            moves[count++] = line;
-        }
-    }
-    vkCmdCopyImage(on, held, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, count, moves);
+    rearranging.swapped[how_far][0] = (was & 3u) != (now & 3u);
+    rearranging.swapped[how_far][1] = (was >> 2) != (now >> 2);
+    rearranging.wide[how_far] = all.extent.width;
+    rearranging.tall[how_far] = all.extent.height;
+    rearranging.waiting[how_far] = 1;
 }
 
-/* Lays the samples an image holds out the way the next draw wants them, from
- * the way the draws that made it had them. */
-static void lay_the_samples_out_again(VkCommandBuffer on, VkImage image, int how_far,
-                                      uint32_t was, uint32_t now, uint32_t wide,
-                                      uint32_t tall) {
-    if (was != now) {
-        anything_recorded = 1;
-    }
-    if (wide == 0 || tall == 0) {
-        return;
-    }
-    if ((was & 3u) != (now & 3u)) {
-        swap_the_middle_of_every_four(on, image, how_far, 1, wide, tall);
-    }
-    if ((was >> 2) != (now >> 2)) {
-        swap_the_middle_of_every_four(on, image, how_far, 0, wide, tall);
+/* Puts back moved round whatever was copied aside for the frame being begun,
+ * once its pass has begun. */
+static void move_round_what_is_waiting(VkCommandBuffer on) {
+    for (int how_far = 0; how_far < 2; how_far++) {
+        if (!rearranging.waiting[how_far]) {
+            continue;
+        }
+        rearranging.waiting[how_far] = 0;
+        VkViewport seen = {0};
+        seen.width = (float)rearranging.wide[how_far];
+        seen.height = (float)rearranging.tall[how_far];
+        seen.maxDepth = 1.0f;
+        VkRect2D kept = {0};
+        kept.extent.width = rearranging.wide[how_far];
+        kept.extent.height = rearranging.tall[how_far];
+        vkCmdSetViewport(on, 0, 1, &seen);
+        vkCmdSetScissor(on, 0, 1, &kept);
+        vkCmdBindPipeline(on, VK_PIPELINE_BIND_POINT_GRAPHICS, rearranging.pipeline[how_far]);
+        vkCmdBindDescriptorSets(on, VK_PIPELINE_BIND_POINT_GRAPHICS, rearranging.layout, 0, 1,
+                                &rearranging.said[how_far], 0, NULL);
+        vkCmdPushConstants(on, rearranging.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof rearranging.swapped[how_far], rearranging.swapped[how_far]);
+        vkCmdDraw(on, 3, 1, 0, 0);
     }
 }
 
@@ -3135,8 +3490,8 @@ static int xenolith_begin_a_frame_inside(void) {
         anything_recorded = 1;
     }
     if (came_back_to_it && !wipe_the_colours) {
-        lay_the_samples_out_again(surface.commands, surface.image, 0, surface_laid, drawing_laid,
-                                  drawing_across, surface_down);
+        ready_to_move_round(surface.commands, surface.image, 0, surface_laid, drawing_laid,
+                            drawing_across, surface_down);
     }
     surface_laid = drawing_laid;
     wipe_the_colours = 0;
@@ -3151,38 +3506,58 @@ static int xenolith_begin_a_frame_inside(void) {
                          &to_draw_on);
 
     /* And everywhere starts as far away as the view reaches, so that the first
-     * thing drawn at a place is nearer than what was there. */
+     * thing drawn at a place is nearer than what was there.
+     *
+     * How far away things are is only made somewhere to copy into and back
+     * where it is to be wiped or moved round. Every change of what an image is
+     * for makes a device unpack the whole of it and pack it again, and making
+     * it so for every frame begun, a few dozen times a frame, was most of what
+     * a frame cost the device. Left as it is, it is only told that the frame
+     * before has finished with it. */
+    int how_far_moves = wipe_how_far
+                        || (how_far_laid != drawing_laid && drawing_across != 0
+                            && surface_down != 0);
     VkImageMemoryBarrier how_far_ready = ready;
     how_far_ready.image = through.how_far;
-    how_far_ready.oldLayout = wipe_how_far ? VK_IMAGE_LAYOUT_UNDEFINED
-                                           : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    how_far_ready.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     how_far_ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    vkCmdPipelineBarrier(surface.commands, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &how_far_ready);
+    how_far_ready.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (!how_far_moves) {
+        how_far_ready.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        how_far_ready.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        how_far_ready.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                                      | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(surface.commands, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1,
+                             &how_far_ready);
+    } else {
+        how_far_ready.oldLayout = wipe_how_far ? VK_IMAGE_LAYOUT_UNDEFINED
+                                               : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        vkCmdPipelineBarrier(surface.commands, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+                             &how_far_ready);
 
-    if (wipe_how_far) {
-        VkClearDepthStencilValue as_far_as_it_goes = {how_far_to_start_at, 0};
-        vkCmdClearDepthStencilImage(surface.commands, through.how_far,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &as_far_as_it_goes, 1,
-                                    &how_far_ready.subresourceRange);
-        anything_recorded = 1;
-    }
-    if (!wipe_how_far) {
-        lay_the_samples_out_again(surface.commands, through.how_far, 1, how_far_laid, drawing_laid,
-                                  XENOLITH_GRID_ACROSS, XENOLITH_GRID_DOWN);
+        if (wipe_how_far) {
+            VkClearDepthStencilValue as_far_as_it_goes = {how_far_to_start_at, 0};
+            vkCmdClearDepthStencilImage(surface.commands, through.how_far,
+                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &as_far_as_it_goes,
+                                        1, &how_far_ready.subresourceRange);
+            anything_recorded = 1;
+        } else {
+            ready_to_move_round(surface.commands, through.how_far, 1, how_far_laid, drawing_laid,
+                                drawing_across, surface_down);
+        }
+
+        VkImageMemoryBarrier how_far_to_draw_on = how_far_ready;
+        how_far_to_draw_on.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        how_far_to_draw_on.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        how_far_to_draw_on.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        how_far_to_draw_on.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(surface.commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1,
+                             &how_far_to_draw_on);
     }
     how_far_laid = drawing_laid;
     wipe_how_far = 0;
-
-    VkImageMemoryBarrier how_far_to_draw_on = how_far_ready;
-    how_far_to_draw_on.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    how_far_to_draw_on.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    how_far_to_draw_on.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    how_far_to_draw_on.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    vkCmdPipelineBarrier(surface.commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1,
-                         &how_far_to_draw_on);
 
     VkRenderPassBeginInfo into = {0};
     into.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3191,6 +3566,7 @@ static int xenolith_begin_a_frame_inside(void) {
     into.renderArea.extent.width = XENOLITH_GRID_ACROSS;
     into.renderArea.extent.height = XENOLITH_GRID_DOWN;
     vkCmdBeginRenderPass(surface.commands, &into, VK_SUBPASS_CONTENTS_INLINE);
+    move_round_what_is_waiting(surface.commands);
     if (seen_given) {
         vkCmdSetViewport(surface.commands, 0, 1, &last_seen);
     }
@@ -5734,17 +6110,12 @@ static void put_back_what_was_copied(void) {
         put_back_in_parallel(&putting, copy->top, bottom);
     }
 
-    /* A picture put right on the device is told what its memory adds up to
-     * once every copy has written it, so that the copies are not taken for a
-     * title writing over it. Told after each one instead, a picture two copies
-     * wrote in turn would be told of only the first. */
+    /* A picture put right on the device is no longer what its memory added up
+     * to before, so that is worked out again, once copies stop going into it,
+     * rather than its memory being taken for a title writing over it. */
     for (uint32_t which = 0; which < copies_waiting; which++) {
         for (uint32_t at = 0; at < waiting[which].renewing; at++) {
-            uint32_t one = waiting[which].renewed[at];
-            if (turned[one].held) {
-                turned[one].came_to = what_the_memory_adds_up_to(
-                    waiting[which].base, turned[one].from, turned[one].over);
-            }
+            turned[waiting[which].renewed[at]].came_to_unknown = 1;
         }
     }
 
