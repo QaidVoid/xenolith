@@ -6391,6 +6391,11 @@ int main(void) {
     for (uint32_t word = 0; word < bytes / 4u; word++) {
         xenolith_store32(base, halves + word * 4u, 0x12345678u);
     }
+    /* Read as a picture before either half lands in it, so that each half is
+     * put into the picture on the device as well as into memory. */
+    if (!xenolith_look_at_a_picture(0u, base, halves, 1280u, 720u, 1280u, 1, 2u, 6u, 0u)) {
+        return 12;
+    }
     static const float left[3][2] = {{0.0f, 0.0f}, {640.0f, 0.0f}, {640.0f, 720.0f}};
     put_corners(base, rectangle, left);
     xenolith_store32(base, 0x7fc80000u + 0x2082u * 4u, (720u << 16) | 640u);

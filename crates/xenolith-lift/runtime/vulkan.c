@@ -689,7 +689,19 @@ static struct {
     unsigned long checked_in;
     VkSampler way;
     int held;
+    /* How it was kept: in squares or not, how wide a run of them is, and which
+     * way round its bytes were. Together they say whether a copy out of what
+     * was drawn lands in it as it stands. */
+    int in_squares;
+    uint32_t along;
+    uint32_t order;
+    /* Which copy last put what was drawn into it, so that the same copy does
+     * not then forget it as written over. */
+    unsigned long renewed_by;
 } turned[XENOLITH_PICTURES_KEPT];
+
+/* How many copies out of what was drawn there have been. */
+static unsigned long copies_counted;
 
 /* Which frame is being drawn, counted here so that a picture is checked against
  * its memory once a frame rather than once for every draw that reads it. */
@@ -1068,6 +1080,8 @@ static void a_picture_becomes(VkCommandBuffer on, VkImage which, VkImageLayout w
                                 : 0;
     turning.dstAccessMask = now == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
                                 ? VK_ACCESS_TRANSFER_WRITE_BIT
+                            : now == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                ? VK_ACCESS_TRANSFER_READ_BIT
                                 : VK_ACCESS_SHADER_READ_BIT;
 
     vkCmdPipelineBarrier(on, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -2263,6 +2277,10 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
     turned[room].down = down;
     turned[room].kept = kept;
     turned[room].held_how = held_how;
+    turned[room].in_squares = in_squares;
+    turned[room].along = along;
+    turned[room].order = order;
+    turned[room].renewed_by = 0;
     turned[room].way = a_way_of_reading(held_how & XENOLITH_HOW_IT_IS_READ);
     /* How much of a title's memory this was read out of, which is not how much
      * it came to. Where it is kept in squares the run it sits in is as wide as
@@ -4471,7 +4489,8 @@ void xenolith_forget_pictures_at(uint32_t where, uint32_t bytes) {
         uint32_t ends = turned[at].from
                         + (turned[at].over != 0 ? turned[at].over
                                                 : turned[at].across * turned[at].down * 4u);
-        if (!turned[at].held || ends <= where || turned[at].from >= where + bytes) {
+        if (!turned[at].held || ends <= where || turned[at].from >= where + bytes
+            || turned[at].renewed_by == copies_counted) {
             continue;
         }
 
@@ -4578,6 +4597,158 @@ static uint32_t a_short_float_from_how_far(float away) {
     return ((uint32_t)exponent << 20) | held;
 }
 
+/* Where a copy out of what was drawn is made into bytes on the device, one
+ * with red first and one with blue first, on its way into a picture. */
+#define XENOLITH_TURNING_ACROSS 2048u
+#define XENOLITH_TURNING_DOWN 2048u
+#define XENOLITH_RENEWED_AT_ONCE 16u
+
+static struct {
+    VkImage image;
+    VkDeviceMemory memory;
+} turning[2];
+
+static int somewhere_to_turn_a_copy(int blue_first) {
+    if (turning[blue_first].image != VK_NULL_HANDLE) {
+        return 1;
+    }
+    VkImageCreateInfo wanted = {0};
+    wanted.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    wanted.imageType = VK_IMAGE_TYPE_2D;
+    wanted.format = blue_first ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+    wanted.extent.width = XENOLITH_TURNING_ACROSS;
+    wanted.extent.height = XENOLITH_TURNING_DOWN;
+    wanted.extent.depth = 1;
+    wanted.mipLevels = 1;
+    wanted.arrayLayers = 1;
+    wanted.samples = VK_SAMPLE_COUNT_1_BIT;
+    wanted.tiling = VK_IMAGE_TILING_OPTIMAL;
+    wanted.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    wanted.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage made = VK_NULL_HANDLE;
+    if (vkCreateImage(drawing.device, &wanted, NULL, &made) != VK_SUCCESS) {
+        return 0;
+    }
+    VkMemoryRequirements needs;
+    vkGetImageMemoryRequirements(drawing.device, made, &needs);
+    VkMemoryAllocateInfo asking = {0};
+    asking.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    asking.allocationSize = needs.size;
+    asking.memoryTypeIndex =
+        memory_that_suits(needs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkDeviceMemory its_own = VK_NULL_HANDLE;
+    if (vkAllocateMemory(drawing.device, &asking, NULL, &its_own) != VK_SUCCESS) {
+        vkDestroyImage(drawing.device, made, NULL);
+        return 0;
+    }
+    if (vkBindImageMemory(drawing.device, made, its_own, 0) != VK_SUCCESS) {
+        vkFreeMemory(drawing.device, its_own, NULL);
+        vkDestroyImage(drawing.device, made, NULL);
+        return 0;
+    }
+    turning[blue_first].image = made;
+    turning[blue_first].memory = its_own;
+    return 1;
+}
+
+/* Where in a picture already turned a copy lands, or nothing where it does not
+ * land in it as the picture stands.
+ *
+ * Only a picture kept in squares, four bytes to a part turned word by word, in
+ * runs as wide as the ones the copy writes, and holding the whole of what it
+ * writes. A square there is thirty two parts on a side and four kilobytes,
+ * laid a run of them at a time, so where in it the copy starts says which. */
+static int where_a_copy_lands(uint32_t which, const struct xenolith_copy *copy,
+                              uint32_t right, uint32_t bottom, uint32_t *across_at,
+                              uint32_t *down_at) {
+    uint32_t along = (copy->pitch + 31u) & ~31u;
+    if (!turned[which].held || turned[which].kept != XENOLITH_PICTURE_IN_FOURS
+        || !turned[which].in_squares || turned[which].order != 2u
+        || turned[which].along != along || copy->into < turned[which].from
+        || copy->into - turned[which].from >= turned[which].over
+        || (copy->into - turned[which].from) % XENOLITH_WHAT_A_SQUARE_HOLDS != 0) {
+        return 0;
+    }
+    uint32_t square = (copy->into - turned[which].from) / XENOLITH_WHAT_A_SQUARE_HOLDS;
+    uint32_t squares_a_run = along / XENOLITH_A_SQUARE_ACROSS;
+    *across_at = (square % squares_a_run) * XENOLITH_A_SQUARE_ACROSS;
+    *down_at = (square / squares_a_run) * XENOLITH_A_SQUARE_ACROSS;
+    return *across_at + right <= turned[which].across && *down_at + bottom <= turned[which].down;
+}
+
+/* Makes what a copy takes into bytes on the device, the way round the copy
+ * writes them, blue first where it swaps red and blue. Where each pixel was
+ * drawn as more than one sample they are averaged on the way.
+ *
+ * Done on the host, turning every sample from a half float and averaging it
+ * came to most of what a frame of a mission cost, for the few dozen copies it
+ * makes. */
+static VkImage a_copy_made_into_bytes(VkCommandBuffer one, const struct xenolith_copy *copy,
+                                      const VkBufferImageCopy *out, uint32_t across,
+                                      uint32_t down) {
+    int blue_first = copy->red_and_blue_swapped != 0;
+    if (across > XENOLITH_TURNING_ACROSS || down > XENOLITH_TURNING_DOWN
+        || !somewhere_to_turn_a_copy(blue_first)) {
+        return VK_NULL_HANDLE;
+    }
+    VkImage bytes = turning[blue_first].image;
+    a_picture_becomes(one, bytes, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageBlit made = {0};
+    made.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    made.srcSubresource.layerCount = 1;
+    made.srcOffsets[0] = out->imageOffset;
+    made.srcOffsets[1].x = out->imageOffset.x + (int32_t)out->imageExtent.width;
+    made.srcOffsets[1].y = out->imageOffset.y + (int32_t)out->imageExtent.height;
+    made.srcOffsets[1].z = 1;
+    made.dstSubresource = made.srcSubresource;
+    made.dstOffsets[1].x = (int32_t)across;
+    made.dstOffsets[1].y = (int32_t)down;
+    made.dstOffsets[1].z = 1;
+    vkCmdBlitImage(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, bytes,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &made, VK_FILTER_LINEAR);
+    a_picture_becomes(one, bytes, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    return bytes;
+}
+
+/* Puts a copy made into bytes into every picture already turned out of the
+ * memory it writes, and says which pictures those were.
+ *
+ * A title copies a scene out and then reads it as a picture. Turning that
+ * picture again out of the memory the copy wrote reads back what the device
+ * already holds, puts it in order and hands it over again, which in a mission
+ * came to a third of the time a frame took. */
+static uint32_t renew_the_pictures_a_copy_writes(VkCommandBuffer one, VkImage bytes,
+                                                 const struct xenolith_copy *copy, uint32_t right,
+                                                 uint32_t bottom, uint32_t *renewed) {
+    uint32_t count = 0;
+    for (uint32_t which = 0; which < XENOLITH_PICTURES_KEPT && count < XENOLITH_RENEWED_AT_ONCE;
+         which++) {
+        uint32_t across_at = 0;
+        uint32_t down_at = 0;
+        if (!where_a_copy_lands(which, copy, right, bottom, &across_at, &down_at)) {
+            continue;
+        }
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageCopy putting = {0};
+        putting.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        putting.srcSubresource.layerCount = 1;
+        putting.dstSubresource = putting.srcSubresource;
+        putting.dstOffset.x = (int32_t)(across_at + copy->left);
+        putting.dstOffset.y = (int32_t)(down_at + copy->top);
+        putting.extent.width = right - copy->left;
+        putting.extent.height = bottom - copy->top;
+        putting.extent.depth = 1;
+        vkCmdCopyImage(one, bytes, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, turned[which].image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &putting);
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        renewed[count++] = which;
+    }
+    return count;
+}
+
 /* Hands what was drawn back to the title, where the title said to put it.
  *
  * A console draws into memory of its own beside the hardware and then copies
@@ -4647,6 +4818,10 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
      * somewhere to draw rather than somewhere to read from until it is asked
      * for. */
     unsigned int kept = XENOLITH_COPIES_KEPT;
+    uint32_t renewed[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t renewing = 0;
+    int in_bytes = 0;
+    copies_counted++;
     if (copy->from_how_far) {
         VkImageMemoryBarrier to_read = {0};
         to_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -4675,8 +4850,23 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1,
                              &back_to_drawing);
     } else {
-        vkCmdCopyImageToBuffer(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               surface.readable, 1, &out);
+        VkImage bytes =
+            copy->as_one_float ? VK_NULL_HANDLE : a_copy_made_into_bytes(one, copy, &out, across, down);
+        if (bytes != VK_NULL_HANDLE) {
+            VkBufferImageCopy made = {0};
+            made.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            made.imageSubresource.layerCount = 1;
+            made.imageExtent.width = across;
+            made.imageExtent.height = down;
+            made.imageExtent.depth = 1;
+            vkCmdCopyImageToBuffer(one, bytes, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   surface.readable, 1, &made);
+            renewing = renew_the_pictures_a_copy_writes(one, bytes, copy, right, bottom, renewed);
+            in_bytes = 1;
+        } else {
+            vkCmdCopyImageToBuffer(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   surface.readable, 1, &out);
+        }
 
         /* A copy that may be the frame is also kept on the device, made smaller
          * there where each pixel was drawn as more than one sample, so that
@@ -4752,7 +4942,10 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
              * a number nothing sensible comes of, and the scene it then shows
              * is white. */
             uint32_t colour;
-            if (copy->from_how_far) {
+            if (in_bytes) {
+                memcpy(&colour, from + ((size_t)(row - copy->top) * across + (at - copy->left)) * 4u,
+                       sizeof colour);
+            } else if (copy->from_how_far) {
                 /* Kept as a whole float on this side and as the console keeps
                  * it on the other: three bytes of it over one of the stencil a
                  * title tests against, which nothing here draws with. How far
@@ -4815,6 +5008,15 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
     }
 
     vkUnmapMemory(drawing.device, surface.readable_memory);
+
+    /* A picture put right on the device is told what its memory adds up to
+     * now, so that the copy is not taken for a title writing over it. */
+    for (uint32_t at = 0; at < renewing; at++) {
+        uint32_t which = renewed[at];
+        turned[which].came_to = what_the_memory_adds_up_to(base, turned[which].from,
+                                                           turned[which].over);
+        turned[which].renewed_by = copies_counted;
+    }
     pthread_mutex_unlock(&one_reading);
     return 1;
 }
