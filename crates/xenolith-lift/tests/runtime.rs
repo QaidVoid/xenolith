@@ -5355,6 +5355,521 @@ fn runs_with_the_renderer(name: &str, program: &str) -> Result<(), String> {
     }
 }
 
+/// A vertex shader written for the draw tests rather than taken from a title:
+/// it draws the same triangle in the middle of the frame whatever it is handed,
+/// pointing down, half the frame across at its top.
+#[rustfmt::skip]
+const TRIANGLE_VERTEX: &[u32] = &[
+    0x0723_0203,
+    0x0001_0000,
+    0x0008_000b,
+    0x0000_0028,
+    0x0000_0000,
+    0x0002_0011,
+    0x0000_0001,
+    0x0006_000b,
+    0x0000_0001,
+    0x4c53_4c47,
+    0x6474_732e,
+    0x3035_342e,
+    0x0000_0000,
+    0x0003_000e,
+    0x0000_0000,
+    0x0000_0001,
+    0x0007_000f,
+    0x0000_0000,
+    0x0000_0004,
+    0x6e69_616d,
+    0x0000_0000,
+    0x0000_0019,
+    0x0000_001d,
+    0x0003_0003,
+    0x0000_0002,
+    0x0000_01c2,
+    0x0004_0005,
+    0x0000_0004,
+    0x6e69_616d,
+    0x0000_0000,
+    0x0004_0005,
+    0x0000_000c,
+    0x6e72_6f63,
+    0x0073_7265,
+    0x0006_0005,
+    0x0000_0017,
+    0x505f_6c67,
+    0x6556_7265,
+    0x7865_7472,
+    0x0000_0000,
+    0x0006_0006,
+    0x0000_0017,
+    0x0000_0000,
+    0x505f_6c67,
+    0x7469_736f,
+    0x006e_6f69,
+    0x0007_0006,
+    0x0000_0017,
+    0x0000_0001,
+    0x505f_6c67,
+    0x746e_696f,
+    0x657a_6953,
+    0x0000_0000,
+    0x0007_0006,
+    0x0000_0017,
+    0x0000_0002,
+    0x435f_6c67,
+    0x4470_696c,
+    0x6174_7369,
+    0x0065_636e,
+    0x0007_0006,
+    0x0000_0017,
+    0x0000_0003,
+    0x435f_6c67,
+    0x446c_6c75,
+    0x6174_7369,
+    0x0065_636e,
+    0x0003_0005,
+    0x0000_0019,
+    0x0000_0000,
+    0x0006_0005,
+    0x0000_001d,
+    0x565f_6c67,
+    0x6574_7265,
+    0x646e_4978,
+    0x0000_7865,
+    0x0003_0047,
+    0x0000_0017,
+    0x0000_0002,
+    0x0005_0048,
+    0x0000_0017,
+    0x0000_0000,
+    0x0000_000b,
+    0x0000_0000,
+    0x0005_0048,
+    0x0000_0017,
+    0x0000_0001,
+    0x0000_000b,
+    0x0000_0001,
+    0x0005_0048,
+    0x0000_0017,
+    0x0000_0002,
+    0x0000_000b,
+    0x0000_0003,
+    0x0005_0048,
+    0x0000_0017,
+    0x0000_0003,
+    0x0000_000b,
+    0x0000_0004,
+    0x0004_0047,
+    0x0000_001d,
+    0x0000_000b,
+    0x0000_002a,
+    0x0002_0013,
+    0x0000_0002,
+    0x0003_0021,
+    0x0000_0003,
+    0x0000_0002,
+    0x0003_0016,
+    0x0000_0006,
+    0x0000_0020,
+    0x0004_0017,
+    0x0000_0007,
+    0x0000_0006,
+    0x0000_0002,
+    0x0004_0015,
+    0x0000_0008,
+    0x0000_0020,
+    0x0000_0000,
+    0x0004_002b,
+    0x0000_0008,
+    0x0000_0009,
+    0x0000_0003,
+    0x0004_001c,
+    0x0000_000a,
+    0x0000_0007,
+    0x0000_0009,
+    0x0004_0020,
+    0x0000_000b,
+    0x0000_0007,
+    0x0000_000a,
+    0x0004_002b,
+    0x0000_0006,
+    0x0000_000d,
+    0x0000_0000,
+    0x0004_002b,
+    0x0000_0006,
+    0x0000_000e,
+    0x3f00_0000,
+    0x0005_002c,
+    0x0000_0007,
+    0x0000_000f,
+    0x0000_000d,
+    0x0000_000e,
+    0x0004_002b,
+    0x0000_0006,
+    0x0000_0010,
+    0xbf00_0000,
+    0x0005_002c,
+    0x0000_0007,
+    0x0000_0011,
+    0x0000_0010,
+    0x0000_0010,
+    0x0005_002c,
+    0x0000_0007,
+    0x0000_0012,
+    0x0000_000e,
+    0x0000_0010,
+    0x0006_002c,
+    0x0000_000a,
+    0x0000_0013,
+    0x0000_000f,
+    0x0000_0011,
+    0x0000_0012,
+    0x0004_0017,
+    0x0000_0014,
+    0x0000_0006,
+    0x0000_0004,
+    0x0004_002b,
+    0x0000_0008,
+    0x0000_0015,
+    0x0000_0001,
+    0x0004_001c,
+    0x0000_0016,
+    0x0000_0006,
+    0x0000_0015,
+    0x0006_001e,
+    0x0000_0017,
+    0x0000_0014,
+    0x0000_0006,
+    0x0000_0016,
+    0x0000_0016,
+    0x0004_0020,
+    0x0000_0018,
+    0x0000_0003,
+    0x0000_0017,
+    0x0004_003b,
+    0x0000_0018,
+    0x0000_0019,
+    0x0000_0003,
+    0x0004_0015,
+    0x0000_001a,
+    0x0000_0020,
+    0x0000_0001,
+    0x0004_002b,
+    0x0000_001a,
+    0x0000_001b,
+    0x0000_0000,
+    0x0004_0020,
+    0x0000_001c,
+    0x0000_0001,
+    0x0000_001a,
+    0x0004_003b,
+    0x0000_001c,
+    0x0000_001d,
+    0x0000_0001,
+    0x0004_0020,
+    0x0000_001f,
+    0x0000_0007,
+    0x0000_0007,
+    0x0004_002b,
+    0x0000_0006,
+    0x0000_0022,
+    0x3f80_0000,
+    0x0004_0020,
+    0x0000_0026,
+    0x0000_0003,
+    0x0000_0014,
+    0x0005_0036,
+    0x0000_0002,
+    0x0000_0004,
+    0x0000_0000,
+    0x0000_0003,
+    0x0002_00f8,
+    0x0000_0005,
+    0x0004_003b,
+    0x0000_000b,
+    0x0000_000c,
+    0x0000_0007,
+    0x0003_003e,
+    0x0000_000c,
+    0x0000_0013,
+    0x0004_003d,
+    0x0000_001a,
+    0x0000_001e,
+    0x0000_001d,
+    0x0005_0041,
+    0x0000_001f,
+    0x0000_0020,
+    0x0000_000c,
+    0x0000_001e,
+    0x0004_003d,
+    0x0000_0007,
+    0x0000_0021,
+    0x0000_0020,
+    0x0005_0051,
+    0x0000_0006,
+    0x0000_0023,
+    0x0000_0021,
+    0x0000_0000,
+    0x0005_0051,
+    0x0000_0006,
+    0x0000_0024,
+    0x0000_0021,
+    0x0000_0001,
+    0x0007_0050,
+    0x0000_0014,
+    0x0000_0025,
+    0x0000_0023,
+    0x0000_0024,
+    0x0000_000d,
+    0x0000_0022,
+    0x0005_0041,
+    0x0000_0026,
+    0x0000_0027,
+    0x0000_0019,
+    0x0000_001b,
+    0x0003_003e,
+    0x0000_0027,
+    0x0000_0025,
+    0x0001_00fd,
+    0x0001_0038,
+];
+
+/// Builds and runs a program drawing with [`TRIANGLE_VERTEX`] and the pixel
+/// shader given, in a directory of its own, and hands back what it said.
+///
+/// The shader table hands the two over the way the lift hands over a title's:
+/// the translated words, the streams each reads, and the pictures it looks at.
+fn draw_with(name: &str, pixel: &[u32], program: &str) -> Result<std::process::Output, String> {
+    /* The table the runtime finds them by, built the way the lift builds it. */
+    let mut table = String::from("#include \"xenolith.h\"\n\n");
+    for (which, words) in [(0usize, TRIANGLE_VERTEX), (1usize, pixel)] {
+        let _ = writeln!(table, "static const uint32_t said_{which}[] = {{");
+        for word in words {
+            let _ = writeln!(table, "    {word:#010x}u,");
+        }
+        table.push_str("};\n\n");
+    }
+    /* One stream for the vertex shader: slot 0, two words per vertex, read from
+     * the front. The pixel shader reads none. */
+    table.push_str("static const uint32_t reads_0[] = { 0u, 2u, 0u, 2u };\n\n");
+    table.push_str(concat!(
+        "static const size_t everything_there = 2;\n\n",
+        "const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                              uint32_t *length) {\n",
+        "    (void)sum; (void)words;\n",
+        "    if (length != 0) { *length = kind == 0 ? ",
+    ));
+    let _ = writeln!(table, "{}u : {}u; }}", TRIANGLE_VERTEX.len(), pixel.len());
+    table.push_str(concat!(
+        "    return kind == 0 ? said_0 : said_1;\n",
+        "}\n\n",
+        "const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                               uint32_t *streams) {\n",
+        "    (void)sum; (void)words;\n",
+        "    if (kind != 0) { if (streams != 0) { *streams = 0; } return 0; }\n",
+        "    if (streams != 0) { *streams = 1; }\n",
+        "    return reads_0;\n",
+        "}\n\n",
+        "const uint32_t *xenolith_looks_at(uint32_t kind, uint32_t sum, uint32_t words,\n",
+        "                                  uint32_t *pictures) {\n",
+        "    (void)kind; (void)sum; (void)words;\n",
+        "    if (pictures != 0) { *pictures = 0; }\n",
+        "    return 0;\n",
+        "}\n",
+    ));
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::create_dir_all(&directory).map_err(|error| format!("making a directory: {error}"))?;
+    for (name, text) in [
+        ("xenolith.h", HEADER),
+        ("xenolith.c", include_str!("../runtime/xenolith.c")),
+        (
+            "command_stream.c",
+            include_str!("../runtime/command_stream.c"),
+        ),
+        ("sound.c", include_str!("../runtime/sound.c")),
+        ("drawing.c", include_str!("../runtime/drawing.c")),
+        ("vulkan.c", include_str!("../runtime/vulkan.c")),
+        ("shaders.c", table.as_str()),
+    ] {
+        std::fs::write(directory.join(name), text)
+            .map_err(|error| format!("writing a file: {error}"))?;
+    }
+
+    std::fs::write(directory.join("main.c"), program)
+        .map_err(|error| format!("writing the program: {error}"))?;
+
+    let program_path = directory.join("program");
+    let built = Command::new(honest::host_compiler())
+        .args(["-std=c17", "-O1", "-DXENOLITH_WITH_VULKAN"])
+        .arg("-o")
+        .arg(&program_path)
+        .arg(directory.join("main.c"))
+        .arg(directory.join("xenolith.c"))
+        .arg(directory.join("vulkan.c"))
+        .arg(directory.join("shaders.c"))
+        .args(["-lvulkan", "-lm", "-lpthread"])
+        .output()
+        .map_err(|error| format!("running the compiler: {error}"))?;
+    if !built.status.success() {
+        return Err(format!(
+            "the draw test did not build:
+{}",
+            String::from_utf8_lossy(&built.stderr)
+        ));
+    }
+
+    let ran = Command::new(&program_path)
+        .current_dir(&directory)
+        .output()
+        .map_err(|error| format!("running the draw: {error}"))?;
+    if !ran.status.success() {
+        return Err(format!(
+            "the draw went wrong, {}:
+{}",
+            ran.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&ran.stderr)
+        ));
+    }
+    Ok(ran)
+}
+
+/// A program drawing one triangle by [`TRIANGLE_VERTEX`] and the pixel shader
+/// the table hands over, with the pixel shader's first three constants as given
+/// and whatever else the draw needs said before it. It keeps the frame it drew
+/// as `frame.ppm`.
+fn a_triangle_drawn_by(constants: &str, before_the_draw: &str) -> String {
+    r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void put_float(uint8_t *base, uint32_t at, float value) {
+    uint32_t word;
+    memcpy(&word, &value, 4);
+    xenolith_store32(base, at, word);
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    if (!xenolith_can_draw()) {
+        printf("no device\n");
+        return 0;
+    }
+
+    /* The pixel shader's first three constants. */
+    static const float constants[3][4] = {THE_CONSTANTS};
+    for (unsigned one = 0; one < 3; one++) {
+        for (unsigned lane = 0; lane < 4; lane++) {
+            put_float(base, 0x7fc80000u + (0x4000u + (256u + one) * 4u + lane) * 4u,
+                      constants[one][lane]);
+        }
+    }
+
+    uint32_t vertex_length = 0;
+    uint32_t pixel_length = 0;
+    const uint32_t *vertex = xenolith_said(0u, 0u, 0u, &vertex_length);
+    const uint32_t *pixel = xenolith_said(1u, 0u, 0u, &pixel_length);
+    BEFORE_THE_DRAW
+    if (!xenolith_begin_a_frame()) { return 3; }
+    xenolith_look_at(NULL, NULL);
+    xenolith_clip_to(0u, 0u, 1280u, 720u);
+    xenolith_hand_over_constants(base + 0x7fc80000u + 0x4000u * 4u,
+                                 base + 0x7fc80000u + 0x4900u * 4u,
+                                 base + 0x7fc80000u + 0x4908u * 4u);
+    if (!xenolith_draw_now(0x00010001u, 0xfu, 0u, XENOLITH_DRAWN_HOWEVER_SOLID, 0u, 0u, vertex,
+                           vertex_length, 0u, pixel, pixel_length, 3u,
+                           XENOLITH_SHAPE_TRIANGLES)) {
+        return 4;
+    }
+    if (!xenolith_end_a_frame()) { return 5; }
+    if (!xenolith_keep_a_frame("frame.ppm")) { return 6; }
+    printf("drawn\n");
+    return 0;
+}
+"#
+    .replace("THE_CONSTANTS", constants)
+    .replace("BEFORE_THE_DRAW", before_the_draw)
+}
+
+/// The colour of one pixel of a frame a program kept, as red, green and blue.
+fn a_pixel_of(picture: &[u8], across: usize, down: usize) -> Option<[u8; 3]> {
+    /* The header is three lines, and the pixels follow it a row at a time. */
+    let header = picture
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(2)
+        .map(|(at, _)| at + 1)?;
+    let at = header + (down * 1280 + across) * 3;
+    picture.get(at..at + 3)?.try_into().ok()
+}
+
+/// A colour a pixel shader exported stands where a later export of it runs on a
+/// predicate that does not hold.
+///
+/// A title's shader exports its colour early on one path and again at its end
+/// on a predicate, and where the predicate does not hold the first export is
+/// what reaches the screen. The shader below exports red, sets a predicate that
+/// does not hold, and exports green on it, so what is drawn has to be red.
+/// Needs a device to draw on, and returns where there is none.
+#[test]
+fn a_colour_exported_before_a_predicate_that_does_not_hold_stands() {
+    /* One stretch of three instructions that ends the shader, starting at the
+     * first instruction after the control flow. */
+    let run = (2u64 << 44) | (3u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    /* Each takes the larger of its first two sources, and keeps the single
+     * lane half's previous answer where it writes nothing with it. */
+    let max_of = |source: u32| (2u32 << 24) | (source << 16) | (source << 8) | source;
+    let keeps = 50u32 << 26;
+    let exports_every_lane = (1u32 << 15) | (0xf << 16);
+    /* Red, the first constant, into the colour. */
+    words.extend([exports_every_lane | keeps, 0, max_of(0)]);
+    /* The predicate set where the fourth lane of the second constant is
+     * nought, which it is not, writing the first lane of a register. */
+    words.extend([(27u32 << 26) | (1 << 8) | (1 << 20), 0, max_of(1)]);
+    /* Green, the third constant, into the colour where the predicate holds. */
+    words.extend([exports_every_lane | keeps, (1 << 28) | (1 << 27), max_of(2)]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    let program = a_triangle_drawn_by(
+        "{1.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}",
+        "",
+    );
+    let ran = draw_with("a_predicated_export", &pixel.words, &program).expect("the draw ran");
+    if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+        return;
+    }
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("a_predicated_export");
+    let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+    let pixel = a_pixel_of(&picture, 640, 360).expect("the frame is too short");
+    assert_eq!(
+        pixel,
+        [255, 0, 0],
+        "the middle of the frame is not the colour exported first"
+    );
+}
+
 /// A draw with a real pair of shaders puts something on the surface.
 ///
 /// Everything before this proves a piece works on its own: the renderer opens a
@@ -5386,281 +5901,6 @@ fn a_draw_with_real_shaders_puts_something_on_the_surface() {
      * The shader table below hands them over the way the lift hands over a
      * title's: the translated words, the streams each reads, and the pictures
      * it looks at. */
-    #[rustfmt::skip]
-    const VERTEX: &[u32] = &[
-        0x0723_0203,
-        0x0001_0000,
-        0x0008_000b,
-        0x0000_0028,
-        0x0000_0000,
-        0x0002_0011,
-        0x0000_0001,
-        0x0006_000b,
-        0x0000_0001,
-        0x4c53_4c47,
-        0x6474_732e,
-        0x3035_342e,
-        0x0000_0000,
-        0x0003_000e,
-        0x0000_0000,
-        0x0000_0001,
-        0x0007_000f,
-        0x0000_0000,
-        0x0000_0004,
-        0x6e69_616d,
-        0x0000_0000,
-        0x0000_0019,
-        0x0000_001d,
-        0x0003_0003,
-        0x0000_0002,
-        0x0000_01c2,
-        0x0004_0005,
-        0x0000_0004,
-        0x6e69_616d,
-        0x0000_0000,
-        0x0004_0005,
-        0x0000_000c,
-        0x6e72_6f63,
-        0x0073_7265,
-        0x0006_0005,
-        0x0000_0017,
-        0x505f_6c67,
-        0x6556_7265,
-        0x7865_7472,
-        0x0000_0000,
-        0x0006_0006,
-        0x0000_0017,
-        0x0000_0000,
-        0x505f_6c67,
-        0x7469_736f,
-        0x006e_6f69,
-        0x0007_0006,
-        0x0000_0017,
-        0x0000_0001,
-        0x505f_6c67,
-        0x746e_696f,
-        0x657a_6953,
-        0x0000_0000,
-        0x0007_0006,
-        0x0000_0017,
-        0x0000_0002,
-        0x435f_6c67,
-        0x4470_696c,
-        0x6174_7369,
-        0x0065_636e,
-        0x0007_0006,
-        0x0000_0017,
-        0x0000_0003,
-        0x435f_6c67,
-        0x446c_6c75,
-        0x6174_7369,
-        0x0065_636e,
-        0x0003_0005,
-        0x0000_0019,
-        0x0000_0000,
-        0x0006_0005,
-        0x0000_001d,
-        0x565f_6c67,
-        0x6574_7265,
-        0x646e_4978,
-        0x0000_7865,
-        0x0003_0047,
-        0x0000_0017,
-        0x0000_0002,
-        0x0005_0048,
-        0x0000_0017,
-        0x0000_0000,
-        0x0000_000b,
-        0x0000_0000,
-        0x0005_0048,
-        0x0000_0017,
-        0x0000_0001,
-        0x0000_000b,
-        0x0000_0001,
-        0x0005_0048,
-        0x0000_0017,
-        0x0000_0002,
-        0x0000_000b,
-        0x0000_0003,
-        0x0005_0048,
-        0x0000_0017,
-        0x0000_0003,
-        0x0000_000b,
-        0x0000_0004,
-        0x0004_0047,
-        0x0000_001d,
-        0x0000_000b,
-        0x0000_002a,
-        0x0002_0013,
-        0x0000_0002,
-        0x0003_0021,
-        0x0000_0003,
-        0x0000_0002,
-        0x0003_0016,
-        0x0000_0006,
-        0x0000_0020,
-        0x0004_0017,
-        0x0000_0007,
-        0x0000_0006,
-        0x0000_0002,
-        0x0004_0015,
-        0x0000_0008,
-        0x0000_0020,
-        0x0000_0000,
-        0x0004_002b,
-        0x0000_0008,
-        0x0000_0009,
-        0x0000_0003,
-        0x0004_001c,
-        0x0000_000a,
-        0x0000_0007,
-        0x0000_0009,
-        0x0004_0020,
-        0x0000_000b,
-        0x0000_0007,
-        0x0000_000a,
-        0x0004_002b,
-        0x0000_0006,
-        0x0000_000d,
-        0x0000_0000,
-        0x0004_002b,
-        0x0000_0006,
-        0x0000_000e,
-        0x3f00_0000,
-        0x0005_002c,
-        0x0000_0007,
-        0x0000_000f,
-        0x0000_000d,
-        0x0000_000e,
-        0x0004_002b,
-        0x0000_0006,
-        0x0000_0010,
-        0xbf00_0000,
-        0x0005_002c,
-        0x0000_0007,
-        0x0000_0011,
-        0x0000_0010,
-        0x0000_0010,
-        0x0005_002c,
-        0x0000_0007,
-        0x0000_0012,
-        0x0000_000e,
-        0x0000_0010,
-        0x0006_002c,
-        0x0000_000a,
-        0x0000_0013,
-        0x0000_000f,
-        0x0000_0011,
-        0x0000_0012,
-        0x0004_0017,
-        0x0000_0014,
-        0x0000_0006,
-        0x0000_0004,
-        0x0004_002b,
-        0x0000_0008,
-        0x0000_0015,
-        0x0000_0001,
-        0x0004_001c,
-        0x0000_0016,
-        0x0000_0006,
-        0x0000_0015,
-        0x0006_001e,
-        0x0000_0017,
-        0x0000_0014,
-        0x0000_0006,
-        0x0000_0016,
-        0x0000_0016,
-        0x0004_0020,
-        0x0000_0018,
-        0x0000_0003,
-        0x0000_0017,
-        0x0004_003b,
-        0x0000_0018,
-        0x0000_0019,
-        0x0000_0003,
-        0x0004_0015,
-        0x0000_001a,
-        0x0000_0020,
-        0x0000_0001,
-        0x0004_002b,
-        0x0000_001a,
-        0x0000_001b,
-        0x0000_0000,
-        0x0004_0020,
-        0x0000_001c,
-        0x0000_0001,
-        0x0000_001a,
-        0x0004_003b,
-        0x0000_001c,
-        0x0000_001d,
-        0x0000_0001,
-        0x0004_0020,
-        0x0000_001f,
-        0x0000_0007,
-        0x0000_0007,
-        0x0004_002b,
-        0x0000_0006,
-        0x0000_0022,
-        0x3f80_0000,
-        0x0004_0020,
-        0x0000_0026,
-        0x0000_0003,
-        0x0000_0014,
-        0x0005_0036,
-        0x0000_0002,
-        0x0000_0004,
-        0x0000_0000,
-        0x0000_0003,
-        0x0002_00f8,
-        0x0000_0005,
-        0x0004_003b,
-        0x0000_000b,
-        0x0000_000c,
-        0x0000_0007,
-        0x0003_003e,
-        0x0000_000c,
-        0x0000_0013,
-        0x0004_003d,
-        0x0000_001a,
-        0x0000_001e,
-        0x0000_001d,
-        0x0005_0041,
-        0x0000_001f,
-        0x0000_0020,
-        0x0000_000c,
-        0x0000_001e,
-        0x0004_003d,
-        0x0000_0007,
-        0x0000_0021,
-        0x0000_0020,
-        0x0005_0051,
-        0x0000_0006,
-        0x0000_0023,
-        0x0000_0021,
-        0x0000_0000,
-        0x0005_0051,
-        0x0000_0006,
-        0x0000_0024,
-        0x0000_0021,
-        0x0000_0001,
-        0x0007_0050,
-        0x0000_0014,
-        0x0000_0025,
-        0x0000_0023,
-        0x0000_0024,
-        0x0000_000d,
-        0x0000_0022,
-        0x0005_0041,
-        0x0000_0026,
-        0x0000_0027,
-        0x0000_0019,
-        0x0000_001b,
-        0x0003_003e,
-        0x0000_0027,
-        0x0000_0025,
-        0x0001_00fd,
-        0x0001_0038,
-    ];
     #[rustfmt::skip]
     const PIXEL: &[u32] = &[
         0x0723_0203,
@@ -5751,61 +5991,6 @@ fn a_draw_with_real_shaders_puts_something_on_the_surface() {
         0x0001_00fd,
         0x0001_0038,
     ];
-
-    /* The table the runtime finds them by, built the way the lift builds it. */
-    let mut table = String::from("#include \"xenolith.h\"\n\n");
-    for (which, words) in [(0usize, VERTEX), (1usize, PIXEL)] {
-        let _ = writeln!(table, "static const uint32_t said_{which}[] = {{");
-        for word in words {
-            let _ = writeln!(table, "    {word:#010x}u,");
-        }
-        table.push_str("};\n\n");
-    }
-    /* One stream for the vertex shader: slot 0, two words per vertex, read from
-     * the front. The pixel shader reads none. */
-    table.push_str("static const uint32_t reads_0[] = { 0u, 2u, 0u, 2u };\n\n");
-    table.push_str(concat!(
-        "static const size_t everything_there = 2;\n\n",
-        "const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,\n",
-        "                              uint32_t *length) {\n",
-        "    (void)sum; (void)words;\n",
-        "    if (length != 0) { *length = kind == 0 ? ",
-    ));
-    let _ = writeln!(table, "{}u : {}u; }}", VERTEX.len(), PIXEL.len());
-    table.push_str(concat!(
-        "    return kind == 0 ? said_0 : said_1;\n",
-        "}\n\n",
-        "const uint32_t *xenolith_reads(uint32_t kind, uint32_t sum, uint32_t words,\n",
-        "                               uint32_t *streams) {\n",
-        "    (void)sum; (void)words;\n",
-        "    if (kind != 0) { if (streams != 0) { *streams = 0; } return 0; }\n",
-        "    if (streams != 0) { *streams = 1; }\n",
-        "    return reads_0;\n",
-        "}\n\n",
-        "const uint32_t *xenolith_looks_at(uint32_t kind, uint32_t sum, uint32_t words,\n",
-        "                                  uint32_t *pictures) {\n",
-        "    (void)kind; (void)sum; (void)words;\n",
-        "    if (pictures != 0) { *pictures = 0; }\n",
-        "    return 0;\n",
-        "}\n",
-    ));
-
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("a_draw");
-    std::fs::create_dir_all(&directory).expect("making a directory");
-    for (name, text) in [
-        ("xenolith.h", HEADER),
-        ("xenolith.c", include_str!("../runtime/xenolith.c")),
-        (
-            "command_stream.c",
-            include_str!("../runtime/command_stream.c"),
-        ),
-        ("sound.c", include_str!("../runtime/sound.c")),
-        ("drawing.c", include_str!("../runtime/drawing.c")),
-        ("vulkan.c", include_str!("../runtime/vulkan.c")),
-        ("shaders.c", table.as_str()),
-    ] {
-        std::fs::write(directory.join(name), text).expect("writing a file");
-    }
 
     let program = r#"
 #define _POSIX_C_SOURCE 200809L
@@ -5999,36 +6184,7 @@ int main(void) {
     return 0;
 }
 "#;
-    std::fs::write(directory.join("main.c"), program).expect("writing the program");
-
-    let program_path = directory.join("program");
-    let built = Command::new(honest::host_compiler())
-        .args(["-std=c17", "-O1", "-DXENOLITH_WITH_VULKAN"])
-        .arg("-o")
-        .arg(&program_path)
-        .arg(directory.join("main.c"))
-        .arg(directory.join("xenolith.c"))
-        .arg(directory.join("vulkan.c"))
-        .arg(directory.join("shaders.c"))
-        .args(["-lvulkan", "-lm", "-lpthread"])
-        .output()
-        .expect("running the compiler");
-    assert!(
-        built.status.success(),
-        "the draw test did not build:\n{}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-
-    let ran = Command::new(&program_path)
-        .current_dir(&directory)
-        .output()
-        .expect("running the draw");
-    assert!(
-        ran.status.success(),
-        "the draw went wrong, {}:\n{}",
-        ran.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&ran.stderr)
-    );
+    let ran = draw_with("a_draw", PIXEL, program).expect("the draw ran");
 
     let said = String::from_utf8_lossy(&ran.stdout);
     if said.contains("no device") {
@@ -6042,6 +6198,7 @@ int main(void) {
         said.contains("copied in halves"),
         "the frame copied in halves was not the whole: {said}"
     );
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("a_draw");
     let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
     assert!(picture.starts_with(b"P6\n"), "the frame is not a picture");
     /* Something other than black somewhere in it, which is what says a draw

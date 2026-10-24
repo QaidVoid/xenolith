@@ -566,17 +566,24 @@ pub(crate) fn put_it_where_it_goes(
             standing,
         )?;
         if running.is_some() {
-            let held = module.name();
-            module.add(
-                opcodes::LOAD,
-                &[named.four.number(), held.number(), named.out.number()],
-            );
+            /* Where it does not run, what was exported before it stands. That
+             * is the export carried so far rather than what the output holds,
+             * which is written once at the end: a shader that exports its
+             * colour early and then again on a predicate that does not hold
+             * put out whatever the output held before anything was written,
+             * which is nothing. */
+            let kept = if let Some(standing) = standing {
+                standing
+            } else {
+                let held = module.name();
+                module.add(
+                    opcodes::LOAD,
+                    &[named.four.number(), held.number(), named.out.number()],
+                );
+                held.number()
+            };
             return Ok(Some(only_where_it_runs(
-                module,
-                named,
-                running,
-                leaving,
-                held.number(),
+                module, named, running, leaving, kept,
             )));
         }
         return Ok(Some(leaving));
