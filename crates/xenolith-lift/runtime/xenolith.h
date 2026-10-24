@@ -722,8 +722,9 @@ uint32_t xenolith_say_a_shader(uint32_t kind, const uint32_t *from, uint32_t cou
                                uint32_t *into, uint32_t room);
 
 /* How many shaders said while a title runs are kept, so that one handed over
- * again is not said again. */
-#define XENOLITH_SAID_WHILE_RUNNING 64
+ * again is not said again. A title's scene loads a few hundred, and saying one
+ * costs more than drawing with it, so this is room for all of them. */
+#define XENOLITH_SAID_WHILE_RUNNING 4096
 
 /* How many counts come before the words of a shader said while a title runs. */
 #define XENOLITH_COUNTS 3u

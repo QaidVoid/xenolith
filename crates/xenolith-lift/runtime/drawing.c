@@ -1310,6 +1310,8 @@ static int say_it_now(const uint8_t *base, uint32_t which_kind, uint32_t where,
     (void)sum;
     return 0;
 #else
+    /* One that could not be said is kept too, with no answer, so that it is
+     * not tried again every time a title hands it over. */
     static struct {
         uint32_t kind;
         uint32_t sum;
@@ -1325,6 +1327,9 @@ static int say_it_now(const uint8_t *base, uint32_t which_kind, uint32_t where,
 
     for (unsigned at = 0; at < how_many_kept; at++) {
         if (kept[at].kind == which_kind && kept[at].sum == sum && kept[at].words == how_many) {
+            if (kept[at].answer == NULL) {
+                return 0;
+            }
             answer = kept[at].answer;
             break;
         }
@@ -1352,6 +1357,13 @@ static int say_it_now(const uint8_t *base, uint32_t which_kind, uint32_t where,
                 fprintf(stderr, "\n");
             }
             free(handed);
+            if (how_many_kept < XENOLITH_SAID_WHILE_RUNNING) {
+                kept[how_many_kept].kind = which_kind;
+                kept[how_many_kept].sum = sum;
+                kept[how_many_kept].words = how_many;
+                kept[how_many_kept].answer = NULL;
+                how_many_kept++;
+            }
             return 0;
         }
 
@@ -1427,6 +1439,12 @@ static void take_the_shader_in_hand(uint8_t *base, uint32_t which_kind, uint32_t
         return;
     }
 
+    /* Nothing in hand rather than the one before it. A draw goes ahead with
+     * whatever is in hand, and the one before is another of the title's
+     * shaders, which draws something wrong in place of nothing. */
+    in_hand[which_kind].sum = sum;
+    in_hand[which_kind].words = how_many;
+    in_hand[which_kind].said = NULL;
     said_nothing_of_a_shader(sum, how_many);
 }
 

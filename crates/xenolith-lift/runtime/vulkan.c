@@ -1266,21 +1266,36 @@ static int worth_mixing(uint32_t blending) {
              && alpha_onto == 0u && alpha_join == 0u);
 }
 
-/* What one pair of shaders was made into, kept so the same pair is not built
- * twice. A title uses a handful and uses them every frame. */
-#define XENOLITH_PIPELINES 64
+/* What one pair of shaders was made into, with everything else it was built
+ * for, kept so the same is not built twice.
+ *
+ * A title's scene uses hundreds of these and uses them every frame. Room for
+ * only the few a menu uses meant that, once it was full, every draw built its
+ * own again, which costs more than the drawing does. So it is kept by what it
+ * adds up to rather than looked through from the start. */
+#define XENOLITH_PIPELINES 4096u
+#define XENOLITH_PIPELINE_SAID 8u
 static struct {
-    uint32_t vertex;
-    uint32_t pixel;
-    uint32_t kind;
-    uint32_t blending;
-    uint32_t written;
-    uint32_t how_far;
-    uint32_t cut_off;
-    uint32_t cut_off_at;
+    uint32_t said[XENOLITH_PIPELINE_SAID];
     VkPipeline pipeline;
     int taken;
 } built[XENOLITH_PIPELINES];
+
+/* Where among them one built for this is kept, or where it would go. */
+static uint32_t where_a_pipeline_is_kept(const uint32_t *said) {
+    uint32_t sum = 0x811c9dc5u;
+    for (uint32_t one = 0; one < XENOLITH_PIPELINE_SAID; one++) {
+        sum = (sum ^ said[one]) * 0x01000193u;
+    }
+    uint32_t at = sum % XENOLITH_PIPELINES;
+    for (uint32_t tried = 0; tried < XENOLITH_PIPELINES; tried++) {
+        if (!built[at].taken || memcmp(built[at].said, said, sizeof built[at].said) == 0) {
+            return at;
+        }
+        at = (at + 1u) % XENOLITH_PIPELINES;
+    }
+    return XENOLITH_PIPELINES;
+}
 
 
 /* How far away a place on the surface is, kept as a plain number between one
@@ -2267,13 +2282,12 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
                                uint32_t cut_off, uint32_t cut_off_at, uint32_t vertex_sum,
                                const uint32_t *vertex, uint32_t vertex_length, uint32_t pixel_sum,
                                const uint32_t *pixel, uint32_t pixel_length, uint32_t kind) {
-    for (int at = 0; at < XENOLITH_PIPELINES; at++) {
-        if (built[at].taken && built[at].vertex == vertex_sum && built[at].pixel == pixel_sum
-            && built[at].kind == kind && built[at].blending == blending
-            && built[at].written == written && built[at].how_far == how_far
-            && built[at].cut_off == cut_off && built[at].cut_off_at == cut_off_at) {
-            return built[at].pipeline;
-        }
+    const uint32_t built_for[XENOLITH_PIPELINE_SAID] = {vertex_sum, pixel_sum, kind,
+                                                        blending, written, how_far,
+                                                        cut_off, cut_off_at};
+    uint32_t kept_at = where_a_pipeline_is_kept(built_for);
+    if (kept_at < XENOLITH_PIPELINES && built[kept_at].taken) {
+        return built[kept_at].pipeline;
     }
 
     if (!make_what_a_frame_goes_through()) {
@@ -2421,20 +2435,10 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
         return VK_NULL_HANDLE;
     }
 
-    for (int at = 0; at < XENOLITH_PIPELINES; at++) {
-        if (!built[at].taken) {
-            built[at].taken = 1;
-            built[at].vertex = vertex_sum;
-            built[at].pixel = pixel_sum;
-            built[at].kind = kind;
-            built[at].blending = blending;
-            built[at].written = written;
-            built[at].cut_off = cut_off;
-            built[at].cut_off_at = cut_off_at;
-            built[at].how_far = how_far;
-            built[at].pipeline = made;
-            break;
-        }
+    if (kept_at < XENOLITH_PIPELINES) {
+        built[kept_at].taken = 1;
+        memcpy(built[kept_at].said, built_for, sizeof built[kept_at].said);
+        built[kept_at].pipeline = made;
     }
     return made;
 }
