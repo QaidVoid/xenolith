@@ -5924,8 +5924,8 @@ fn draw_with(name: &str, pixel: &[u32], program: &str) -> Result<std::process::O
         table.push_str("};\n\n");
     }
     /* One stream for the vertex shader: slot 0, two words per vertex, read from
-     * the front. The pixel shader reads none. */
-    table.push_str("static const uint32_t reads_0[] = { 0u, 2u, 0u, 2u };\n\n");
+     * the front by the vertex's own number. The pixel shader reads none. */
+    table.push_str("static const uint32_t reads_0[] = { 0u, 2u, 0u, 2u, 0u };\n\n");
     table.push_str(concat!(
         "static const size_t everything_there = 2;\n\n",
         "const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,\n",

@@ -720,6 +720,12 @@ static struct {
     VkDeviceSize constant_at;
     VkDeviceSize vertex_from;
     VkDeviceSize vertex_wide;
+    /* What number each vertex of the next draw arrives at its shader with:
+     * as many words as it draws, this far into its room, or where there are
+     * none, one after another from the first. */
+    uint32_t numbers_at;
+    uint32_t numbers;
+    uint32_t first_number;
     VkDeviceSize constant_from;
     VkDeviceSize offsets_line_up_on;
     VkImageView view;
@@ -1899,7 +1905,7 @@ static int make_what_a_frame_goes_through(void) {
     VkBufferCreateInfo holding_vertices = {0};
     holding_vertices.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     holding_vertices.size = (VkDeviceSize)XENOLITH_VERTEX_ROOM * XENOLITH_LOTS;
-    holding_vertices.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    holding_vertices.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     holding_vertices.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     if (vkCreateBuffer(drawing.device, &holding_vertices, NULL, &through.vertices) != VK_SUCCESS) {
@@ -2619,6 +2625,12 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
     VkPipelineInputAssemblyStateCreateInfo shape = {0};
     shape.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     shape.topology = topology_of(kind);
+    /* A run of shapes in a title's list starts again at a word of all ones,
+     * which a host only looks for where it is told to. A list of separate
+     * shapes cannot be told to, and never holds one. */
+    shape.primitiveRestartEnable = shape.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
+                                   || shape.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+                                   || shape.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
 
     VkViewport seen = {0};
     seen.width = (float)XENOLITH_GRID_ACROSS;
@@ -2873,6 +2885,8 @@ uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
 
     through.vertex_from = through.vertex_at;
     through.vertex_wide = XENOLITH_VERTEX_BYTES;
+    through.numbers = 0;
+    through.first_number = 0;
     *how_many = XENOLITH_VERTEX_WORDS;
     return through.vertex_words + through.vertex_from / 4u;
 }
@@ -2888,6 +2902,12 @@ void xenolith_done_with_vertices(uint32_t words) {
     through.vertex_wide = lined_up(wide, 4u);
     through.vertex_at = lined_up(through.vertex_from + through.vertex_wide,
                                  through.offsets_line_up_on);
+}
+
+void xenolith_number_the_vertices(uint32_t at, uint32_t count, uint32_t first) {
+    through.numbers_at = at;
+    through.numbers = count;
+    through.first_number = first;
 }
 
 /* What the hardware would have done to a position, as this run was told it. */
@@ -5191,7 +5211,16 @@ int xenolith_draw_now_inside(uint32_t blending, uint32_t written, uint32_t how_f
     vkCmdBindPipeline(surface.commands, VK_PIPELINE_BIND_POINT_GRAPHICS, with);
     vkCmdBindDescriptorSets(surface.commands, VK_PIPELINE_BIND_POINT_GRAPHICS, through.layout, 0,
                             1, &through.handed[through.saying_now], 0, NULL);
-    vkCmdDraw(surface.commands, vertices, 1, 0, 0);
+    if (through.numbers != 0) {
+        vkCmdBindIndexBuffer(surface.commands, through.vertices,
+                             through.vertex_from + (VkDeviceSize)through.numbers_at * 4u,
+                             VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(surface.commands, through.numbers, 1, 0, 0, 0);
+    } else {
+        vkCmdDraw(surface.commands, vertices, 1, through.first_number, 0);
+    }
+    through.numbers = 0;
+    through.first_number = 0;
     anything_recorded = 1;
     return 1;
 }
@@ -6798,6 +6827,12 @@ uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
 }
 
 void xenolith_done_with_vertices(uint32_t words) { (void)words; }
+
+void xenolith_number_the_vertices(uint32_t at, uint32_t count, uint32_t first) {
+    (void)at;
+    (void)count;
+    (void)first;
+}
 
 void xenolith_move_a_position_by(const float *scale, const float *offset) {
     (void)scale;

@@ -730,14 +730,16 @@ uint32_t xenolith_say_a_shader(uint32_t kind, const uint32_t *from, uint32_t cou
 #define XENOLITH_COUNTS 3u
 
 /* How many words each stream of a shader said while a title runs takes. */
-#define XENOLITH_WORDS_A_STREAM 4u
+#define XENOLITH_WORDS_A_STREAM 5u
 
 const uint32_t *xenolith_said(uint32_t kind, uint32_t sum, uint32_t words,
                               uint32_t *length);
 
-/* Where a shader goes for its vertices, as four words a stream: which fetch
+/* Where a shader goes for its vertices, as five words a stream: which fetch
  * constant says where it is, how far apart two vertices sit in it, how far into
- * one this reads, and how much of it. Nothing where the shader fetches none.
+ * one this reads, how much of it, and one where the number it fetches by is
+ * one the shader worked out rather than the vertex's own. Nothing where the
+ * shader fetches none.
  *
  * A host needs these where it has to lay a vertex out itself rather than hand
  * over what a title wrote, which is what a shape the hardware completes asks
@@ -861,6 +863,19 @@ uint32_t *xenolith_room_for_vertices(uint32_t *how_many);
  * written. A frame keeps every draw's words at once, so what one draw took has
  * to be known before the next is given room. */
 void xenolith_done_with_vertices(uint32_t words);
+
+/* Says what number each vertex of the next draw arrives at its shader with:
+ * the `count` words `at` words into the room the vertices were put in, one for
+ * each vertex drawn, or where `count` is nought, one after another from
+ * `first`. A word of all ones in the first starts a new run of shapes.
+ *
+ * A shader works out what it fetches from the number it is given, and on the
+ * console that number is the title's own, however the shape is put together.
+ * Laying the vertices out again in the order they are drawn instead, as a host
+ * otherwise has to for a quad, hands the shader numbers the title never gave:
+ * one that reads a particle's corner and centre at a quarter of its number
+ * reads another particle's. So the shape is drawn by the title's numbers. */
+void xenolith_number_the_vertices(uint32_t at, uint32_t count, uint32_t first);
 
 /* Forgets any picture already turned that came out of memory the title has
  * since written over, so that the next draw reads what is there now. */

@@ -709,19 +709,20 @@ static void say_what_was_drawn(uint32_t shape, uint32_t vertices, uint32_t verte
     fprintf(stderr, "\n");
 }
 
-static uint32_t complete_the_rectangle(uint32_t *window, uint32_t room, const uint32_t *reads,
-                                       uint32_t streams) {
+static uint32_t complete_the_rectangle(uint32_t *window, uint32_t room, const uint32_t *began,
+                                       const uint32_t *reads, uint32_t streams) {
     uint32_t reached = 0;
     for (uint32_t one = 0; one < streams; one++) {
-        uint32_t slot = reads[one * 4];
-        uint32_t stride = reads[one * 4 + 1];
-        uint32_t offset = reads[one * 4 + 2];
-        uint32_t words = reads[one * 4 + 3];
-        if (slot >= XENOLITH_FETCH_SLOTS || stride == 0 || words == 0) {
+        uint32_t slot = reads[one * XENOLITH_WORDS_A_STREAM];
+        uint32_t stride = reads[one * XENOLITH_WORDS_A_STREAM + 1];
+        uint32_t offset = reads[one * XENOLITH_WORDS_A_STREAM + 2];
+        uint32_t words = reads[one * XENOLITH_WORDS_A_STREAM + 3];
+        if (slot >= XENOLITH_FETCH_SLOTS || stride == 0 || words == 0
+            || reads[one * XENOLITH_WORDS_A_STREAM + 4] != 0) {
             continue;
         }
 
-        uint32_t at = window[slot];
+        uint32_t at = began[slot];
         if (at == 0 || at + 5u * stride + offset + words > room) {
             continue;
         }
@@ -748,83 +749,6 @@ static uint32_t complete_the_rectangle(uint32_t *window, uint32_t room, const ui
         }
     }
     return reached;
-}
-
-static uint32_t expand_the_quads(uint32_t *window, uint32_t room, uint32_t filled,
-                                 const uint32_t *reads, uint32_t streams, uint32_t quads) {
-    static const uint32_t order[6] = {0u, 1u, 2u, 0u, 2u, 3u};
-    uint32_t done[XENOLITH_FETCH_SLOTS];
-    uint32_t doing = 0;
-
-    for (uint32_t one = 0; one < streams; one++) {
-        uint32_t slot = reads[one * 4];
-        uint32_t stride = reads[one * 4 + 1];
-        if (slot >= XENOLITH_FETCH_SLOTS || stride == 0) {
-            continue;
-        }
-
-        uint32_t already = 0;
-        for (uint32_t at = 0; at < doing; at++) {
-            already = already || done[at] == slot;
-        }
-        if (already) {
-            continue;
-        }
-        done[doing++] = slot;
-
-        uint32_t from = window[slot];
-        if (from == 0) {
-            continue;
-        }
-        uint32_t needs = quads * 6u * stride;
-        if (needs == 0 || needs > room - filled) {
-            continue;
-        }
-
-        for (uint32_t quad = 0; quad < quads; quad++) {
-            for (uint32_t corner = 0; corner < 6u; corner++) {
-                uint32_t took = from + (quad * 4u + order[corner]) * stride;
-                uint32_t puts = filled + (quad * 6u + corner) * stride;
-
-                /* Whole, where it is inside what there is and the words it
-                 * comes from are not the words it goes to. A shader that says
-                 * it reads fewer words than there are corners leaves the two
-                 * overlapping, and then it has to go word by word. */
-                if (took + stride <= room && puts >= took + stride) {
-                    memcpy(&window[puts], &window[took], (size_t)stride * sizeof *window);
-                    continue;
-                }
-                for (uint32_t word = 0; word < stride; word++) {
-                    window[puts + word] = took + word < room ? window[took + word] : 0u;
-                }
-            }
-        }
-        window[slot] = filled;
-        filled += needs;
-    }
-    return filled;
-}
-
-static void one_corner_over(uint32_t *window, uint32_t room, uint32_t from, uint32_t filled,
-                            uint32_t stride, uint32_t put_at, uint32_t which) {
-    uint32_t took = from + which * stride;
-    uint32_t puts = filled + put_at * stride;
-
-    /* Where the corner is inside what there is and the words it is taken from
-     * are not the words it is put in, it goes whole.
-     *
-     * Which corner a title names is its own number, so it can name one that has
-     * not been read, and where that lands among the words being written the
-     * copy has to stay word by word: taking it whole would give the words as
-     * they were rather than as they are being made, which is not what a corner
-     * put over itself a word at a time comes to. */
-    if (took + stride <= room && puts >= took + stride) {
-        memcpy(&window[puts], &window[took], (size_t)stride * sizeof *window);
-        return;
-    }
-    for (uint32_t word = 0; word < stride; word++) {
-        window[puts + word] = (took + word < room && puts + word < room) ? window[took + word] : 0u;
-    }
 }
 
 /* Where a title says what number in its list starts a run of shapes again,
@@ -859,116 +783,88 @@ static uint32_t breaks_a_run(const uint8_t *base, int wide) {
 }
 
 static void look_over_the_list(const uint8_t *base, uint32_t listed_at, int wide,
-                               uint32_t listed_count, uint32_t *comes_to, uint32_t *furthest) {
+                               uint32_t listed_count, uint32_t *lowest, uint32_t *furthest) {
     uint32_t breaks = breaks_a_run(base, wide);
+    uint32_t least = 0xffffffffu;
     uint32_t most = 0;
-    uint32_t held = 0;
-    uint32_t made = 0;
 
     for (uint32_t at = 0; at < listed_count; at++) {
         uint32_t which = a_corner_named(base, listed_at, wide, at);
         if (which == breaks) {
-            held = 0;
             continue;
+        }
+        if (which < least) {
+            least = which;
         }
         if (which > most) {
             most = which;
         }
-        if (held < 2u) {
-            held++;
-            continue;
-        }
-        made += 3u;
-        held++;
     }
 
-    if (comes_to != NULL) {
-        *comes_to = made;
-    }
-    if (furthest != NULL) {
-        *furthest = most;
-    }
+    *lowest = least <= most ? least : 0u;
+    *furthest = most;
 }
 
-static uint32_t order_the_corners(const uint8_t *base, uint32_t *window, uint32_t room,
-                                  uint32_t filled, const uint32_t *reads, uint32_t streams,
-                                  uint32_t corners, uint32_t listed_at, uint32_t listed_count,
-                                  int wide, int a_run, uint32_t adds) {
-    uint32_t done[XENOLITH_FETCH_SLOTS];
-    uint32_t doing = 0;
+/* Writes the number each vertex of a draw arrives at its shader with, where
+ * that is not simply one after another, and says how many there are.
+ *
+ * A title's own list goes over as it is, its numbers moved on by where the draw
+ * begins, and a word that starts a new run of shapes kept where a run is what
+ * is drawn. A quad is four numbers and goes over as the two triangles it comes
+ * to, by the same numbers, so a shader working out its corner from its number
+ * finds the corner it means. */
+static uint32_t number_the_corners(const uint8_t *base, uint32_t *window, uint32_t room,
+                                   uint32_t filled, uint32_t shape, uint32_t vertices,
+                                   uint32_t listed_at, uint32_t listed_count, int wide,
+                                   uint32_t first) {
+    static const uint32_t quad[6] = {0u, 1u, 2u, 0u, 2u, 3u};
     uint32_t breaks = breaks_a_run(base, wide);
+    int a_run = shape == XENOLITH_SHAPE_TRIANGLE_RUN || shape == XENOLITH_SHAPE_LINE_RUN
+                || shape == XENOLITH_SHAPE_TRIANGLE_FAN;
+    uint32_t put = 0;
 
-    for (uint32_t one = 0; one < streams; one++) {
-        uint32_t slot = reads[one * 4];
-        uint32_t stride = reads[one * 4 + 1];
-        if (slot >= XENOLITH_FETCH_SLOTS || stride == 0) {
-            continue;
+    if (listed_at == 0) {
+        if (shape != XENOLITH_SHAPE_QUADS) {
+            return 0;
         }
-
-        uint32_t already = 0;
-        for (uint32_t at = 0; at < doing; at++) {
-            already = already || done[at] == slot;
-        }
-        if (already) {
-            continue;
-        }
-        done[doing++] = slot;
-
-        uint32_t from = window[slot];
-        if (from == 0) {
-            continue;
-        }
-        uint32_t wants = corners;
-        uint32_t needs = wants * stride;
-        if (needs == 0 || needs > room - filled) {
-            continue;
-        }
-
-        uint32_t put_at = 0;
-        uint32_t held[3] = {0, 0, 0};
-        uint32_t holding = 0;
-        uint32_t turned_over = 0;
-
-        for (uint32_t corner = 0; corner < listed_count; corner++) {
-            uint32_t which = a_corner_named(base, listed_at, wide, corner);
-
-            if (put_at >= wants) {
-                break;
+        for (uint32_t one = 0; one + 4u <= vertices; one += 4u) {
+            if (filled + put + 6u > room) {
+                return 0;
             }
-            if (!a_run) {
-                one_corner_over(window, room, from, filled, stride, put_at++, which + adds);
-                continue;
+            for (uint32_t corner = 0; corner < 6u; corner++) {
+                window[filled + put++] = first + one + quad[corner];
             }
-
-            if (which == breaks) {
-                holding = 0;
-                turned_over = 0;
-                continue;
-            }
-            if (holding < 2u) {
-                held[holding++] = which;
-                continue;
-            }
-            held[2] = which;
-
-            /* Every other triangle in a run is wound the other way, and a
-             * runtime that puts them all out the same way has half of them
-             * facing backwards, which is half a surface missing wherever a
-             * title turns its backs away. */
-            uint32_t first = turned_over ? held[1] : held[0];
-            uint32_t second = turned_over ? held[0] : held[1];
-            one_corner_over(window, room, from, filled, stride, put_at++, first + adds);
-            one_corner_over(window, room, from, filled, stride, put_at++, second + adds);
-            one_corner_over(window, room, from, filled, stride, put_at++, held[2] + adds);
-
-            held[0] = held[1];
-            held[1] = held[2];
-            turned_over = !turned_over;
         }
-        window[slot] = filled;
-        filled += needs;
+        return put;
     }
-    return filled;
+
+    uint32_t held[4];
+    uint32_t holding = 0;
+    for (uint32_t at = 0; at < listed_count; at++) {
+        uint32_t which = a_corner_named(base, listed_at, wide, at);
+        if (filled + put + 6u > room) {
+            return 0;
+        }
+        if (which == breaks) {
+            holding = 0;
+            if (a_run) {
+                window[filled + put++] = 0xffffffffu;
+            }
+            continue;
+        }
+        if (shape != XENOLITH_SHAPE_QUADS) {
+            window[filled + put++] = which + first;
+            continue;
+        }
+        held[holding++] = which + first;
+        if (holding == 4u) {
+            for (uint32_t corner = 0; corner < 6u; corner++) {
+                window[filled + put++] = held[quad[corner]];
+            }
+            holding = 0;
+        }
+    }
+    return put;
 }
 
 static void say_what_a_picture_holds(uint32_t place, const uint8_t *base, uint32_t where,
@@ -1203,10 +1099,10 @@ static void say_what_is_being_drawn_from(const uint32_t *window, uint32_t filled
     fprintf(stderr, "xenolith: shape %u of %u corners, %u words of %u, %u nought, %u streams",
             shape, vertices, filled - XENOLITH_FETCH_SLOTS, room, nothing, streams);
     for (uint32_t one = 0; one < streams && reads != NULL; one++) {
-        uint32_t slot = reads[one * 4];
-        uint32_t stride = reads[one * 4 + 1];
-        uint32_t offset = reads[one * 4 + 2];
-        uint32_t wide = reads[one * 4 + 3];
+        uint32_t slot = reads[one * XENOLITH_WORDS_A_STREAM];
+        uint32_t stride = reads[one * XENOLITH_WORDS_A_STREAM + 1];
+        uint32_t offset = reads[one * XENOLITH_WORDS_A_STREAM + 2];
+        uint32_t wide = reads[one * XENOLITH_WORDS_A_STREAM + 3];
         fprintf(stderr, "\n  stream %u: slot %u at %u stride %u offset %u wide %u, corners:", one,
                 slot, slot < XENOLITH_FETCH_SLOTS ? window[slot] : 0u, stride, offset, wide);
         /* A batch carries many shapes and the first of them is the one least
@@ -1234,22 +1130,29 @@ static void say_what_is_being_drawn_from(const uint32_t *window, uint32_t filled
     fprintf(stderr, "\n");
 }
 
+/* How many words of a fetch a shader reads for so many vertices one after
+ * another, whether it reads that fetch at all, how far apart two of its
+ * vertices are, and whether any stream of it is fetched by a number the shader
+ * worked out rather than the vertex's own. */
 static uint32_t what_a_shader_reads_of(const uint32_t *reads, uint32_t streams, uint32_t slot,
-                                       uint32_t vertices, int *reads_it, uint32_t *apart) {
+                                       uint32_t vertices, int *reads_it, uint32_t *apart,
+                                       int *looked_up) {
     uint32_t most = 0;
 
     *reads_it = 0;
     *apart = 0;
+    *looked_up = 0;
     for (uint32_t one = 0; one < streams; one++) {
-        if (reads[one * 4] != slot) {
+        const uint32_t *stream = reads + one * XENOLITH_WORDS_A_STREAM;
+        if (stream[0] != slot) {
             continue;
         }
         *reads_it = 1;
-        if (reads[one * 4 + 1] > *apart) {
-            *apart = reads[one * 4 + 1];
+        *looked_up = *looked_up || stream[4] != 0;
+        if (stream[1] > *apart) {
+            *apart = stream[1];
         }
-        uint32_t wanted =
-            vertices * reads[one * 4 + 1] + reads[one * 4 + 2] + reads[one * 4 + 3] + 1u;
+        uint32_t wanted = vertices * stream[1] + stream[2] + stream[3] + 1u;
         if (wanted > most) {
             most = wanted;
         }
@@ -1257,31 +1160,35 @@ static uint32_t what_a_shader_reads_of(const uint32_t *reads, uint32_t streams, 
     return most;
 }
 
-static void hand_over_the_vertices(const uint8_t *base, uint32_t vertices, const uint32_t *reads,
-                                   uint32_t streams, uint32_t shape, uint32_t laid_out_as,
-                                   const uint32_t *declared, uint32_t declared_streams, uint32_t by,
-                                   uint32_t listed_at, uint32_t listed_count, int listed_wide,
-                                   int a_run, uint32_t furthest) {
+static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, uint32_t shape,
+                                       const uint32_t *declared, uint32_t declared_streams,
+                                       uint32_t by, uint32_t listed_at, uint32_t listed_count,
+                                       int listed_wide, uint32_t lowest, uint32_t furthest) {
     uint32_t room = 0;
     uint32_t *window = xenolith_room_for_vertices(&room);
     if (window == NULL || room <= XENOLITH_FETCH_SLOTS) {
-        return;
+        return 0;
     }
 
-    /* Which vertex of the fetch this draw's first one is.
+    /* Which number this draw's first vertex arrives at its shader with.
      *
      * A title that draws its interface out of one buffer a frame writes every
      * shape into it one after another and then draws each in turn, saying here
      * where the one it means begins. The fetch itself does not move, so a
      * runtime that reads this as nothing gives every draw the first shape's
      * corners: every quad comes out with the first quad's picture across the
-     * whole of it, however right everything else is. */
+     * whole of it, however right everything else is. Where the corners are
+     * named, it is added to each number named. */
     uint32_t first_vertex = register_says(base, XENOLITH_FIRST_VERTEX);
+    uint32_t least = (listed_at != 0 ? lowest : 0u) + first_vertex;
+    uint32_t most = (listed_at != 0 ? furthest : (vertices != 0 ? vertices - 1u : 0u))
+                    + first_vertex;
 
-
+    uint32_t began[XENOLITH_FETCH_SLOTS];
     uint32_t filled = XENOLITH_FETCH_SLOTS;
     for (uint32_t slot = 0; slot < XENOLITH_FETCH_SLOTS; slot++) {
         window[slot] = 0;
+        began[slot] = 0;
 
         uint32_t low = xenolith_load32(
             base, XENOLITH_REGISTERS + (XENOLITH_FETCH_REGISTER + slot * 2u) * 4u);
@@ -1303,38 +1210,37 @@ static void hand_over_the_vertices(const uint8_t *base, uint32_t vertices, const
         }
 
         /* As much of this fetch as the shader reads, where the shader says, and
-         * otherwise the widest a vertex could be. The second is what a fetch's
-         * stride is counted in and how far apart two of them can sit. */
+         * otherwise the widest a vertex could be.
+         *
+         * A shader reads a vertex at its number times how far apart two sit, so
+         * only the vertices from the least number drawn to the most are needed,
+         * and the window says the fetch starts as far before them as they are
+         * into it. One fetched by a number the shader worked out can reach
+         * anywhere in it, so the whole of it goes. */
         uint32_t reach = vertices * 255u + 256u;
-        uint32_t apart = 0;
+        uint32_t skipped = 0;
         if (declared != NULL && declared_streams != 0) {
             int reads_it = 0;
-            uint32_t wanted = what_a_shader_reads_of(declared, declared_streams, slot, vertices,
-                                                     &reads_it, &apart);
+            int looked_up = 0;
+            uint32_t apart = 0;
+            uint32_t wanted = what_a_shader_reads_of(declared, declared_streams, slot,
+                                                     most - least + 1u, &reads_it, &apart,
+                                                     &looked_up);
             if (!reads_it) {
                 continue;
             }
-            reach = wanted;
-            if (listed_at != 0 && apart != 0) {
-                uint32_t past = (furthest + first_vertex + 1u) * apart;
-                if (past > reach) {
-                    reach = past;
-                }
+            if (looked_up) {
+                reach = words;
+            } else {
+                reach = wanted;
+                skipped = least * apart;
             }
         }
-
-        /* Past the shapes drawn before this one. How far that is in words is
-         * how far apart two vertices are, which the shader says and the fetch
-         * does not, so a fetch no shader reads is left where it is. */
-        /* Where the corners are named, the numbers are counted from the start
-         * of the fetch, so nothing is skipped here and where a draw begins is
-         * added to each number instead. */
-        uint32_t past = listed_at != 0 ? 0u : first_vertex * apart;
-        if (past >= words) {
+        if (skipped >= words) {
             continue;
         }
-        where += past * 4u;
-        words -= past;
+        where += skipped * 4u;
+        words -= skipped;
 
         if (words > reach) {
             words = reach;
@@ -1346,7 +1252,8 @@ static void hand_over_the_vertices(const uint8_t *base, uint32_t vertices, const
             continue;
         }
 
-        window[slot] = filled;
+        window[slot] = filled - skipped;
+        began[slot] = filled;
         for (uint32_t step = 0; step < words; step++) {
             window[filled + step] = xenolith_load32(base, where + step * 4u);
         }
@@ -1356,24 +1263,28 @@ static void hand_over_the_vertices(const uint8_t *base, uint32_t vertices, const
         filled += words;
     }
 
-    if (reads != NULL && shape == XENOLITH_SHAPE_RECTANGLES) {
-        uint32_t reached = complete_the_rectangle(window, room, reads, streams);
+    if (declared != NULL && shape == XENOLITH_SHAPE_RECTANGLES) {
+        uint32_t reached = complete_the_rectangle(window, room, began, declared, declared_streams);
         if (reached > filled) {
             filled = reached;
         }
     }
-    if (declared != NULL && declared_streams != 0 && listed_at != 0) {
-        filled = order_the_corners(base, window, room, filled, declared, declared_streams, vertices,
-                                   listed_at, listed_count, listed_wide, a_run, first_vertex);
-    }
-    if (reads != NULL && shape == XENOLITH_SHAPE_QUADS
-        && laid_out_as == XENOLITH_SHAPE_TRIANGLES) {
-        filled = expand_the_quads(window, room, filled, reads, streams, vertices / 6u);
-    }
 
+    uint32_t numbered = number_the_corners(base, window, room, filled, shape, vertices, listed_at,
+                                           listed_count, listed_wide, first_vertex);
     say_what_is_being_drawn_from(window, filled, room, vertices, shape, declared, declared_streams,
                                  by);
+    if (numbered != 0) {
+        xenolith_number_the_vertices(filled, numbered, 0u);
+        xenolith_done_with_vertices(filled + numbered);
+        return numbered;
+    }
     xenolith_done_with_vertices(filled);
+    if (listed_at != 0 || shape == XENOLITH_SHAPE_QUADS) {
+        return 0;
+    }
+    xenolith_number_the_vertices(0u, 0u, first_vertex);
+    return vertices;
 }
 
 static int say_it_now(const uint8_t *base, uint32_t which_kind, uint32_t where,
@@ -1727,7 +1638,7 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
              * every triangle of a run into a spike across the scene. */
             uint32_t listed_at = 0;
             uint32_t listed_count = 0;
-            uint32_t comes_to = 0;
+            uint32_t lowest = 0;
             uint32_t furthest = 0;
             int listed_wide = 0;
             if (opcode == XENOLITH_PACKET_DRAW_INDEXED && ((how >> 6) & 3u) == 0u
@@ -1736,7 +1647,7 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
                 listed_at = xenolith_load32(base, stream + (at + 3) * 4)
                             & (listed_wide ? ~3u : ~1u);
                 listed_count = how >> 16;
-                look_over_the_list(base, listed_at, listed_wide, listed_count, &comes_to,
+                look_over_the_list(base, listed_at, listed_wide, listed_count, &lowest,
                                    &furthest);
             }
             uint32_t vertices = how >> 16;
@@ -1748,48 +1659,21 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
              * having worked out the fourth. A host draws it as the two
              * triangles that shape comes to, so twice as many vertices are
              * drawn and the shader is asked where it reads them from. */
-            const uint32_t *reads = NULL;
-            uint32_t streams = 0;
             uint32_t laid_out_as = shape;
-            if (shape == XENOLITH_SHAPE_RECTANGLES) {
-                reads = in_hand[0].reads;
-                streams = in_hand[0].streams;
-                if (reads != NULL) {
-                    vertices *= 2u;
-                }
+            if (shape == XENOLITH_SHAPE_RECTANGLES && in_hand[0].reads != NULL) {
+                vertices *= 2u;
             }
 
             /* A run of quads is one shape for every four corners, and the
              * nearest a host has is a fan, which is one shape however many
-             * corners it is given. So each quad's two triangles are written
-             * out and what is drawn is triangles.
+             * corners it is given. So each quad goes over as its two
+             * triangles, numbered by the corners the title gave.
              *
              * Corners left over past the last whole four are dropped, which
              * is what the hardware does with them: a quad needs four and
-             * there are not four left. Asking for a count that divides by
-             * four instead, and leaving the rest alone where it does not,
-             * left nearly every quad a scene draws going out as a fan over
-             * its raw corners, which is a different shape entirely. This
-             * title asks for six corners far more often than any other
-             * number, so that was almost all of them. */
-            /* A run of triangles whose corners are named is written out as
-             * separate triangles, so that is what is drawn. How many there
-             * are is worked out where they are written. */
-            if (shape == XENOLITH_SHAPE_TRIANGLE_RUN && listed_at != 0
-                && in_hand[0].reads != NULL) {
-                if (comes_to != 0) {
-                    vertices = comes_to;
-                    laid_out_as = XENOLITH_SHAPE_TRIANGLES;
-                }
-            }
-
+             * there are not four left. */
             if (shape == XENOLITH_SHAPE_QUADS) {
-                reads = in_hand[0].reads;
-                streams = in_hand[0].streams;
-                if (reads != NULL && vertices >= 4u) {
-                    vertices = vertices / 4u * 6u;
-                    laid_out_as = XENOLITH_SHAPE_TRIANGLES;
-                }
+                laid_out_as = XENOLITH_SHAPE_TRIANGLES;
             }
 
             /* Before the frame rather than inside it. Setting a picture up
@@ -1835,10 +1719,12 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
                 base + XENOLITH_REGISTERS + XENOLITH_CONSTANT_REGISTER * 4,
                 base + XENOLITH_REGISTERS + XENOLITH_TRUTH_REGISTER * 4,
                 base + XENOLITH_REGISTERS + XENOLITH_COUNT_REGISTER * 4);
-            hand_over_the_vertices(base, vertices, reads, streams, shape, laid_out_as,
-                                   in_hand[0].reads, in_hand[0].streams, in_hand[0].sum,
-                                   listed_at, listed_count, listed_wide,
-                                   shape == XENOLITH_SHAPE_TRIANGLE_RUN, furthest);
+            vertices = hand_over_the_vertices(base, vertices, shape, in_hand[0].reads,
+                                              in_hand[0].streams, in_hand[0].sum, listed_at,
+                                              listed_count, listed_wide, lowest, furthest);
+            if (vertices == 0) {
+                return;
+            }
 
             if (only_this_shader_draws(in_hand[0].sum)) {
                 return;

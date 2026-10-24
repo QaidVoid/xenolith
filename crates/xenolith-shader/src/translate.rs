@@ -39,6 +39,15 @@ pub struct Stream {
     pub offset: u32,
     /// How many words it reads.
     pub words: u32,
+    /// Whether the number it fetches by is one the shader worked out rather
+    /// than the vertex's own.
+    ///
+    /// A title keeps a table this way, read at a number the shader made out of
+    /// what else it fetched or out of the vertex's own number: a matrix for
+    /// each part of a scene, or the corners and centre of each particle. Such
+    /// a stream is not one vertex after another, so a host laying vertices out
+    /// for itself has to leave it whole and in its own order.
+    pub looked_up: bool,
 }
 
 /// Why a shader was not translated.

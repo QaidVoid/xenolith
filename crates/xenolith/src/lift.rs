@@ -908,8 +908,12 @@ fn write_one_shader(file: &mut String, which: usize, translated: &xenolith_shade
         for stream in &translated.streams {
             let _ = writeln!(
                 file,
-                "    {}u, {}u, {}u, {}u,",
-                stream.slot, stream.stride, stream.offset, stream.words
+                "    {}u, {}u, {}u, {}u, {}u,",
+                stream.slot,
+                stream.stride,
+                stream.offset,
+                stream.words,
+                u32::from(stream.looked_up)
             );
         }
         file.push_str("};\n\n");

@@ -21,8 +21,9 @@ use crate::{Kind, Translated, translate};
 pub const COUNTS: usize = 3;
 
 /// How many words each stream takes: which fetch constant says where it is, how
-/// far apart two vertices sit, how far into one this reads, and how much of it.
-pub const WORDS_A_STREAM: usize = 4;
+/// far apart two vertices sit, how far into one this reads, how much of it, and
+/// whether it is fetched by a number the shader worked out.
+pub const WORDS_A_STREAM: usize = 5;
 
 /// Says a shader in a host's terms, for a program with one to say while it is
 /// running.
@@ -104,6 +105,7 @@ fn laid_out(said: &Translated) -> Vec<u32> {
         all.push(stream.stride);
         all.push(stream.offset);
         all.push(stream.words);
+        all.push(u32::from(stream.looked_up));
     }
     all.extend_from_slice(&said.pictures);
     all
