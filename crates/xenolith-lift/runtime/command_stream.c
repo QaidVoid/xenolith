@@ -104,6 +104,7 @@ static int it_holds(uint32_t how, uint32_t value, uint32_t against, uint32_t mas
 static uint64_t parts_marked = ~0ull;
 static uint64_t part_drawn = ~0ull;
 #define XENOLITH_PACKET_REPORT 0x58u
+#define XENOLITH_PACKET_WHERE_IT_REACHED 0x5au
 #define XENOLITH_PACKET_DRAW 0x36u
 #define XENOLITH_PACKET_DRAW_INDEXED 0x22u
 #define XENOLITH_PACKET_COMPARE 0x45u
@@ -561,6 +562,31 @@ static uint32_t walk_the_commands(uint8_t *base, uint32_t stream, uint32_t words
                 uint32_t what = xenolith_load32(base, stream + (at + 3) * 4);
                 uint32_t read_back = as_the_processor_reads(what, where);
                 xenolith_store32(base, where & ~3u, read_back);
+                break;
+            }
+
+            /* Where on the screen what was drawn reached: the least and most
+             * across and down, in squares of eight, and the nearest and
+             * furthest. Six halves, written two to a word in the byte order
+             * the low two bits of the address name, as a report is.
+             *
+             * A title drawing a part of the screen at a time works out from
+             * these which parts each of its draws touches, and marks the draw
+             * for only those. Never written, what it read was whatever the
+             * memory held, and in one title most of the scene was marked for
+             * the left half only and the right half came out nearly empty.
+             * The whole screen is said for every draw, so that every draw is
+             * marked for every part: drawing one where it lands outside a part
+             * leaves nothing behind there, and leaving one out where it lands
+             * inside leaves a hole. */
+            if (opcode == XENOLITH_PACKET_WHERE_IT_REACHED && follows >= 2) {
+                static const uint32_t reached[3] = {(2560u / 8u) << 16, (2560u / 8u) << 16,
+                                                    1u << 16};
+                uint32_t where = xenolith_load32(base, stream + (at + 2) * 4);
+                for (uint32_t one = 0; one < 3u; one++) {
+                    xenolith_store32(base, (where & ~3u) + one * 4u,
+                                     as_the_processor_reads(reached[one], where));
+                }
                 break;
             }
 

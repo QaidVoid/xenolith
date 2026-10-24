@@ -3116,6 +3116,78 @@ int main(void) {
     }
 }
 
+/// Asked where its draws reached on the screen, the hardware says the whole of
+/// it.
+///
+/// A title drawing the screen a part at a time marks each draw for the parts it
+/// reached, worked out from what this writes. Never written, the title read
+/// whatever was there, marked most of a scene for the left half only, and the
+/// right half came out nearly empty. Saying the whole screen marks every draw
+/// for every part.
+#[test]
+fn where_draws_reached_is_the_whole_screen() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Asked with each half swapped, which is how the title asks. */
+    uint32_t ring = 0x01000000u;
+    uint32_t reached = 0x04000000u;
+    uint32_t words[] = {
+        (3u << 30) | (1u << 16) | (0x5au << 8), 0x1eu, reached | 1u,
+        0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u,
+    };
+    for (uint32_t at = 0; at < sizeof words / sizeof *words; at++) {
+        xenolith_store32(base, ring + at * 4u, words[at]);
+    }
+    for (uint32_t at = 0; at < 6u; at++) {
+        xenolith_store16(base, reached + at * 2u, 0xdeadu);
+    }
+    xenolith_context ctx = {0};
+    ctx.r[3] = ring;
+    ctx.r[4] = 16;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 451, "VdInitializeRingBuffer");
+    ctx.r[3] = 0x02000000u;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 438, "VdEnableRingBufferRPtrWriteBack");
+    xenolith_store32(base, 0x7fc80714u, 8u);
+    for (int waited = 0; waited < 2000 && xenolith_load32(base, 0x02000000u) != 8u; waited++) {
+        struct timespec once = {0, 1000000};
+        nanosleep(&once, NULL);
+    }
+    static const uint16_t wanted[6] = {0, 320, 0, 320, 0, 1};
+    for (uint32_t at = 0; at < 6u; at++) {
+        uint16_t got = xenolith_load16(base, reached + at * 2u);
+        if (got != wanted[at]) {
+            fprintf(stderr, "half %u of where draws reached is %#x, not %#x\n", at, got,
+                    wanted[at]);
+            return 3;
+        }
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("where_draws_reached", program) {
+        panic!("where draws reached was not the whole screen:\n{complaint}");
+    }
+}
+
 /// A shader kept in memory is taken in hand like one carried in a packet.
 ///
 /// One title hands over nearly all of its shaders by naming where they are
