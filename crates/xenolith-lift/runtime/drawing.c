@@ -1700,6 +1700,13 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
             if (looks != NULL) {
                 hand_over_the_pictures(base, looks, pictures);
             }
+            /* And the ones the vertex shader reads. A title reads how bright
+             * the last frame came out there, once for every corner rather than
+             * for every pixel, and hands what it makes of that on to the pixel
+             * shader; reading nothing there makes every frame black. */
+            if (in_hand[0].looks != NULL) {
+                hand_over_the_pictures(base, in_hand[0].looks, in_hand[0].pictures);
+            }
 
             start_the_frame_in_its_place(base);
 

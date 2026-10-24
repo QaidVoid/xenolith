@@ -1672,7 +1672,7 @@ static int make_what_a_frame_goes_through(void) {
     all_three[2].binding = 2;
     all_three[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     all_three[2].descriptorCount = XENOLITH_PICTURES;
-    all_three[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    all_three[2].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkDescriptorSetLayoutCreateInfo shaped = {0};
     shaped.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
