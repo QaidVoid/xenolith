@@ -6143,6 +6143,50 @@ fn a_colour_exported_before_a_predicate_that_does_not_hold_stands() {
     );
 }
 
+/// A constant an instruction says to read as how far it is from nought is read
+/// that way.
+///
+/// One title's shader rearranges the pixels of a scene with a sum that comes out
+/// right only where a difference is read without its sign. The shader below puts
+/// out the larger of a constant and itself, read without sign, and the constant
+/// is red turned negative, so what is drawn has to be red. Needs a device to
+/// draw on, and returns where there is none.
+#[test]
+fn a_constant_read_without_its_sign_is_positive() {
+    let run = (2u64 << 44) | (1u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    let max_of = |source: u32| (2u32 << 24) | (source << 16) | (source << 8) | source;
+    let keeps = 50u32 << 26;
+    let exports_every_lane = (1u32 << 15) | (0xf << 16);
+    let constants_without_sign = 1u32 << 7;
+    words.extend([
+        exports_every_lane | keeps | constants_without_sign,
+        0,
+        max_of(0),
+    ]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    let program = a_triangle_drawn_by("{-1.0f, 0.0f, 0.0f, -1.0f}, {0.0f}, {0.0f}", "");
+    let ran = draw_with("a_constant_without_sign", &pixel.words, &program).expect("the draw ran");
+    if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+        return;
+    }
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("a_constant_without_sign");
+    let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+    let pixel = a_pixel_of(&picture, 640, 360).expect("the frame is too short");
+    assert_eq!(
+        pixel,
+        [255, 0, 0],
+        "the middle of the frame is not the constant read without its sign"
+    );
+}
+
 /// A pixel shader that asks for where its pixel is finds it in the register
 /// it asked for, counted in pixels from the top left.
 ///

@@ -280,6 +280,7 @@ pub(crate) fn arithmetic(
     let third_is_register = alu.sources_are_registers()[2];
     let third_along = alu.source_lanes()[2];
     let third_negated = alu.sources_are_negated()[2];
+    let third_absolute = alu.sources_are_absolute()[2];
 
     if matches!(alu.vector_operation(), VectorOperation::KillOnEqual) {
         throw_the_pixel_away(module, named, left, right)?;
@@ -301,6 +302,7 @@ pub(crate) fn arithmetic(
                 third,
                 third_is_register,
                 third_along,
+                third_absolute,
                 third_negated,
             );
             module.add(
@@ -328,6 +330,7 @@ pub(crate) fn arithmetic(
                 third,
                 third_is_register,
                 third_along,
+                third_absolute,
                 third_negated,
             );
             let asked = module.name();
@@ -406,6 +409,7 @@ pub(crate) fn arithmetic(
                 third,
                 third_is_register,
                 third_along,
+                third_absolute,
                 third_negated,
             );
             dot_two_add(module, named, produced, left, right, last);

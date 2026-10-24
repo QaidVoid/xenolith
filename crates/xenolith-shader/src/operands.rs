@@ -45,8 +45,8 @@ pub(crate) fn read_a_constant(module: &mut Module, named: &Named, which: u32) ->
     value.number()
 }
 
-/// Moves the lanes of what was read about and turns its sign, as the
-/// instruction that reads it says to.
+/// Moves the lanes of what was read about, takes how far it is from nought, and
+/// turns its sign, in that order, as the instruction that reads it says to.
 ///
 /// The two bits for a lane say how far along to reach rather than which lane to
 /// take, so nought is a source read as it stands and nothing is done. Over half
@@ -57,6 +57,7 @@ pub(crate) fn moved_about(
     named: &Named,
     value: u32,
     along: u8,
+    absolute: bool,
     negated: bool,
 ) -> u32 {
     let mut value = value;
@@ -70,6 +71,21 @@ pub(crate) fn moved_about(
         }
         module.add(opcodes::VECTOR_SHUFFLE, &operands);
         value = moved.number();
+    }
+
+    if absolute {
+        let unsigned = module.name();
+        module.add(
+            opcodes::EXT_INST,
+            &[
+                named.four.number(),
+                unsigned.number(),
+                named.extended.number(),
+                opcodes::GLSL_ABSOLUTE,
+                value,
+            ],
+        );
+        value = unsigned.number();
     }
 
     if negated {
@@ -91,10 +107,11 @@ pub(crate) fn read(
     which: u8,
     from_register: bool,
     along: u8,
+    absolute: bool,
     negated: bool,
 ) -> u32 {
     let read = read_whole(module, named, which, from_register);
-    moved_about(module, named, read, along, negated)
+    moved_about(module, named, read, along, absolute, negated)
 }
 
 /// Reads one register whole, before its lanes are moved about.

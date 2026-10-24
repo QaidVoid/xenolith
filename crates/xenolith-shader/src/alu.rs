@@ -415,6 +415,37 @@ impl Alu {
         ]
     }
 
+    /// Whether each source is read as how far it is from nought, before any
+    /// turning of its sign.
+    ///
+    /// A register says so in the highest bit of its number, and the constants
+    /// all say so together in one bit of the first word. One title's shader
+    /// rearranges the pixels of a scene with a sum that comes out right only
+    /// where a difference is read this way, and read with its sign the scene
+    /// went to the screen a column in four out of place.
+    #[must_use]
+    pub fn sources_are_absolute(self) -> [bool; 3] {
+        let constants = self.constants_are_absolute();
+        let mut absolute = [constants; 3];
+        for ((one, register), source) in absolute
+            .iter_mut()
+            .zip(self.sources_are_registers())
+            .zip(self.sources())
+        {
+            if register {
+                *one = source & 0x80 != 0;
+            }
+        }
+        absolute
+    }
+
+    /// Whether every constant the instruction reads is read as how far it is
+    /// from nought.
+    #[must_use]
+    pub fn constants_are_absolute(self) -> bool {
+        (self.first >> 7) & 1 == 1
+    }
+
     /// Whether each source is read with its sign turned about.
     #[must_use]
     pub fn sources_are_negated(self) -> [bool; 3] {
@@ -429,6 +460,24 @@ impl Alu {
 #[cfg(test)]
 mod tests {
     use super::{Alu, ScalarOperation, VectorOperation};
+
+    #[test]
+    fn a_register_says_it_is_read_without_sign_in_its_highest_bit() {
+        let registers = (1u32 << 31) | (1 << 30);
+        let alu = Alu::at(&[0, 0, registers | (0x81 << 16) | (0x01 << 8) | 0x05], 0);
+        assert_eq!(
+            alu.map(Alu::sources_are_absolute),
+            Some([true, false, false])
+        );
+        let alu = Alu::at(
+            &[1 << 7, 0, registers | (0x81 << 16) | (0x01 << 8) | 0x05],
+            0,
+        );
+        assert_eq!(
+            alu.map(Alu::sources_are_absolute),
+            Some([true, false, true])
+        );
+    }
 
     #[test]
     fn fewer_than_three_words_read_nothing() {

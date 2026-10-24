@@ -79,6 +79,7 @@ pub(crate) fn single_lane(
         alu.sources()[2],
         alu.sources_are_registers()[2],
         alu.source_lanes()[2],
+        alu.sources_are_absolute()[2],
         alu.sources_are_negated()[2],
     );
 
@@ -290,6 +291,7 @@ pub(crate) fn with_a_constant(
         alu.sources()[2],
         false,
         alu.source_lanes()[2],
+        alu.constants_are_absolute(),
         alu.sources_are_negated()[2],
     );
     let kept = read(
@@ -298,6 +300,7 @@ pub(crate) fn with_a_constant(
         alu.single_lane_register(),
         true,
         alu.source_lanes()[2],
+        alu.constants_are_absolute(),
         alu.sources_are_negated()[2],
     );
 

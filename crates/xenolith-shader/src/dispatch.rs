@@ -57,12 +57,14 @@ fn one_instruction(
     let [first_is_register, second_is_register, _] = alu.sources_are_registers();
     let [first_along, second_along, _] = alu.source_lanes();
     let [first_negated, second_negated, _] = alu.sources_are_negated();
+    let [first_absolute, second_absolute, _] = alu.sources_are_absolute();
     let left = read(
         module,
         named,
         first,
         first_is_register,
         first_along,
+        first_absolute,
         first_negated,
     );
     let right = read(
@@ -71,6 +73,7 @@ fn one_instruction(
         second,
         second_is_register,
         second_along,
+        second_absolute,
         second_negated,
     );
 
