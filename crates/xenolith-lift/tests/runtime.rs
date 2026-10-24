@@ -1593,15 +1593,14 @@ int main(void) {
     }
 }
 
-/// A critical section table with no room left reports failure rather than
-/// carrying on.
+/// A title can make as many critical sections as it likes, each at an address
+/// of its own, and every one of them is a lock.
 ///
-/// Carrying on is what lets two threads into the same critical section: each is
-/// told it holds a lock that was never taken, and what the section was
-/// protecting is written by both at once. The table holds a fixed number of
-/// sections, so filling it is a thing a title can do.
+/// A title makes a lock for every object it makes and never says when one is
+/// gone, and a mission had made more than a thousand within minutes. A table of
+/// them that filled left every one asked for after that held by nobody.
 #[test]
-fn a_full_critical_section_table_reports_failure() {
+fn a_title_can_make_as_many_critical_sections_as_it_likes() {
     let program = r#"
 /* Asked for before anything is included, because a strict C compiler hides the
  * declarations this needs otherwise. */
@@ -1613,13 +1612,6 @@ fn a_full_critical_section_table_reports_failure() {
 xenolith_function xenolith_lookup(uint32_t address) {
     (void)address;
     return 0;
-}
-
-/* Takes the lock at `at`, reporting what came back. */
-static uint32_t take(xenolith_context *ctx, uint8_t *base, uint32_t at) {
-    ctx->r[3] = at;
-    xenolith_import(ctx, base, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
-    return (uint32_t)ctx->r[3];
 }
 
 int main(void) {
@@ -1636,32 +1628,217 @@ int main(void) {
     }
 
     xenolith_context ctx = {0};
-
-    /* More sections than the table holds, each a different address, none of
-     * them released. */
-    uint32_t filled = 0;
-    for (uint32_t at = 0x1000; at < 0x1000 + 4u * 2000u; at += 4) {
-        uint32_t status = take(&ctx, base, at);
-        if (status == 0u) {
-            filled++;
-            continue;
-        }
-        /* The first refusal is what this is looking for: no memory left, and
-         * not a lock that was never taken. */
-        if (status != 0xC0000017u) {
-            fprintf(stderr, "a full table reported %#x\n", (unsigned)status);
+    for (uint32_t at = 0x10000; at < 0x10000 + 32u * 5000u; at += 32) {
+        ctx.r[3] = at;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 303, "RtlInitializeCriticalSection");
+        ctx.r[3] = at;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
+        if (ctx.r[3] != 0) {
+            fprintf(stderr, "entering the section at %#x reported %#x\n", (unsigned)at,
+                    (unsigned)ctx.r[3]);
             return 3;
         }
-        printf("filled %u\n", (unsigned)filled);
-        return filled == 0 ? 4 : 0;
     }
-
-    fprintf(stderr, "the table never filled: %u sections were named\n", (unsigned)filled);
-    return 5;
+    for (uint32_t at = 0x10000; at < 0x10000 + 32u * 5000u; at += 32) {
+        ctx.r[3] = at;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 304, "RtlLeaveCriticalSection");
+        ctx.r[3] = at;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 321, "RtlTryEnterCriticalSection");
+        if (ctx.r[3] != 1) {
+            fprintf(stderr, "the section at %#x was still held\n", (unsigned)at);
+            return 4;
+        }
+    }
+    return 0;
 }
 "#;
-    if let Err(complaint) = runs("full_sections", program) {
-        panic!("a full critical section table did not report failure:\n{complaint}");
+    if let Err(complaint) = runs("many_sections", program) {
+        panic!("a title could not make as many critical sections as it liked:\n{complaint}");
+    }
+}
+
+/// A critical section a title made ready itself, rather than asking for one,
+/// can be entered, as can the one the kernel exports, and each says who wants
+/// it the way the console says so.
+///
+/// A title lays some of its sections out in its own data, nobody in them, which
+/// the console says by how many threads want one being one less than none, and
+/// enters one the kernel keeps. Taken for held, the first thread to enter one
+/// waits for ever.
+#[test]
+fn a_critical_section_a_title_made_ready_itself_can_be_entered() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * declarations this needs otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+#define SECTION 0x10000u
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) {
+        return 2;
+    }
+    alarm(10);
+
+    xenolith_store32(base, SECTION + 16u, 0xffffffffu);
+    xenolith_context ctx = {0};
+    ctx.r[3] = SECTION;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
+    if (xenolith_load32(base, SECTION + 16u) != 0u) {
+        fprintf(stderr, "one thread in says %#x want it\n",
+                (unsigned)xenolith_load32(base, SECTION + 16u));
+        return 3;
+    }
+    ctx.r[3] = SECTION;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 304, "RtlLeaveCriticalSection");
+    if (xenolith_load32(base, SECTION + 16u) != 0xffffffffu) {
+        fprintf(stderr, "nobody in says %#x want it\n",
+                (unsigned)xenolith_load32(base, SECTION + 16u));
+        return 4;
+    }
+
+    xenolith_import_variable(base, 0x200u, "xboxkrnl.exe", 449);
+    ctx.r[3] = xenolith_load32(base, 0x200u);
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
+    ctx.r[3] = xenolith_load32(base, 0x200u);
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 304, "RtlLeaveCriticalSection");
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("a_section_made_ready", program) {
+        panic!("a section a title made ready itself could not be entered:\n{complaint}");
+    }
+}
+
+/// A critical section lets one thread in at a time, lets the thread holding it
+/// in again, and is held until it has been left as often as it was entered.
+#[test]
+fn a_critical_section_lets_one_thread_in_at_a_time() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * threading interface otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+#define SECTION 0x10000u
+#define COUNT 0x10100u
+#define ROUNDS 200000u
+
+static uint8_t *memory;
+
+static void call(xenolith_context *ctx, uint32_t ordinal, const char *name) {
+    ctx->r[3] = SECTION;
+    xenolith_import(ctx, memory, "xboxkrnl.exe", ordinal, name);
+}
+
+/* Adds one to the count a round at a time, a read and a write apart, so that
+ * two threads in at once lose some of what the other added. */
+static void *count(void *given) {
+    (void)given;
+    xenolith_context ctx = {0};
+    for (uint32_t round = 0; round < ROUNDS; round++) {
+        call(&ctx, 293, "RtlEnterCriticalSection");
+        uint32_t was = xenolith_load32(memory, COUNT);
+        xenolith_store32(memory, COUNT, was + 1u);
+        call(&ctx, 304, "RtlLeaveCriticalSection");
+    }
+    return NULL;
+}
+
+static void *try_once(void *given) {
+    xenolith_context ctx = {0};
+    call(&ctx, 321, "RtlTryEnterCriticalSection");
+    *(uint64_t *)given = ctx.r[3];
+    if (ctx.r[3] == 1) {
+        call(&ctx, 304, "RtlLeaveCriticalSection");
+    }
+    return NULL;
+}
+
+static uint64_t another_thread_gets_in(void) {
+    uint64_t got = 2;
+    pthread_t other;
+    if (pthread_create(&other, NULL, try_once, &got) != 0) {
+        return 2;
+    }
+    pthread_join(other, NULL);
+    return got;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    memory = xenolith_boot(path, 0);
+    if (memory == NULL) {
+        return 2;
+    }
+
+    xenolith_context ctx = {0};
+    call(&ctx, 303, "RtlInitializeCriticalSection");
+    xenolith_store32(memory, COUNT, 0);
+
+    pthread_t threads[4];
+    for (int at = 0; at < 4; at++) {
+        if (pthread_create(&threads[at], NULL, count, NULL) != 0) {
+            return 3;
+        }
+    }
+    for (int at = 0; at < 4; at++) {
+        pthread_join(threads[at], NULL);
+    }
+    if (xenolith_load32(memory, COUNT) != 4u * ROUNDS) {
+        fprintf(stderr, "four threads counted to %u rather than %u\n",
+                (unsigned)xenolith_load32(memory, COUNT), (unsigned)(4u * ROUNDS));
+        return 4;
+    }
+
+    call(&ctx, 293, "RtlEnterCriticalSection");
+    call(&ctx, 293, "RtlEnterCriticalSection");
+    call(&ctx, 304, "RtlLeaveCriticalSection");
+    if (another_thread_gets_in() != 0) {
+        fprintf(stderr, "another thread got in while the section was entered twice and left once\n");
+        return 5;
+    }
+    call(&ctx, 304, "RtlLeaveCriticalSection");
+    if (another_thread_gets_in() != 1) {
+        fprintf(stderr, "another thread was kept out of a section left as often as entered\n");
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("one_thread_in_a_section", program) {
+        panic!("a critical section did not keep threads apart:\n{complaint}");
     }
 }
 

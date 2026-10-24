@@ -15,8 +15,10 @@
  */
 
 /* Asked for before anything is included, because a strict C compiler hides the
- * threading interface otherwise and this needs the whole of it. */
+ * threading interface otherwise and this needs the whole of it, and the call
+ * into the host kernel that waiting on a lock word goes through. */
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 
 #include "xenolith.h"
 
@@ -31,9 +33,11 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/futex.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <sched.h>
 #include <time.h>
@@ -690,19 +694,19 @@ static void check_executable_privilege(xenolith_context *ctx) {
     ctx->r[3] = which < 32u ? (declared_privileges >> which) & 1u : 0u;
 }
 
-/* A lock, on a runtime that has one thread.
- *
- * Nothing can be contended where nothing else runs, so entering and leaving are
- * bookkeeping and initialising is clearing what the title will read back. This
- * is the same reasoning the reservation below rests on, and it stops being true
- * the moment a second thread exists.
- */
+/* Makes a critical section ready, as the console leaves one: nobody in it,
+ * which it says by how many threads want it being one less than none. */
+static void make_a_section_ready(uint8_t *base, uint32_t at) {
+    for (uint32_t word = 0; word < 7; word++) {
+        xenolith_store32(base, at + word * 4, 0);
+    }
+    xenolith_store32(base, at + 16, 0xffffffffu);
+}
+
 static void initialize_critical_section(xenolith_context *ctx, uint8_t *base) {
     uint32_t at = (uint32_t)ctx->r[3];
     if (at != 0) {
-        for (uint32_t word = 0; word < 7; word++) {
-            xenolith_store32(base, at + word * 4, 0);
-        }
+        make_a_section_ready(base, at);
     }
 }
 
@@ -1346,17 +1350,20 @@ void xenolith_import_variable(uint8_t *base, uint32_t slot, const char *library,
     case 173:
         time_stamp_bundle = home;
         break;
+    case 449:
+        /* A critical section the kernel keeps, which a title enters. */
+        make_a_section_ready(base, home);
+        break;
     case 27:
     case 89:
     case 403:
     case 430:
     case 446:
-    case 449:
     case 614:
         /* Left as nothing, which each of these is on a retail console with no
-         * debugger attached, or is a lock nobody holds, or is a pointer or a
-         * description only the kernel reads. The command line is empty, which
-         * is a title started with no arguments. */
+         * debugger attached, or is a pointer or a description only the kernel
+         * reads. The command line is empty, which is a title started with no
+         * arguments. */
         break;
     default:
         say_a_report("%s variable %u is not known, and is left as nothing", library, ordinal);
@@ -1464,40 +1471,147 @@ static void *run_guest_thread(void *given) {
     return NULL;
 }
 
-/* Locks a title takes, kept beside the guest address each one lives at.
+/* Locks a title takes, kept in the title's own memory where it put them.
  *
- * A critical section is a structure in guest memory and a real lock cannot be
- * put inside one, so the address is what identifies it here.
- */
-#define XENOLITH_SECTIONS 1024
+ * A spin lock is a word, kept there as nought free, one held, and two held with
+ * something waiting for it. A critical section is a few, kept as the console
+ * keeps them, since a title can make one ready itself rather than asking. A
+ * table of the addresses beside them filled within minutes of a mission, since
+ * a title makes a lock for every object it makes and never says when one is
+ * gone, and every lock asked for after that was one nobody held. Waiting is the
+ * host kernel's own wait on the word, which finds the word by the memory it is
+ * in rather than the address it was reached by, and the console reaches the same
+ * memory by more than one. */
+static uint32_t *a_lock_word(uint8_t *base, uint32_t at) {
+    return (uint32_t *)(void *)(base + at);
+}
 
-static struct {
-    uint32_t at;
-    pthread_mutex_t lock;
-} sections[XENOLITH_SECTIONS];
-static pthread_mutex_t sections_lock = PTHREAD_MUTEX_INITIALIZER;
+static void take_a_lock_word(uint32_t *word) {
+    uint32_t was = 0;
+    if (__atomic_compare_exchange_n(word, &was, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        return;
+    }
+    if (was != 2u) {
+        was = __atomic_exchange_n(word, 2u, __ATOMIC_ACQUIRE);
+    }
+    while (was != 0u) {
+        syscall(SYS_futex, word, FUTEX_WAIT, 2u, NULL, NULL, 0);
+        was = __atomic_exchange_n(word, 2u, __ATOMIC_ACQUIRE);
+    }
+}
 
-static pthread_mutex_t *section_of(uint32_t at) {
-    pthread_mutex_lock(&sections_lock);
-    for (unsigned k = 0; k < XENOLITH_SECTIONS; k++) {
-        unsigned slot = (at / 4 + k) % XENOLITH_SECTIONS;
-        if (sections[slot].at == at) {
-            pthread_mutex_unlock(&sections_lock);
-            return &sections[slot].lock;
+static void let_go_of_a_lock_word(uint32_t *word) {
+    if (__atomic_fetch_sub(word, 1u, __ATOMIC_RELEASE) != 1u) {
+        __atomic_store_n(word, 0u, __ATOMIC_RELEASE);
+        syscall(SYS_futex, word, FUTEX_WAKE, 1, NULL, NULL, 0);
+    }
+}
+
+/* A number for the thread asking, the same every time it asks and never
+ * nought, which is what a critical section says its holder is by. */
+static uint32_t this_thread_number(void) {
+    static uint32_t handed;
+    static _Thread_local uint32_t mine;
+    if (mine == 0) {
+        mine = __atomic_add_fetch(&handed, 1u, __ATOMIC_RELAXED);
+    }
+    return mine;
+}
+
+/* Where in a critical section the word a waiter sleeps on, how many threads
+ * want it less one, how many times its holder has entered it, and who that
+ * holder is sit: the console's own places for each, kept the way the console
+ * keeps them, in the title's byte order, since they are the title's to read. */
+#define XENOLITH_SECTION_SIGNALLED 4u
+#define XENOLITH_SECTION_WANTED 16u
+#define XENOLITH_SECTION_DEPTH 20u
+#define XENOLITH_SECTION_HOLDER 24u
+
+/* Adds to a word kept in the title's byte order, giving what it came to. */
+static uint32_t add_to_a_title_word(uint32_t *word, uint32_t by) {
+    uint32_t was = __atomic_load_n(word, __ATOMIC_RELAXED);
+    uint32_t now;
+    do {
+        now = __builtin_bswap32(__builtin_bswap32(was) + by);
+    } while (!__atomic_compare_exchange_n(word, &was, now, 1, __ATOMIC_ACQ_REL,
+                                          __ATOMIC_RELAXED));
+    return __builtin_bswap32(now);
+}
+
+static int a_section_is_mine(uint8_t *base, uint32_t at) {
+    return __atomic_load_n(a_lock_word(base, at + XENOLITH_SECTION_HOLDER), __ATOMIC_RELAXED)
+           == __builtin_bswap32(this_thread_number());
+}
+
+static void take_a_section(uint8_t *base, uint32_t at) {
+    __atomic_store_n(a_lock_word(base, at + XENOLITH_SECTION_HOLDER),
+                     __builtin_bswap32(this_thread_number()), __ATOMIC_RELAXED);
+    xenolith_store32(base, at + XENOLITH_SECTION_DEPTH, 1u);
+}
+
+/* Sleeps until the thread leaving a section hands it over. */
+static void wait_to_be_handed_a_section(uint8_t *base, uint32_t at) {
+    uint32_t *signalled = a_lock_word(base, at + XENOLITH_SECTION_SIGNALLED);
+    for (;;) {
+        uint32_t was = __atomic_load_n(signalled, __ATOMIC_ACQUIRE);
+        if (was == 0u) {
+            syscall(SYS_futex, signalled, FUTEX_WAIT, 0u, NULL, NULL, 0);
+            continue;
         }
-        if (sections[slot].at == 0) {
-            sections[slot].at = at;
-            pthread_mutexattr_t how;
-            pthread_mutexattr_init(&how);
-            pthread_mutexattr_settype(&how, PTHREAD_MUTEX_RECURSIVE);
-            pthread_mutex_init(&sections[slot].lock, &how);
-            pthread_mutexattr_destroy(&how);
-            pthread_mutex_unlock(&sections_lock);
-            return &sections[slot].lock;
+        uint32_t less = __builtin_bswap32(__builtin_bswap32(was) - 1u);
+        if (__atomic_compare_exchange_n(signalled, &was, less, 0, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_RELAXED)) {
+            return;
         }
     }
-    pthread_mutex_unlock(&sections_lock);
-    return NULL;
+}
+
+static void enter_a_section(uint8_t *base, uint32_t at) {
+    if (add_to_a_title_word(a_lock_word(base, at + XENOLITH_SECTION_WANTED), 1u) != 0u) {
+        if (a_section_is_mine(base, at)) {
+            xenolith_store32(base, at + XENOLITH_SECTION_DEPTH,
+                             xenolith_load32(base, at + XENOLITH_SECTION_DEPTH) + 1u);
+            return;
+        }
+        wait_to_be_handed_a_section(base, at);
+    }
+    take_a_section(base, at);
+}
+
+static int try_to_enter_a_section(uint8_t *base, uint32_t at) {
+    uint32_t nobody = 0xffffffffu;
+    if (__atomic_compare_exchange_n(a_lock_word(base, at + XENOLITH_SECTION_WANTED), &nobody, 0u,
+                                    0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        take_a_section(base, at);
+        return 1;
+    }
+    if (!a_section_is_mine(base, at)) {
+        return 0;
+    }
+    add_to_a_title_word(a_lock_word(base, at + XENOLITH_SECTION_WANTED), 1u);
+    xenolith_store32(base, at + XENOLITH_SECTION_DEPTH,
+                     xenolith_load32(base, at + XENOLITH_SECTION_DEPTH) + 1u);
+    return 1;
+}
+
+/* Leaving one the thread does not hold changes nothing, rather than letting go
+ * of a lock another thread holds. */
+static void leave_a_section(uint8_t *base, uint32_t at) {
+    uint32_t depth = xenolith_load32(base, at + XENOLITH_SECTION_DEPTH);
+    if (!a_section_is_mine(base, at) || depth == 0u) {
+        return;
+    }
+    xenolith_store32(base, at + XENOLITH_SECTION_DEPTH, depth - 1u);
+    if (depth == 1u) {
+        __atomic_store_n(a_lock_word(base, at + XENOLITH_SECTION_HOLDER), 0u, __ATOMIC_RELAXED);
+    }
+    uint32_t wanted =
+        add_to_a_title_word(a_lock_word(base, at + XENOLITH_SECTION_WANTED), 0xffffffffu);
+    if (depth == 1u && wanted != 0xffffffffu) {
+        uint32_t *signalled = a_lock_word(base, at + XENOLITH_SECTION_SIGNALLED);
+        add_to_a_title_word(signalled, 1u);
+        syscall(SYS_futex, signalled, FUTEX_WAKE, 1, NULL, NULL, 0);
+    }
 }
 
 /* Objects a title names by where they live rather than by a handle.
@@ -4732,65 +4846,28 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
          * does nothing observable with this, and neither does this. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
-    case 177: {
+    case 177:
         /* Taking a lock and raising the interrupt level, which is one call on
          * the console because the two go together there. The level is not
          * modelled: nothing here interrupts a thread, so there is no level to
          * be at. What a title is handed back is the level it should return to,
          * and it hands that straight back to the release below without reading
-         * it, so nothing is lost by it being nothing.
-         *
-         * A table with no room left says so rather than carrying on. Carrying on
-         * is what lets two threads into the same critical section: each is told
-         * it holds a lock that was never taken, and what the section was
-         * protecting is now written by both at once. */
-        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock == NULL) {
-            say_a_report("no room left to name critical section %#x",
-                         (unsigned)ctx->r[3]);
-            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
-            return 1;
-        }
-        pthread_mutex_lock(lock);
+         * it, so nothing is lost by it being nothing. */
+        take_a_lock_word(a_lock_word(base, (uint32_t)ctx->r[3]));
         ctx->r[3] = 0;
         return 1;
-    }
-    case 180: {
-        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock == NULL) {
-            say_a_report("no room left to name critical section %#x",
-                         (unsigned)ctx->r[3]);
-            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
-            return 1;
-        }
-        pthread_mutex_unlock(lock);
+    case 180:
+        let_go_of_a_lock_word(a_lock_word(base, (uint32_t)ctx->r[3]));
         return 1;
-    }
-    case 77: {
+    case 77:
         /* Taking a lock the console holds with interrupts already off. There
          * are no interrupts here and the threads are real, so what it protects
          * against is another thread, and a lock is what does that. */
-        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock == NULL) {
-            say_a_report("no room left to name critical section %#x",
-                         (unsigned)ctx->r[3]);
-            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
-            return 1;
-        }
-        pthread_mutex_lock(lock);
+        take_a_lock_word(a_lock_word(base, (uint32_t)ctx->r[3]));
         return 1;
-    }
-    case 137: {
-        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock == NULL) {
-            say_a_report("no room left to name critical section %#x",
-                         (unsigned)ctx->r[3]);
-            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
-            return 1;
-        }
-        pthread_mutex_unlock(lock);
+    case 137:
+        let_go_of_a_lock_word(a_lock_word(base, (uint32_t)ctx->r[3]));
         return 1;
-    }
     case 95:
     case 125:
         /* Holding off the kernel's own interruptions around a stretch of work.
@@ -5298,37 +5375,19 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
     case 320:
         time_to_fields(ctx, base);
         return 1;
-    case 321: {
-        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        ctx->r[3] = lock != NULL && pthread_mutex_trylock(lock) == 0;
+    case 321:
+        ctx->r[3] = (uint64_t)try_to_enter_a_section(base, (uint32_t)ctx->r[3]);
         return 1;
-    }
     case 204:
         allocate_virtual_memory(ctx, base);
         return 1;
-    case 293: {
-        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock == NULL) {
-            say_a_report("no room left to name critical section %#x",
-                         (unsigned)ctx->r[3]);
-            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
-            return 1;
-        }
-        pthread_mutex_lock(lock);
+    case 293:
+        enter_a_section(base, (uint32_t)ctx->r[3]);
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
-    }
-    case 304: {
-        pthread_mutex_t *lock = section_of((uint32_t)ctx->r[3]);
-        if (lock == NULL) {
-            say_a_report("no room left to name critical section %#x",
-                         (unsigned)ctx->r[3]);
-            ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
-            return 1;
-        }
-        pthread_mutex_unlock(lock);
+    case 304:
+        leave_a_section(base, (uint32_t)ctx->r[3]);
         return 1;
-    }
     case 310: {
         /* Raising a structured exception.
          *
