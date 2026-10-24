@@ -1723,9 +1723,12 @@ static int make_what_a_frame_goes_through(void) {
     VkMemoryAllocateInfo asking_too = {0};
     asking_too.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     asking_too.allocationSize = wanting.size;
-    asking_too.memoryTypeIndex = memory_that_suits(
-        wanting.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    /* Memory a host reads as well as writes, because it does: a run of corners
+     * a title names by number is written out in order by reading back the
+     * corners already put here. Memory kept out of the cache makes every one of
+     * those reads go the whole way to the memory, which was a quarter of the
+     * time a frame took. */
+    asking_too.memoryTypeIndex = memory_to_read_back_from(wanting.memoryTypeBits);
 
     if (vkAllocateMemory(drawing.device, &asking_too, NULL, &through.vertex_memory) != VK_SUCCESS
         || vkBindBufferMemory(drawing.device, through.vertices, through.vertex_memory, 0)
