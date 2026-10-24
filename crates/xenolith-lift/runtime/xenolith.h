@@ -910,9 +910,35 @@ struct xenolith_copy {
     int red_and_blue_swapped;
 };
 
+/* How many bytes from where a copy starts it writes over, kept in squares of
+ * thirty two parts on a side, four bytes each, laid a row of squares at a time.
+ *
+ * Up to the last square it writes rather than a whole picture's worth from
+ * where it starts. A copy of the right half of a frame starts part of the way
+ * into its picture, and a whole picture's worth from there reaches into
+ * whatever the title keeps after it. */
+static inline uint32_t xenolith_what_a_copy_reaches(uint32_t pitch, uint32_t right,
+                                                    uint32_t bottom) {
+    uint32_t squares_a_row = (pitch + 31u) / 32u;
+    uint32_t rows = (bottom + 31u) / 32u;
+    if (rows == 0 || right == 0) {
+        return 0;
+    }
+    return ((rows - 1u) * squares_a_row + (right + 31u) / 32u) * 4096u;
+}
+
 /* Hands what was drawn back into a title's own memory, as the copy says.
- * Returns zero where there is nothing to hand back. */
+ * Returns zero where there is nothing to hand back.
+ *
+ * The copy is recorded with what was drawn, and the memory is written once
+ * that is handed over: when a frame is shown, when a picture is made out of
+ * that memory, or when xenolith_wait_for_what_was_drawn is asked. */
 int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy *copy);
+
+/* Hands over everything recorded so far, waits for it to run, and writes what
+ * the copies among it read back into the memory their titles named. A copy's
+ * memory holds what was copied once this has been asked for. */
+int xenolith_wait_for_what_was_drawn(void);
 
 /* What is held down on the keyboard, as a controller's buttons and the two
  * thumbsticks. Returns zero where there is no window to read one from. */

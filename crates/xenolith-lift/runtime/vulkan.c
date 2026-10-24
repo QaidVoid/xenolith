@@ -109,7 +109,7 @@ static int painting_over_everything(void) {
  * takes one, so the oldest is reused rather than being read stale. The arenas
  * below are the ones that refuse, because what a draw reads from those cannot
  * be rewritten under a draw that already used it. */
-#define XENOLITH_SAYINGS 1024
+#define XENOLITH_SAYINGS 4096
 
 static struct {
     VkInstance instance;
@@ -466,6 +466,14 @@ static uint32_t memory_to_read_back_from(uint32_t allowed) {
                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 }
 
+/* How much of what was drawn can wait to be handed back at once.
+ *
+ * Copies are read back together when what was recorded is handed over, each
+ * into its own share of this, so it holds a frame's worth of them: a few dozen
+ * a frame in one title, the largest a whole surface of samples. Running out
+ * hands over what was recorded early rather than refusing a copy. */
+#define XENOLITH_HANDED_BACK_ROOM (256ull * 1024ull * 1024ull)
+
 /* Makes what is drawn into, and somewhere to read it back through.
  *
  * Reading it back is what makes any of this checkable without a screen. */
@@ -517,7 +525,7 @@ static int make_somewhere_to_draw(void) {
 
     VkBufferCreateInfo through = {0};
     through.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    through.size = (VkDeviceSize)XENOLITH_GRID_ACROSS * XENOLITH_GRID_DOWN * XENOLITH_SURFACE_BYTES;
+    through.size = XENOLITH_HANDED_BACK_ROOM;
     /* Written into when a frame is read back, and read out of when the frame a
      * title asked to have shown is put back where a frame is shown from. */
     through.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -711,10 +719,36 @@ static struct {
     /* Which copy last put what was drawn into it, so that the same copy does
      * not then forget it as written over. */
     unsigned long renewed_by;
+    /* Which lot of recorded commands last put a copy into it. Until that lot
+     * has run, its memory is still to be written, and what the memory adds up
+     * to says nothing about the picture. */
+    unsigned long renewed_in;
+    /* Whether a copy has written its memory in a way that could not be put
+     * into it on the device. It is kept rather than let go of, because the
+     * next copy into it usually can be, and turned again only if it is read
+     * before then. */
+    int stale;
 } turned[XENOLITH_PICTURES_KEPT];
 
 /* How many copies out of what was drawn there have been. */
 static unsigned long copies_counted;
+
+/* Whether commands are being recorded that have not been handed over yet.
+ *
+ * Everything a title asks for between one handing over and the next goes into
+ * the one lot: its frames, the copies out of them, and what those copies wipe.
+ * Handing each frame over and waiting for it, as a title copies something out
+ * nearly a hundred times a frame, left the device idle while the processor
+ * worked and the processor idle while the device did, and between them a frame
+ * of a mission took a quarter of a second. */
+static int batch_open;
+
+/* How many draws have taken a saying since the lot was begun. */
+static uint32_t sayings_taken;
+
+/* How many lots have been begun, which is how a picture says which one put a
+ * copy into it. */
+static unsigned long batches_begun;
 
 /* Which frame is being drawn, counted here so that a picture is checked against
  * its memory once a frame rather than once for every draw that reads it. */
@@ -724,9 +758,9 @@ static unsigned long frames_begun;
  *
  * They cannot be let go of the moment that is noticed: a frame already being
  * recorded may have been told to read one, and a device reading something let
- * go of is worse than a picture that is out of date. So they wait here until a
- * frame starts, which is after the one before it has run. */
-#define XENOLITH_LET_GO_OF 64u
+ * go of is worse than a picture that is out of date. So they wait here until
+ * what was recorded has been handed over and has run. */
+#define XENOLITH_LET_GO_OF 1024u
 
 static struct {
     VkImage image;
@@ -1011,6 +1045,22 @@ static pthread_mutex_t one_drawing = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
 
 static int xenolith_begin_a_frame_inside(void);
 static int xenolith_end_a_frame_inside(void);
+static int hand_over_what_was_recorded(void);
+static int a_copy_is_still_to_write(uint32_t from, uint32_t over);
+
+/* Lets go of a picture once what has been recorded has run, handing that over
+ * first where there is no room left to wait. */
+static void let_go_once_it_has_run(VkImage image, VkDeviceMemory memory, VkImageView view) {
+    pthread_mutex_lock(&one_drawing);
+    if (letting_go >= XENOLITH_LET_GO_OF) {
+        hand_over_what_was_recorded();
+    }
+    to_let_go_of[letting_go].image = image;
+    to_let_go_of[letting_go].memory = memory;
+    to_let_go_of[letting_go].view = view;
+    letting_go++;
+    pthread_mutex_unlock(&one_drawing);
+}
 static int xenolith_draw_now_inside(uint32_t blending, uint32_t written, uint32_t how_far,
                                     uint32_t cut_off, uint32_t cut_off_at, uint32_t vertex_sum,
                                     const uint32_t *vertex, uint32_t vertex_length,
@@ -1514,7 +1564,10 @@ static unsigned the_place_of_this_shape(void) {
  * needs a surface, a view and a pass for each place rather than one of each,
  * which is the same moving done by the device's own bookkeeping.
  */
+static int surface_brought_back;
+
 static int keep_the_place_and_take_up_another(void) {
+    surface_brought_back = 0;
     unsigned wanted = the_place_of_this_shape();
     if (wanted == XENOLITH_PLACES_DRAWN_INTO) {
         return 0;
@@ -1569,6 +1622,7 @@ static int keep_the_place_and_take_up_another(void) {
         vkCmdCopyImage(surface.commands, put_aside[wanted].image,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, surface.image,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &all);
+        surface_brought_back = 1;
     }
     drawing_into_which = wanted;
     return had_something;
@@ -1979,27 +2033,17 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
              * draw instead reads the whole of every picture every time it is
              * read from, which came to a hundred and twenty nine gigabytes in
              * one mission to find three thousand changes. */
-            if (turned[at].over != 0 && turned[at].checked_in != frames_begun
-                && what_the_memory_adds_up_to(from, where, turned[at].over) != turned[at].came_to) {
+            int written_over = turned[at].stale;
+            if (!written_over && turned[at].over != 0 && turned[at].checked_in != frames_begun
+                && !(batch_open && turned[at].renewed_in == batches_begun)) {
+                written_over =
+                    what_the_memory_adds_up_to(from, where, turned[at].over) != turned[at].came_to;
+            }
+            if (written_over) {
                 /* Written over since. It is turned again, and the one that was
-                 * there waits to be let go of until a frame starts.
-                 *
-                 * Where there is nowhere left to put it, the old one is used
-                 * for another frame rather than dropped. Dropping it would
-                 * leave a picture nothing ever lets go of and a place in this
-                 * table that is used again, so a run that turned many pictures
-                 * over in one frame would run out of places and stop drawing
-                 * any of them. An out of date picture for one frame is the
-                 * smaller wrong. */
-                if (letting_go >= XENOLITH_LET_GO_OF) {
-                    pictures[slot] = at + 1;
-                    return 1;
-                }
-
-                to_let_go_of[letting_go].image = turned[at].image;
-                to_let_go_of[letting_go].memory = turned[at].memory;
-                to_let_go_of[letting_go].view = turned[at].view;
-                letting_go++;
+                 * there waits to be let go of until what was recorded with it
+                 * has run. */
+                let_go_once_it_has_run(turned[at].image, turned[at].memory, turned[at].view);
 
                 for (uint32_t place = 0; place < XENOLITH_PICTURES; place++) {
                     if (pictures[place] == at + 1u) {
@@ -2057,6 +2101,12 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
     along = (along + 31u) & ~31u;
 
     VkDeviceSize enough = (VkDeviceSize)wide * tall * square_bytes;
+
+    /* A copy recorded but not yet run is still to write this memory, and the
+     * picture has to be what it writes rather than what was there before. */
+    if (a_copy_is_still_to_write(where, along * ((tall + 31u) & ~31u) * square_bytes)) {
+        xenolith_wait_for_what_was_drawn();
+    }
 
     VkBufferCreateInfo holding = {0};
     holding.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -2277,6 +2327,14 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
             break;
         }
     }
+    /* Where every place is taken, one written over is given up for this. */
+    for (uint32_t at = 0; at < XENOLITH_PICTURES_KEPT && room == XENOLITH_PICTURES_KEPT; at++) {
+        if (turned[at].stale) {
+            let_go_once_it_has_run(turned[at].image, turned[at].memory, turned[at].view);
+            memset(&turned[at], 0, sizeof turned[at]);
+            room = at;
+        }
+    }
     if (room == XENOLITH_PICTURES_KEPT) {
         no_room_for_another_picture();
         vkDestroyImageView(drawing.device, seen, NULL);
@@ -2297,6 +2355,8 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
     turned[room].along = along;
     turned[room].order = order;
     turned[room].renewed_by = 0;
+    turned[room].renewed_in = 0;
+    turned[room].stale = 0;
     turned[room].way = a_way_of_reading(held_how & XENOLITH_HOW_IT_IS_READ);
     /* How much of a title's memory this was read out of, which is not how much
      * it came to. Where it is kept in squares the run it sits in is as wide as
@@ -2564,12 +2624,23 @@ static uint32_t colours_start_at;
  * into one that never began cannot happen. */
 static int recording;
 
+
+/* The last window and view a draw was given, said again when a lot of
+ * commands is handed over in the middle of a frame and the frame carries on in
+ * a new one, which starts knowing neither. */
+static VkViewport last_seen;
+static int seen_given;
+static VkRect2D last_kept;
+static int kept_given;
+
 /* Wipes the surface as it stands, between frames, to the colour a title said. */
+static int begin_the_batch(void);
+
 static int wipe_the_surface_now(uint32_t to) {
-    VkCommandBuffer one = begin_one_lot_of_commands();
-    if (one == VK_NULL_HANDLE) {
+    if (!begin_the_batch()) {
         return 0;
     }
+    VkCommandBuffer one = surface.commands;
     VkClearColorValue cleared_to = {0};
     cleared_to.float32[0] = (float)((to >> 16) & 0xffu) / 255.0f;
     cleared_to.float32[1] = (float)((to >> 8) & 0xffu) / 255.0f;
@@ -2582,7 +2653,7 @@ static int wipe_the_surface_now(uint32_t to) {
                          1, &every_part);
     a_picture_becomes(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    return finish_one_lot_of_commands(one);
+    return 1;
 }
 
 /* Says whether the copy just made asked for the colours to start again, and
@@ -2715,6 +2786,16 @@ int xenolith_hand_over_constants(const uint8_t *from, const uint8_t *truths,
         return 0;
     }
 
+    /* Room for this draw's constants, its vertices and its saying, handed over
+     * early where what has been recorded has used it up, so that nothing a draw
+     * reads is given out again before the draw has run. */
+    if (through.constant_at + XENOLITH_CONSTANT_BYTES > XENOLITH_CONSTANT_ROOM
+        || through.vertex_at + XENOLITH_VERTEX_BYTES > XENOLITH_VERTEX_ROOM
+        || sayings_taken + 1u >= XENOLITH_SAYINGS) {
+        pthread_mutex_lock(&one_drawing);
+        hand_over_what_was_recorded();
+        pthread_mutex_unlock(&one_drawing);
+    }
     if (through.constant_at + XENOLITH_CONSTANT_BYTES > XENOLITH_CONSTANT_ROOM) {
         more_than_a_frame_holds("shader constants");
         /* Refused rather than wrapped: a shader handed the room at the front of
@@ -2924,29 +3005,30 @@ static void lay_the_samples_out_again(VkCommandBuffer on, VkImage image, int how
     }
 }
 
-static int xenolith_begin_a_frame_inside(void) {
-    frames_begun++;
 
-    if (recording || !make_what_a_frame_goes_through()) {
-        return 0;
+static int begin_the_batch(void) {
+    if (batch_open) {
+        return 1;
     }
-
-    /* The room a frame's draws take is given back here rather than as each
-     * draw finishes with it, because a draw is not finished with it until the
-     * frame it belongs to has been handed over and run. */
-    through.vertex_at = 0;
-    through.constant_at = 0;
-    through.saying_now = 0;
-
-    /* The frame before this one has run, so anything it was reading can go. */
-    let_go_of_what_is_finished();
-
+    batches_begun++;
     vkResetCommandBuffer(surface.commands, 0);
-
     VkCommandBufferBeginInfo starting = {0};
     starting.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     starting.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(surface.commands, &starting);
+    if (vkBeginCommandBuffer(surface.commands, &starting) != VK_SUCCESS) {
+        return 0;
+    }
+    batch_open = 1;
+    return 1;
+}
+
+static int xenolith_begin_a_frame_inside(void) {
+    frames_begun++;
+
+    if (recording || !make_what_a_frame_goes_through() || !begin_the_batch()) {
+        return 0;
+    }
+
     /* Where a title has turned to another place, what the place it leaves holds
      * is put aside and what the place it takes up holds is brought back. */
     int came_back_to_it = keep_the_place_and_take_up_another();
@@ -2961,7 +3043,7 @@ static int xenolith_begin_a_frame_inside(void) {
      * was put back leaves it where putting it back left it. */
     if (!surface.read_out) {
         ready.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    } else if (came_back_to_it) {
+    } else if (surface_brought_back) {
         ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     } else {
         ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -3051,6 +3133,12 @@ static int xenolith_begin_a_frame_inside(void) {
     into.renderArea.extent.width = XENOLITH_GRID_ACROSS;
     into.renderArea.extent.height = XENOLITH_GRID_DOWN;
     vkCmdBeginRenderPass(surface.commands, &into, VK_SUBPASS_CONTENTS_INLINE);
+    if (seen_given) {
+        vkCmdSetViewport(surface.commands, 0, 1, &last_seen);
+    }
+    if (kept_given) {
+        vkCmdSetScissor(surface.commands, 0, 1, &last_kept);
+    }
 
     recording = 1;
     return 1;
@@ -3157,6 +3245,8 @@ static void xenolith_look_at_inside(const float *scale, const float *offset) {
     if (seen.maxDepth > 1.0f) {
         seen.maxDepth = 1.0f;
     }
+    last_seen = seen;
+    seen_given = 1;
     vkCmdSetViewport(surface.commands, 0, 1, &seen);
 }
 
@@ -4383,6 +4473,8 @@ void xenolith_clip_to_inside(uint32_t left, uint32_t top, uint32_t right, uint32
     kept.offset.y = (int32_t)top;
     kept.extent.width = right > left ? right - left : 0;
     kept.extent.height = bottom > top ? bottom - top : 0;
+    last_kept = kept;
+    kept_given = 1;
     vkCmdSetScissor(surface.commands, 0, 1, &kept);
 }
 
@@ -4408,6 +4500,7 @@ int xenolith_draw_now_inside(uint32_t blending, uint32_t written, uint32_t how_f
      * put and which pictures were handed over for it. Saying it again in the
      * one a draw already recorded would change what that draw reads. */
     through.saying_now = (through.saying_now + 1u) % XENOLITH_SAYINGS;
+    sayings_taken++;
     say_which_pictures_are_looked_at();
 
     VkDescriptorBufferInfo pointing[2] = {{0}, {0}};
@@ -4464,36 +4557,23 @@ static int xenolith_end_a_frame_inside(void) {
     vkCmdPipelineBarrier(surface.commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &to_read);
     /* From here the surface is somewhere a copy reads from, which is what the
-     * next frame's barrier has to say it is. */
-    surface.read_out = 1;
-
-    vkEndCommandBuffer(surface.commands);
-
-    VkSubmitInfo handing = {0};
-    handing.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    handing.commandBufferCount = 1;
-    handing.pCommandBuffers = &surface.commands;
-
-    pthread_mutex_lock(&one_queue);
-    int handed = !went_wrong(vkQueueSubmit(drawing.queue, 1, &handing, VK_NULL_HANDLE), "a frame");
-    if (handed) {
-        went_wrong(vkQueueWaitIdle(drawing.queue), "waiting for a frame");
-    }
-    pthread_mutex_unlock(&one_queue);
-    if (!handed) {
-        return 0;
-    }
-    /* The frame is drawn, but not shown here. Showing every
+     * next frame's barrier has to say it is. It is not handed over here: what
+     * comes after it goes into the same lot, and the lot is handed over when
+     * something needs what it made.
+     *
+     * The frame is drawn, but not shown here. Showing every
      * frame the moment it finishes shows the ones a title copies out partway
      * through drawing as well as the one it means to display, which is what made
      * the window flash. What reaches the screen is chosen at the swap instead:
      * the frame a title copied out, or this surface as a fallback. */
+    surface.read_out = 1;
     return 1;
 }
 
 /* Shows whatever is on the drawing surface now. The swap falls back to this for
  * a title that does not copy its frame out before asking for it to be shown. */
 int xenolith_show_the_frame(void) {
+    xenolith_wait_for_what_was_drawn();
     __atomic_fetch_add(&frames_shown, 1ul, __ATOMIC_RELAXED);
     show_what_was_drawn(surface.image);
     return 1;
@@ -4630,6 +4710,7 @@ int xenolith_show_what_was_copied_to(uint32_t where) {
     if (!surface.made || found == 0) {
         return 0;
     }
+    xenolith_wait_for_what_was_drawn();
     /* Shown from where it is kept rather than put back into the surface
      * first. It is only the frame the title named for as long as nothing else
      * has been drawn, and the surface is what everything else draws into. */
@@ -4647,8 +4728,9 @@ int xenolith_show_what_was_copied_to(uint32_t where) {
  * hands every later draw the first thing that memory ever held, so the picture
  * a title just drew is never the one it sees.
  *
- * The device is idle when this is reached, because the copy that occasions it
- * ends the frame first, so what is let go of is not in use.
+ * What is written over is kept and marked so rather than let go of, because
+ * the next copy into it can usually be put into it on the device, and it is
+ * turned again only if it is read before then.
  */
 void xenolith_forget_pictures_at(uint32_t where, uint32_t bytes) {
     if (!surface.made || bytes == 0) {
@@ -4672,14 +4754,7 @@ void xenolith_forget_pictures_at(uint32_t where, uint32_t bytes) {
                 pictures[place] = 0;
             }
         }
-        vkDestroyImageView(drawing.device, turned[at].view, NULL);
-        vkDestroyImage(drawing.device, turned[at].image, NULL);
-        vkFreeMemory(drawing.device, turned[at].memory, NULL);
-        turned[at].held = 0;
-        turned[at].from = 0;
-        turned[at].view = VK_NULL_HANDLE;
-        turned[at].image = VK_NULL_HANDLE;
-        turned[at].memory = VK_NULL_HANDLE;
+        turned[at].stale = 1;
     }
 }
 
@@ -4827,15 +4902,19 @@ static int somewhere_to_turn_a_copy(int blue_first) {
 /* Where in a picture already turned a copy lands, or nothing where it does not
  * land in it as the picture stands.
  *
- * Only a picture kept in squares, four bytes to a part turned word by word, in
- * runs as wide as the ones the copy writes, and holding the whole of what it
- * writes. A square there is thirty two parts on a side and four kilobytes,
+ * Only a picture of one of the two kinds asked for, kept in squares, four bytes
+ * to a part turned word by word, in runs as wide as the ones the copy writes.
+ * What the copy writes past the picture's edge is left out, which is how much
+ * of it lands is given too: a title halving a scene down to one reading copies
+ * a rectangle eight wide into a picture four wide. A square there is thirty two parts on a side and four kilobytes,
  * laid a run of them at a time, so where in it the copy starts says which. */
 static int where_a_copy_lands(uint32_t which, const struct xenolith_copy *copy,
-                              uint32_t right, uint32_t bottom, uint32_t *across_at,
-                              uint32_t *down_at) {
+                              uint32_t right, uint32_t bottom, uint32_t kept_as,
+                              uint32_t or_as, uint32_t *across_at, uint32_t *down_at,
+                              uint32_t *lands_right, uint32_t *lands_bottom) {
     uint32_t along = (copy->pitch + 31u) & ~31u;
-    if (!turned[which].held || turned[which].kept != XENOLITH_PICTURE_IN_FOURS
+    if (!turned[which].held
+        || (turned[which].kept != kept_as && turned[which].kept != or_as)
         || !turned[which].in_squares || turned[which].order != 2u
         || turned[which].along != along || copy->into < turned[which].from
         || copy->into - turned[which].from >= turned[which].over
@@ -4846,7 +4925,14 @@ static int where_a_copy_lands(uint32_t which, const struct xenolith_copy *copy,
     uint32_t squares_a_run = along / XENOLITH_A_SQUARE_ACROSS;
     *across_at = (square % squares_a_run) * XENOLITH_A_SQUARE_ACROSS;
     *down_at = (square / squares_a_run) * XENOLITH_A_SQUARE_ACROSS;
-    return *across_at + right <= turned[which].across && *down_at + bottom <= turned[which].down;
+    if (*across_at >= turned[which].across || *down_at >= turned[which].down) {
+        return 0;
+    }
+    uint32_t room_across = turned[which].across - *across_at;
+    uint32_t room_down = turned[which].down - *down_at;
+    *lands_right = right < room_across ? right : room_across;
+    *lands_bottom = bottom < room_down ? bottom : room_down;
+    return *lands_right > copy->left && *lands_bottom > copy->top;
 }
 
 /* Makes what a copy takes into bytes on the device, the way round the copy
@@ -4936,7 +5022,11 @@ static uint32_t renew_the_pictures_a_copy_writes(VkCommandBuffer one, VkImage by
          which++) {
         uint32_t across_at = 0;
         uint32_t down_at = 0;
-        if (!where_a_copy_lands(which, copy, right, bottom, &across_at, &down_at)) {
+        uint32_t lands_right = 0;
+        uint32_t lands_bottom = 0;
+        if (!where_a_copy_lands(which, copy, right, bottom, XENOLITH_PICTURE_IN_FOURS,
+                                XENOLITH_PICTURE_IN_FOURS, &across_at, &down_at, &lands_right,
+                                &lands_bottom)) {
             continue;
         }
         a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -4947,8 +5037,8 @@ static uint32_t renew_the_pictures_a_copy_writes(VkCommandBuffer one, VkImage by
         putting.dstSubresource = putting.srcSubresource;
         putting.dstOffset.x = (int32_t)(across_at + copy->left);
         putting.dstOffset.y = (int32_t)(down_at + copy->top);
-        putting.extent.width = right - copy->left;
-        putting.extent.height = bottom - copy->top;
+        putting.extent.width = lands_right - copy->left;
+        putting.extent.height = lands_bottom - copy->top;
         putting.extent.depth = 1;
         vkCmdCopyImage(one, bytes, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, turned[which].image,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &putting);
@@ -4983,6 +5073,175 @@ static uint32_t renew_the_pictures_a_copy_writes(VkCommandBuffer one, VkImage by
  * row it came back through that reading scrambled, which is how a scene drawn
  * right ended up as a checkerboard behind everything else.
  */
+/* Puts a copy of one float to a pixel into every picture of floats already
+ * turned out of the memory it writes, straight from what was drawn.
+ *
+ * A title works out how bright a scene is, and how far away each part of it
+ * is, as one float to a pixel, and reads each straight back as a picture.
+ * Turned again from memory every time, each of those waited for everything
+ * recorded before it to run. A blit takes the first part of each pixel and
+ * averages its samples, which is what the copy writes to memory. */
+static uint32_t renew_the_floats_a_copy_writes(VkCommandBuffer one,
+                                               const struct xenolith_copy *copy,
+                                               const VkBufferImageCopy *out, uint32_t right,
+                                               uint32_t bottom, uint32_t *renewed) {
+    uint32_t count = 0;
+    for (uint32_t which = 0; which < XENOLITH_PICTURES_KEPT && count < XENOLITH_RENEWED_AT_ONCE;
+         which++) {
+        uint32_t across_at = 0;
+        uint32_t down_at = 0;
+        uint32_t lands_right = 0;
+        uint32_t lands_bottom = 0;
+        if (!where_a_copy_lands(which, copy, right, bottom, XENOLITH_PICTURE_IN_FLOATS,
+                                XENOLITH_PICTURE_IN_FLOATS, &across_at, &down_at, &lands_right,
+                                &lands_bottom)) {
+            continue;
+        }
+        uint32_t across_by = out->imageExtent.width / (right - copy->left);
+        uint32_t down_by = out->imageExtent.height / (bottom - copy->top);
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit putting = {0};
+        putting.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        putting.srcSubresource.layerCount = 1;
+        putting.srcOffsets[0] = out->imageOffset;
+        putting.srcOffsets[1].x =
+            out->imageOffset.x + (int32_t)((lands_right - copy->left) * across_by);
+        putting.srcOffsets[1].y =
+            out->imageOffset.y + (int32_t)((lands_bottom - copy->top) * down_by);
+        putting.srcOffsets[1].z = 1;
+        putting.dstSubresource = putting.srcSubresource;
+        putting.dstOffsets[0].x = (int32_t)(across_at + copy->left);
+        putting.dstOffsets[0].y = (int32_t)(down_at + copy->top);
+        putting.dstOffsets[1].x = (int32_t)(across_at + lands_right);
+        putting.dstOffsets[1].y = (int32_t)(down_at + lands_bottom);
+        putting.dstOffsets[1].z = 1;
+        vkCmdBlitImage(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       turned[which].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &putting,
+                       VK_FILTER_LINEAR);
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        renewed[count++] = which;
+    }
+    return count;
+}
+
+/* Puts a copy of how far away things are into every picture of distances
+ * already turned out of the memory it writes, from where it was read back.
+ *
+ * What was read back holds every sample, and the copy writes the first of each
+ * pixel's, so the rows of the read back are walked a pixel's samples at a time.
+ * That only lines up where a pixel's samples are one above the other; one with
+ * two side by side is left to be turned again. */
+static uint32_t renew_the_distances_a_copy_writes(VkCommandBuffer one,
+                                                  const struct xenolith_copy *copy,
+                                                  VkDeviceSize from, uint32_t right,
+                                                  uint32_t bottom, uint32_t *renewed) {
+    uint32_t across_by = copy->samples_across != 0 ? copy->samples_across : 1u;
+    uint32_t down_by = copy->samples_down != 0 ? copy->samples_down : 1u;
+    if (across_by != 1u) {
+        return 0;
+    }
+    uint32_t count = 0;
+    int read_back_is_ready = 0;
+    for (uint32_t which = 0; which < XENOLITH_PICTURES_KEPT && count < XENOLITH_RENEWED_AT_ONCE;
+         which++) {
+        uint32_t across_at = 0;
+        uint32_t down_at = 0;
+        uint32_t lands_right = 0;
+        uint32_t lands_bottom = 0;
+        if (!where_a_copy_lands(which, copy, right, bottom, XENOLITH_PICTURE_HOW_FAR,
+                                XENOLITH_PICTURE_HOW_FAR_AS_A_FLOAT, &across_at, &down_at,
+                                &lands_right, &lands_bottom)) {
+            continue;
+        }
+        if (!read_back_is_ready) {
+            VkBufferMemoryBarrier written = {0};
+            written.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            written.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            written.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            written.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            written.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            written.buffer = surface.readable;
+            written.offset = from;
+            written.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(one, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1, &written, 0,
+                                 NULL);
+            read_back_is_ready = 1;
+        }
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy putting = {0};
+        putting.bufferOffset = from;
+        putting.bufferRowLength = (right - copy->left) * down_by;
+        putting.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        putting.imageSubresource.layerCount = 1;
+        putting.imageOffset.x = (int32_t)(across_at + copy->left);
+        putting.imageOffset.y = (int32_t)(down_at + copy->top);
+        putting.imageExtent.width = lands_right - copy->left;
+        putting.imageExtent.height = lands_bottom - copy->top;
+        putting.imageExtent.depth = 1;
+        vkCmdCopyBufferToImage(one, surface.readable, turned[which].image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &putting);
+        a_picture_becomes(one, turned[which].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        renewed[count++] = which;
+    }
+    return count;
+}
+
+/* A copy recorded and waiting for the lot it is in to run, so that what it
+ * read back can be put where the title asked for it. */
+#define XENOLITH_WAITING_COPIES 512u
+
+static struct {
+    uint8_t *base;
+    struct xenolith_copy copy;
+    uint32_t right;
+    uint32_t bottom;
+    VkDeviceSize at;
+    int in_bytes;
+    uint32_t renewed[XENOLITH_RENEWED_AT_ONCE];
+    uint32_t renewing;
+} waiting[XENOLITH_WAITING_COPIES];
+static uint32_t copies_waiting;
+
+/* How much of the room for handing copies back the waiting ones have taken. */
+static VkDeviceSize handed_back_at;
+
+/* Whether memory a title might read a picture from is still to be written by
+ * a copy that has not run yet. */
+static int a_copy_is_still_to_write(uint32_t from, uint32_t over) {
+    for (uint32_t which = 0; which < copies_waiting; which++) {
+        const struct xenolith_copy *copy = &waiting[which].copy;
+        uint32_t reaches =
+            xenolith_what_a_copy_reaches(copy->pitch, waiting[which].right, waiting[which].bottom);
+        if (copy->into < from + over && from < copy->into + reaches) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Hands what was drawn back to the title, where the title said to put it.
+ *
+ * A console draws into memory of its own beside the hardware and then copies
+ * that out into memory a title can reach, saying where, how wide a row is, and
+ * how tall. What a title does next is its own business: it reads that memory,
+ * or shows it, or draws over it. Without the copy it reads whatever was there,
+ * which is nothing, however right what was drawn was.
+ *
+ * What the copy does on the device is recorded here, into the lot the frame is
+ * in, and the memory is written once that lot has run: it is read back into a
+ * share of the room kept for it, and put in place by
+ * [`put_back_what_was_copied`] when the lot is handed over.
+ *
+ * Only the rectangle the title named is read back and written. A title drawing
+ * a frame in parts copies each part into its own share of the one picture, and
+ * writing the whole of what was drawn each time wrote every part over the ones
+ * before it.
+ */
 int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy *copy) {
     uint32_t right = copy->right < copy->pitch ? copy->right : copy->pitch;
     uint32_t bottom = copy->bottom < copy->height ? copy->bottom : copy->height;
@@ -5003,18 +5262,29 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
     uint32_t down = bottom - copy->top;
     uint32_t grid_across = across * across_by;
     uint32_t grid_down = down * down_by;
+    size_t sample_bytes = copy->from_how_far ? 4u : XENOLITH_SURFACE_BYTES;
+    VkDeviceSize room = (VkDeviceSize)grid_across * grid_down * sample_bytes;
 
     drawn_across = copy->pitch < XENOLITH_ACROSS ? copy->pitch : XENOLITH_ACROSS;
     drawn_down = copy->height < XENOLITH_DOWN ? copy->height : XENOLITH_DOWN;
 
-    pthread_mutex_lock(&one_reading);
-    VkCommandBuffer one = begin_one_lot_of_commands();
-    if (one == VK_NULL_HANDLE) {
-        pthread_mutex_unlock(&one_reading);
+    pthread_mutex_lock(&one_drawing);
+    if (recording) {
+        pthread_mutex_unlock(&one_drawing);
         return 0;
     }
+    if (copies_waiting >= XENOLITH_WAITING_COPIES
+        || handed_back_at + room > XENOLITH_HANDED_BACK_ROOM) {
+        hand_over_what_was_recorded();
+    }
+    if (!begin_the_batch()) {
+        pthread_mutex_unlock(&one_drawing);
+        return 0;
+    }
+    VkCommandBuffer one = surface.commands;
 
     VkBufferImageCopy out = {0};
+    out.bufferOffset = handed_back_at;
     out.imageSubresource.aspectMask =
         copy->from_how_far ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     out.imageSubresource.layerCount = 1;
@@ -5024,14 +5294,20 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
     out.imageExtent.height = grid_down;
     out.imageExtent.depth = 1;
 
+    uint32_t slot = copies_waiting;
+    waiting[slot].base = base;
+    waiting[slot].copy = *copy;
+    waiting[slot].right = right;
+    waiting[slot].bottom = bottom;
+    waiting[slot].at = handed_back_at;
+    waiting[slot].in_bytes = 0;
+    waiting[slot].renewing = 0;
+    copies_counted++;
+
     /* How far away things came out is kept apart from their colours, and is
      * somewhere to draw rather than somewhere to read from until it is asked
      * for. */
     unsigned int kept = XENOLITH_COPIES_KEPT;
-    uint32_t renewed[XENOLITH_RENEWED_AT_ONCE];
-    uint32_t renewing = 0;
-    int in_bytes = 0;
-    copies_counted++;
     if (copy->from_how_far) {
         VkImageMemoryBarrier to_read = {0};
         to_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -5059,12 +5335,15 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
         vkCmdPipelineBarrier(one, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1,
                              &back_to_drawing);
+        waiting[slot].renewing = renew_the_distances_a_copy_writes(
+            one, copy, handed_back_at, right, bottom, waiting[slot].renewed);
     } else {
         VkImage bytes = copy->as_one_float
                             ? VK_NULL_HANDLE
                             : a_copy_made_into_bytes(one, copy, &out, across, down);
         if (bytes != VK_NULL_HANDLE) {
             VkBufferImageCopy made = {0};
+            made.bufferOffset = handed_back_at;
             made.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             made.imageSubresource.layerCount = 1;
             made.imageExtent.width = across;
@@ -5072,11 +5351,16 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
             made.imageExtent.depth = 1;
             vkCmdCopyImageToBuffer(one, bytes, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                    surface.readable, 1, &made);
-            renewing = renew_the_pictures_a_copy_writes(one, bytes, copy, right, bottom, renewed);
-            in_bytes = 1;
+            waiting[slot].renewing = renew_the_pictures_a_copy_writes(
+                one, bytes, copy, right, bottom, waiting[slot].renewed);
+            waiting[slot].in_bytes = 1;
         } else {
             vkCmdCopyImageToBuffer(one, surface.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                    surface.readable, 1, &out);
+            if (copy->as_one_float) {
+                waiting[slot].renewing = renew_the_floats_a_copy_writes(
+                    one, copy, &out, right, bottom, waiting[slot].renewed);
+            }
         }
 
         /* A copy that may be the frame is also kept on the device, made smaller
@@ -5104,140 +5388,241 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
                            VK_FILTER_LINEAR);
             a_picture_becomes(one, copies[kept].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            copies[kept].where = copy->into;
+            copies[kept].when = ++copies_made;
         }
     }
-    if (!finish_one_lot_of_commands(one)) {
-        pthread_mutex_unlock(&one_reading);
-        return 0;
-    }
-    if (kept < XENOLITH_COPIES_KEPT) {
-        copies[kept].where = copy->into;
-        copies[kept].when = ++copies_made;
-    }
 
-    void *pixels = NULL;
-    if (vkMapMemory(drawing.device, surface.readable_memory, 0, VK_WHOLE_SIZE, 0, &pixels)
+    for (uint32_t at = 0; at < waiting[slot].renewing; at++) {
+        uint32_t which = waiting[slot].renewed[at];
+        turned[which].renewed_by = copies_counted;
+        turned[which].renewed_in = batches_begun;
+        turned[which].stale = 0;
+    }
+    copies_waiting++;
+    handed_back_at = lined_up(handed_back_at + room, 256u);
+    pthread_mutex_unlock(&one_drawing);
+    return 1;
+}
+
+/* Puts what each waiting copy read back where its title asked for it, once
+ * the lot the copies were recorded in has run.
+ *
+ * The colours go out the way round the hardware keeps them, red last, unless
+ * the copy asks for red and blue to be swapped, which a title asks for where it
+ * means to show what it copies.
+ *
+ * It goes out in squares rather than row by row, because that is the shape a
+ * title reads it back in. The console copies into a picture, and a picture is
+ * kept in squares, so a title that copies a scene out and then draws with it
+ * hands the same squared reading to the hardware either way. Written row by
+ * row it came back through that reading scrambled, which is how a scene drawn
+ * right ended up as a checkerboard behind everything else. */
+static void put_back_what_was_copied(void) {
+    if (copies_waiting == 0) {
+        return;
+    }
+    pthread_mutex_lock(&one_reading);
+    void *mapped = NULL;
+    if (vkMapMemory(drawing.device, surface.readable_memory, 0, VK_WHOLE_SIZE, 0, &mapped)
             != VK_SUCCESS
-        || pixels == NULL) {
+        || mapped == NULL) {
         pthread_mutex_unlock(&one_reading);
-        return 0;
+        copies_waiting = 0;
+        return;
     }
-
-    /* A square holds four bytes here, and the squares are counted across a row
-     * rounded up to the two and thirty a square's place is worked out in. */
-    uint32_t squares_a_row = ((copy->pitch + 31u) & ~31u) / XENOLITH_A_SQUARE_ACROSS;
-    uint32_t samples = across_by * down_by;
-    size_t sample_bytes = copy->from_how_far ? 4u : XENOLITH_SURFACE_BYTES;
+    const unsigned char *pixels = mapped;
 
     work_out_a_square();
     work_out_the_halves();
 
-    const unsigned char *from = pixels;
-    if (in_bytes) {
-        put_a_copy_in_squares(base, copy, from, right, bottom, squares_a_row);
-    } else {
-        for (uint32_t row = copy->top; row < bottom; row++) {
-            uint32_t down_to = (row / XENOLITH_A_SQUARE_ACROSS) * squares_a_row
-                               * XENOLITH_WHAT_A_SQUARE_HOLDS;
-            const uint32_t *in_the_square =
-                &where_in_a_square[(row % XENOLITH_A_SQUARE_ACROSS) * XENOLITH_A_SQUARE_ACROSS];
-            const unsigned char *first_row =
-                from + (size_t)(row - copy->top) * down_by * grid_across * sample_bytes;
+    for (uint32_t which = 0; which < copies_waiting; which++) {
+        uint8_t *base = waiting[which].base;
+        const struct xenolith_copy *copy = &waiting[which].copy;
+        uint32_t right = waiting[which].right;
+        uint32_t bottom = waiting[which].bottom;
+        uint32_t across_by = copy->samples_across != 0 ? copy->samples_across : 1u;
+        uint32_t down_by = copy->samples_down != 0 ? copy->samples_down : 1u;
+        uint32_t grid_across = (right - copy->left) * across_by;
+        int in_bytes = waiting[which].in_bytes;
 
-            for (uint32_t at = copy->left; at < right; at++) {
-                const unsigned char *one_sample =
-                    first_row + (size_t)(at - copy->left) * across_by * sample_bytes;
-                /* A place holding one float rather than four colours takes the
-                 * brightness on its own, which is what a title puts in such a
-                 * place: it works out how bright the whole scene came out by
-                 * halving a picture of it down to a single reading, and reads that
-                 * back to decide how bright to show the scene. Handed the four
-                 * colours packed instead, it reads their bytes as a float, which is
-                 * a number nothing sensible comes of, and the scene it then shows
-                 * is white. */
-                uint32_t colour;
-                if (copy->from_how_far) {
-                    /* Kept as a whole float on this side and as the console keeps
-                     * it on the other: three bytes of it over one of the stencil a
-                     * title tests against, which nothing here draws with. How far
-                     * away is not averaged, because a place half way between two
-                     * things is at neither. */
-                    float away;
-                    memcpy(&away, one_sample, sizeof away);
-                    uint32_t held;
-                    if (copy->how_far_as_a_float) {
-                        held = a_short_float_from_how_far(away);
-                    } else {
-                        float counted = away * 16777215.0f;
-                        held = counted <= 0.0f ? 0u
-                               : counted >= 16777215.0f ? 0xffffffu
-                                                        : (uint32_t)counted;
-                    }
-                    colour = held << 8;
-                } else {
-                    uint32_t part_of[4];
-                    float bright;
-                    if (samples == 1u) {
-                        uint16_t halves[4];
-                        memcpy(halves, one_sample, sizeof halves);
-                        for (uint32_t part = 0; part < 4u; part++) {
-                            part_of[part] = halves_as_bytes[halves[part]];
+        /* A square holds four bytes here, and the squares are counted across a row
+         * rounded up to the two and thirty a square's place is worked out in. */
+        uint32_t squares_a_row = ((copy->pitch + 31u) & ~31u) / XENOLITH_A_SQUARE_ACROSS;
+        uint32_t samples = across_by * down_by;
+        size_t sample_bytes = copy->from_how_far ? 4u : XENOLITH_SURFACE_BYTES;
+
+        const unsigned char *from = pixels + waiting[which].at;
+        if (in_bytes) {
+            put_a_copy_in_squares(base, copy, from, right, bottom, squares_a_row);
+        } else {
+            for (uint32_t row = copy->top; row < bottom; row++) {
+                uint32_t down_to = (row / XENOLITH_A_SQUARE_ACROSS) * squares_a_row
+                                   * XENOLITH_WHAT_A_SQUARE_HOLDS;
+                const uint32_t *in_the_square =
+                    &where_in_a_square[(row % XENOLITH_A_SQUARE_ACROSS) * XENOLITH_A_SQUARE_ACROSS];
+                const unsigned char *first_row =
+                    from + (size_t)(row - copy->top) * down_by * grid_across * sample_bytes;
+
+                for (uint32_t at = copy->left; at < right; at++) {
+                    const unsigned char *one_sample =
+                        first_row + (size_t)(at - copy->left) * across_by * sample_bytes;
+                    /* A place holding one float rather than four colours takes the
+                     * brightness on its own, which is what a title puts in such a
+                     * place: it works out how bright the whole scene came out by
+                     * halving a picture of it down to a single reading, and reads that
+                     * back to decide how bright to show the scene. Handed the four
+                     * colours packed instead, it reads their bytes as a float, which is
+                     * a number nothing sensible comes of, and the scene it then shows
+                     * is white. */
+                    uint32_t colour;
+                    if (copy->from_how_far) {
+                        /* Kept as a whole float on this side and as the console keeps
+                         * it on the other: three bytes of it over one of the stencil a
+                         * title tests against, which nothing here draws with. How far
+                         * away is not averaged, because a place half way between two
+                         * things is at neither. */
+                        float away;
+                        memcpy(&away, one_sample, sizeof away);
+                        uint32_t held;
+                        if (copy->how_far_as_a_float) {
+                            held = a_short_float_from_how_far(away);
+                        } else {
+                            float counted = away * 16777215.0f;
+                            held = counted <= 0.0f ? 0u
+                                   : counted >= 16777215.0f ? 0xffffffu
+                                                            : (uint32_t)counted;
                         }
-                        bright = halves_as_floats[halves[0]];
+                        colour = held << 8;
                     } else {
-                        float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                        for (uint32_t down_in = 0; down_in < down_by; down_in++) {
-                            const unsigned char *sample =
-                                one_sample + (size_t)down_in * grid_across * sample_bytes;
-                            for (uint32_t across_in = 0; across_in < across_by; across_in++) {
-                                uint16_t halves[4];
-                                memcpy(halves, sample + across_in * sample_bytes, sizeof halves);
-                                for (uint32_t part = 0; part < 4u; part++) {
-                                    sum[part] += halves_as_floats[halves[part]];
+                        uint32_t part_of[4];
+                        float bright;
+                        if (samples == 1u) {
+                            uint16_t halves[4];
+                            memcpy(halves, one_sample, sizeof halves);
+                            for (uint32_t part = 0; part < 4u; part++) {
+                                part_of[part] = halves_as_bytes[halves[part]];
+                            }
+                            bright = halves_as_floats[halves[0]];
+                        } else {
+                            float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                            for (uint32_t down_in = 0; down_in < down_by; down_in++) {
+                                const unsigned char *sample =
+                                    one_sample + (size_t)down_in * grid_across * sample_bytes;
+                                for (uint32_t across_in = 0; across_in < across_by; across_in++) {
+                                    uint16_t halves[4];
+                                    memcpy(halves, sample + across_in * sample_bytes, sizeof halves);
+                                    for (uint32_t part = 0; part < 4u; part++) {
+                                        sum[part] += halves_as_floats[halves[part]];
+                                    }
                                 }
                             }
+                            for (uint32_t part = 0; part < 4u; part++) {
+                                part_of[part] = a_part_as_a_byte(sum[part] / (float)samples);
+                            }
+                            bright = sum[0] / (float)samples;
                         }
-                        for (uint32_t part = 0; part < 4u; part++) {
-                            part_of[part] = a_part_as_a_byte(sum[part] / (float)samples);
+                        if (copy->as_one_float) {
+                            memcpy(&colour, &bright, sizeof colour);
+                        } else if (copy->red_and_blue_swapped) {
+                            colour = (part_of[3] << 24) | (part_of[0] << 16) | (part_of[1] << 8)
+                                     | part_of[2];
+                        } else {
+                            colour = (part_of[3] << 24) | (part_of[2] << 16) | (part_of[1] << 8)
+                                     | part_of[0];
                         }
-                        bright = sum[0] / (float)samples;
                     }
-                    if (copy->as_one_float) {
-                        memcpy(&colour, &bright, sizeof colour);
-                    } else if (copy->red_and_blue_swapped) {
-                        colour = (part_of[3] << 24) | (part_of[0] << 16) | (part_of[1] << 8)
-                                 | part_of[2];
-                    } else {
-                        colour = (part_of[3] << 24) | (part_of[2] << 16) | (part_of[1] << 8)
-                                 | part_of[0];
-                    }
+                    uint32_t sits = down_to
+                                    + (at / XENOLITH_A_SQUARE_ACROSS) * XENOLITH_WHAT_A_SQUARE_HOLDS
+                                    + in_the_square[at % XENOLITH_A_SQUARE_ACROSS];
+                    xenolith_store32(base, copy->into + sits, colour);
                 }
-                uint32_t sits = down_to
-                                + (at / XENOLITH_A_SQUARE_ACROSS) * XENOLITH_WHAT_A_SQUARE_HOLDS
-                                + in_the_square[at % XENOLITH_A_SQUARE_ACROSS];
-                xenolith_store32(base, copy->into + sits, colour);
+            }
+        }
+
+
+    }
+
+    /* A picture put right on the device is told what its memory adds up to
+     * once every copy has written it, so that the copies are not taken for a
+     * title writing over it. Told after each one instead, a picture two copies
+     * wrote in turn would be told of only the first. */
+    for (uint32_t which = 0; which < copies_waiting; which++) {
+        for (uint32_t at = 0; at < waiting[which].renewing; at++) {
+            uint32_t one = waiting[which].renewed[at];
+            if (turned[one].held) {
+                turned[one].came_to = what_the_memory_adds_up_to(
+                    waiting[which].base, turned[one].from, turned[one].over);
             }
         }
     }
 
     vkUnmapMemory(drawing.device, surface.readable_memory);
-
-    /* A picture put right on the device is told what its memory adds up to
-     * now, so that the copy is not taken for a title writing over it. */
-    for (uint32_t at = 0; at < renewing; at++) {
-        uint32_t which = renewed[at];
-        turned[which].came_to = what_the_memory_adds_up_to(base, turned[which].from,
-                                                           turned[which].over);
-        turned[which].renewed_by = copies_counted;
-    }
     pthread_mutex_unlock(&one_reading);
-    return 1;
+    copies_waiting = 0;
+}
+
+/* Hands over everything recorded since the last time, waits for it to run,
+ * and puts what its copies read back in place.
+ *
+ * A frame being drawn when this is asked for is ended first and carries on in
+ * the next lot, as though nothing had happened, so a draw part of the way
+ * through being set up loses nothing. */
+static int hand_over_what_was_recorded(void) {
+    if (!batch_open) {
+        /* Nothing recorded reads the room, so all of it can be given out. */
+        through.vertex_at = 0;
+        through.constant_at = 0;
+        sayings_taken = 0;
+        return 1;
+    }
+    int was_recording = recording;
+    if (was_recording) {
+        xenolith_end_a_frame_inside();
+    }
+    batch_open = 0;
+    int handed = vkEndCommandBuffer(surface.commands) == VK_SUCCESS;
+    if (handed) {
+        VkSubmitInfo handing = {0};
+        handing.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        handing.commandBufferCount = 1;
+        handing.pCommandBuffers = &surface.commands;
+        pthread_mutex_lock(&one_queue);
+        handed = !went_wrong(vkQueueSubmit(drawing.queue, 1, &handing, VK_NULL_HANDLE),
+                             "what was recorded");
+        if (handed) {
+            went_wrong(vkQueueWaitIdle(drawing.queue), "waiting for what was recorded");
+        }
+        pthread_mutex_unlock(&one_queue);
+    }
+    put_back_what_was_copied();
+    handed_back_at = 0;
+
+    /* What it was reading has run, so it can go, and the room its draws took
+     * can be given out again. */
+    let_go_of_what_is_finished();
+    through.vertex_at = 0;
+    through.constant_at = 0;
+    sayings_taken = 0;
+
+    if (was_recording) {
+        return xenolith_begin_a_frame_inside() && handed;
+    }
+    return handed;
+}
+
+int xenolith_wait_for_what_was_drawn(void) {
+    pthread_mutex_lock(&one_drawing);
+    int went = hand_over_what_was_recorded();
+    pthread_mutex_unlock(&one_drawing);
+    return went;
 }
 
 int xenolith_keep_a_frame(const char *where) {
     if (!surface.made) {
         return 0;
     }
+    xenolith_wait_for_what_was_drawn();
 
     /* Fetched first. Nothing else puts what is shown where a host can read it
      * any more, and this is only ever asked for by a run that says to write
@@ -5312,6 +5697,8 @@ void xenolith_forget_pictures_at(uint32_t where, uint32_t bytes) {
     (void)where;
     (void)bytes;
 }
+
+int xenolith_wait_for_what_was_drawn(void) { return 0; }
 
 uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
     (void)how_many;

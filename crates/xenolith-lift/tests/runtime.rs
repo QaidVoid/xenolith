@@ -5518,11 +5518,12 @@ int main(void) {
         return 3;
     }
 
-    /* And after a refusal, a new frame starts with the room again. */
-    xenolith_begin_a_frame();
+    /* And once what was recorded has been handed over and has run, the room
+     * is there again. */
+    xenolith_wait_for_what_was_drawn();
     uint32_t room = 0;
     if (xenolith_room_for_vertices(&room) == NULL || room == 0) {
-        fprintf(stderr, "a new frame did not have the room again\n");
+        fprintf(stderr, "the room did not come back once what was recorded had run\n");
         return 4;
     }
     printf("refused\n");
@@ -6286,6 +6287,7 @@ fn samples_drawn_one_way_are_laid_out_for_the_other() {
     if (!xenolith_begin_a_frame() || !xenolith_end_a_frame()) { return 7; }
     copy.into = after;
     if (!xenolith_hand_back_what_was_drawn(base, &copy)) { return 8; }
+    if (!xenolith_wait_for_what_was_drawn()) { return 11; }
     uint32_t sits[4];
     for (uint32_t one = 0; one < 4u; one++) {
         uint32_t along = 640u + one;
@@ -6481,6 +6483,7 @@ static void copy_now(uint8_t *base, uint32_t ring, uint32_t *written) {
         struct timespec once = {0, 1000000};
         nanosleep(&once, NULL);
     }
+    xenolith_wait_for_what_was_drawn();
 }
 
 int main(void) {

@@ -1600,8 +1600,9 @@ static void copy_what_was_drawn(uint8_t *base) {
     finish_the_frame();
     if (copy.into != 0 && copy.pitch != 0 && copy.height != 0) {
         xenolith_hand_back_what_was_drawn(base, &copy);
-        xenolith_forget_pictures_at(copy.into, ((copy.pitch + 31u) & ~31u)
-                                                   * ((copy.bottom + 31u) & ~31u) * 4u);
+        xenolith_forget_pictures_at(copy.into,
+                                    xenolith_what_a_copy_reaches(copy.pitch, copy.right,
+                                                                 copy.bottom));
     }
 
     uint32_t depth = a_register(base, XENOLITH_DEPTH_CLEAR);

@@ -426,6 +426,20 @@ what it names now cannot be read, that is another of the title's own pictures
 drawn in its stead, which looks like a drawing gone wrong rather than like
 something not being read.
 
+## `xenolith_what_a_copy_reaches`
+
+How many bytes from where a copy starts it writes over, given the pitch it
+writes and the right and bottom of what it takes. A copy goes out in squares of
+thirty two parts on a side, four bytes each, a row of squares at a time, so it
+reaches as far as the last square it writes rather than a whole picture's worth
+past where it starts.
+
+## `xenolith_wait_for_what_was_drawn`
+
+Hands over everything recorded so far, waits for it to run, and writes what
+the copies among it read back into the memory their titles named. A copy's
+memory holds what was copied once this has been asked for.
+
 ## `xenolith_drawing_into`
 
 Says what shape of place a title is about to draw into, so that what each of
@@ -523,6 +537,10 @@ Nothing said means the whole of what is drawn into.
 
 Hands what was drawn back into a title's own memory, as a `struct
 xenolith_copy` says. Returns zero where there is nothing to hand back.
+
+The copy is recorded with what was drawn, and the memory is written once that
+is handed over: when a frame is shown, when a picture is made out of that
+memory, or when `xenolith_wait_for_what_was_drawn` is asked.
 
 The copy names a rectangle in the pixels of the place drawn into, which is
 where it lands in the picture copied into as well: a title drawing a frame in
