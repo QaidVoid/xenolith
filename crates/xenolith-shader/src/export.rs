@@ -44,6 +44,11 @@ pub(crate) fn what_it_puts_out(module: &mut Module, named: &Named, exported: Opt
             throw_away_what_is_not_solid_enough(module, named, value, which, against);
         }
 
+        let value = match named.fraction {
+            Some(fraction) => held_to_a_fraction(module, named, value, fraction),
+            None => value,
+        };
+
         module.add(opcodes::STORE, &[named.out.number(), value]);
     }
 
@@ -162,4 +167,69 @@ pub(crate) fn throw_away_what_is_not_solid_enough(
     module.add(opcodes::LABEL, &[thrown.number()]);
     module.add(opcodes::KILL, &[]);
     module.add(opcodes::LABEL, &[after.number()]);
+}
+
+/// Holds a colour between nought and one where what is drawn into keeps it as a
+/// fraction of the whole, and leaves it as it is otherwise.
+///
+/// The hardware does this to what a shader puts out before it is blended. A
+/// host drawing into somewhere that keeps more than a fraction does not, so a
+/// colour put out below nought took away from what was already there instead
+/// of adding nothing to it.
+fn held_to_a_fraction(
+    module: &mut Module,
+    named: &Named,
+    value: u32,
+    fraction: crate::spirv::Name,
+) -> u32 {
+    let Some(none) = named.whole_numbers.first().copied() else {
+        return value;
+    };
+    let held = module.name();
+    module.add(
+        opcodes::EXT_INST,
+        &[
+            named.four.number(),
+            held.number(),
+            named.extended.number(),
+            opcodes::GLSL_CLAMP,
+            value,
+            named.nothing.number(),
+            named.all_ones.number(),
+        ],
+    );
+    let wanted = module.name();
+    module.add(
+        opcodes::INTEGER_NOT_EQUAL,
+        &[
+            named.boolean.number(),
+            wanted.number(),
+            fraction.number(),
+            none.number(),
+        ],
+    );
+    let every_lane = module.name();
+    module.add(
+        opcodes::COMPOSITE_CONSTRUCT,
+        &[
+            named.four_bools.number(),
+            every_lane.number(),
+            wanted.number(),
+            wanted.number(),
+            wanted.number(),
+            wanted.number(),
+        ],
+    );
+    let chosen = module.name();
+    module.add(
+        opcodes::SELECT,
+        &[
+            named.four.number(),
+            chosen.number(),
+            every_lane.number(),
+            held.number(),
+            value,
+        ],
+    );
+    chosen.number()
 }

@@ -12,8 +12,8 @@
 use crate::Kind;
 use crate::bindings::{what_a_fetch_reads, what_a_shader_is_handed, what_a_shader_looks_at};
 use crate::constants::{
-    DRAWN_WHATEVER_IT_IS, NO_REGISTER, REGISTERS, SAID_WHEN_BUILT, WHAT_IT_IS_AGAINST,
-    WHERE_THE_PIXEL_GOES, WHICH_TEST,
+    DRAWN_WHATEVER_IT_IS, KEPT_AS_A_FRACTION, NO_REGISTER, REGISTERS, SAID_WHEN_BUILT,
+    WHAT_IT_IS_AGAINST, WHERE_THE_PIXEL_GOES, WHICH_TEST,
 };
 use crate::edges::{
     Edges, Said, Standing, WhereThePixelIs, the_values, what_a_shader_says,
@@ -69,6 +69,9 @@ pub(crate) struct Named {
     /// The test a title sets on how solid a place has to be to be drawn at all,
     /// named for a pixel shader only: which test it is, and what it is against.
     pub(crate) cutoff: Option<(crate::spirv::Name, crate::spirv::Name)>,
+    /// Whether what is drawn into keeps a colour as a fraction of the whole,
+    /// named for a pixel shader only.
+    pub(crate) fraction: Option<crate::spirv::Name>,
 }
 
 /// Says what a module can do, which kind of shader it is, where what it
@@ -304,6 +307,16 @@ pub(crate) fn preamble(
         Kind::Vertex => None,
     };
 
+    /* Whether what is drawn into keeps a colour as a fraction of the whole,
+     * which the hardware holds what a shader puts out to and a host does not
+     * where it draws into somewhere that keeps more than that. */
+    let fraction = matches!(kind, Kind::Pixel).then(|| {
+        let one = module.name();
+        module.add(opcodes::SPEC_CONSTANT, &[count.number(), one.number(), 0]);
+        module.annotate(71, &[one.number(), SAID_WHEN_BUILT, KEPT_AS_A_FRACTION]);
+        one
+    });
+
     /* Which register a title asked for where the pixel being drawn is, which
      * is the hardware's to say rather than the shader's and so is settled when
      * a pair of shaders is built. */
@@ -426,6 +439,7 @@ pub(crate) fn preamble(
         numbers,
         looked_at,
         cutoff,
+        fraction,
         a_byte,
         times_round,
         no_number,

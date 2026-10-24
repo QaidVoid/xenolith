@@ -18,6 +18,7 @@ pub(crate) const SAID_WHEN_BUILT: u32 = 1;
 pub(crate) const WHICH_TEST: u32 = 0;
 pub(crate) const WHAT_IT_IS_AGAINST: u32 = 1;
 pub(crate) const WHERE_THE_PIXEL_GOES: u32 = 2;
+pub(crate) const KEPT_AS_A_FRACTION: u32 = 3;
 
 /// What the register a pixel's position goes into is settled as where a title
 /// asks for it in none.

@@ -307,6 +307,16 @@ static int open_something_to_draw_with(void) {
 #define XENOLITH_GRID_ACROSS 2560u
 #define XENOLITH_GRID_DOWN 1440u
 
+/* What the surface keeps each colour as, and how many bytes that is.
+ *
+ * Floats rather than bytes, because a title draws into places that keep more
+ * than a fraction of the whole: it works out how bright a scene is as a
+ * logarithm, which is below nought for anything dim, and kept as a byte that
+ * comes back as nought, which shows the whole scene white. A place that does
+ * keep a fraction has what is drawn held to one by the shader instead. */
+#define XENOLITH_SURFACE_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
+#define XENOLITH_SURFACE_BYTES 8u
+
 /* The part of that surface a title actually drew its last frame into, at the
  * top left. A title that draws smaller than the display, as one rendering at
  * 640 by 480 does, fills only a corner of the surface; showing the whole
@@ -458,7 +468,7 @@ static int make_somewhere_to_draw(void) {
     VkImageCreateInfo wanted = {0};
     wanted.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     wanted.imageType = VK_IMAGE_TYPE_2D;
-    wanted.format = VK_FORMAT_R8G8B8A8_UNORM;
+    wanted.format = XENOLITH_SURFACE_FORMAT;
     wanted.extent.width = XENOLITH_GRID_ACROSS;
     wanted.extent.height = XENOLITH_GRID_DOWN;
     wanted.extent.depth = 1;
@@ -494,7 +504,7 @@ static int make_somewhere_to_draw(void) {
 
     VkBufferCreateInfo through = {0};
     through.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    through.size = (VkDeviceSize)XENOLITH_GRID_ACROSS * XENOLITH_GRID_DOWN * 4;
+    through.size = (VkDeviceSize)XENOLITH_GRID_ACROSS * XENOLITH_GRID_DOWN * XENOLITH_SURFACE_BYTES;
     /* Written into when a frame is read back, and read out of when the frame a
      * title asked to have shown is put back where a frame is shown from. */
     through.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -1305,7 +1315,7 @@ static int worth_mixing(uint32_t blending) {
  * own again, which costs more than the drawing does. So it is kept by what it
  * adds up to rather than looked through from the start. */
 #define XENOLITH_PIPELINES 4096u
-#define XENOLITH_PIPELINE_SAID 9u
+#define XENOLITH_PIPELINE_SAID 10u
 static struct {
     uint32_t said[XENOLITH_PIPELINE_SAID];
     VkPipeline pipeline;
@@ -1410,7 +1420,7 @@ static int somewhere_to_put_a_place_aside(unsigned which) {
     VkImageCreateInfo wanted = {0};
     wanted.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     wanted.imageType = VK_IMAGE_TYPE_2D;
-    wanted.format = VK_FORMAT_R8G8B8A8_UNORM;
+    wanted.format = XENOLITH_SURFACE_FORMAT;
     wanted.extent.width = XENOLITH_GRID_ACROSS;
     wanted.extent.height = XENOLITH_GRID_DOWN;
     wanted.extent.depth = 1;
@@ -1550,7 +1560,7 @@ static int make_what_a_frame_goes_through(void) {
 
     VkAttachmentDescription both[2] = {{0}, {0}};
     VkAttachmentDescription *colour = &both[0];
-    colour->format = VK_FORMAT_R8G8B8A8_UNORM;
+    colour->format = XENOLITH_SURFACE_FORMAT;
     colour->samples = VK_SAMPLE_COUNT_1_BIT;
     colour->loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     colour->storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1621,7 +1631,7 @@ static int make_what_a_frame_goes_through(void) {
     seeing.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     seeing.image = surface.image;
     seeing.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    seeing.format = VK_FORMAT_R8G8B8A8_UNORM;
+    seeing.format = XENOLITH_SURFACE_FORMAT;
     seeing.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     seeing.subresourceRange.levelCount = 1;
     seeing.subresourceRange.layerCount = 1;
@@ -2322,9 +2332,15 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
                                uint32_t cut_off, uint32_t cut_off_at, uint32_t vertex_sum,
                                const uint32_t *vertex, uint32_t vertex_length, uint32_t pixel_sum,
                                const uint32_t *pixel, uint32_t pixel_length, uint32_t kind) {
-    const uint32_t built_for[XENOLITH_PIPELINE_SAID] = {vertex_sum, pixel_sum, kind,
-                                                        blending, written, how_far,
-                                                        cut_off, cut_off_at, pixel_goes_into};
+    /* The ways a place keeps a colour that hold it to between nought and
+     * one, by the console's numbering: four bytes, the same as seen by eye, and
+     * the two of ten bits read either way. */
+    uint32_t colour_kept = (drawing_into_shape >> 18) & 0xfu;
+    uint32_t kept_as_a_fraction =
+        colour_kept == 0u || colour_kept == 1u || colour_kept == 2u || colour_kept == 10u;
+    const uint32_t built_for[XENOLITH_PIPELINE_SAID] = {
+        vertex_sum, pixel_sum,  kind,           blending,          written,
+        how_far,    cut_off,    cut_off_at,     pixel_goes_into,   kept_as_a_fraction};
     uint32_t kept_at = where_a_pipeline_is_kept(built_for);
     if (kept_at < XENOLITH_PIPELINES && built[kept_at].taken) {
         return built[kept_at].pipeline;
@@ -2354,17 +2370,18 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
      * was written to make but not told the terms of. Settling it here rather
      * than when the shader was read is what lets one reading serve every test,
      * and a driver folds the test away where it draws everything. */
-    /* Beside it, which register the shader finds where its pixel is in. */
-    uint32_t the_test[3] = {cut_off, cut_off_at, pixel_goes_into};
-    VkSpecializationMapEntry each_part[3] = {{0}, {0}, {0}};
-    for (uint32_t one = 0; one < 3u; one++) {
+    /* Beside it, which register the shader finds where its pixel is in, and
+     * whether what it puts out is held to a fraction of the whole. */
+    uint32_t the_test[4] = {cut_off, cut_off_at, pixel_goes_into, kept_as_a_fraction};
+    VkSpecializationMapEntry each_part[4] = {{0}, {0}, {0}, {0}};
+    for (uint32_t one = 0; one < 4u; one++) {
         each_part[one].constantID = one;
         each_part[one].offset = one * (uint32_t)sizeof the_test[0];
         each_part[one].size = sizeof the_test[0];
     }
 
     VkSpecializationInfo settled = {0};
-    settled.mapEntryCount = 3;
+    settled.mapEntryCount = 4;
     settled.pMapEntries = each_part;
     settled.dataSize = sizeof the_test;
     settled.pData = the_test;
@@ -4477,6 +4494,39 @@ void xenolith_look_at_nothing(uint32_t slot) {
     }
 }
 
+/* One of the surface's half floats as a whole one. */
+static float a_half(const unsigned char *at) {
+    uint16_t half;
+    memcpy(&half, at, sizeof half);
+    uint32_t sign = (uint32_t)(half >> 15) << 31;
+    uint32_t exponent = (half >> 10) & 0x1fu;
+    uint32_t fraction = half & 0x3ffu;
+    uint32_t word;
+    if (exponent == 0) {
+        float small = ldexpf((float)fraction, -24);
+        return sign != 0 ? -small : small;
+    }
+    if (exponent == 0x1fu) {
+        word = sign | 0x7f800000u | (fraction << 13);
+    } else {
+        word = sign | ((exponent + 112u) << 23) | (fraction << 13);
+    }
+    float whole;
+    memcpy(&whole, &word, sizeof whole);
+    return whole;
+}
+
+/* A colour's part as a byte, held between nought and one first. */
+static uint32_t a_part_as_a_byte(float part) {
+    if (!(part > 0.0f)) {
+        return 0u;
+    }
+    if (part >= 1.0f) {
+        return 255u;
+    }
+    return (uint32_t)(part * 255.0f + 0.5f);
+}
+
 /* Turns how far away a thing is into the console's small float, four bits of
  * exponent over twenty of mantissa, which is the other way it keeps one. */
 static uint32_t a_short_float_from_how_far(float away) {
@@ -4650,6 +4700,7 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
      * rounded up to the two and thirty a square's place is worked out in. */
     uint32_t squares_a_row = ((copy->pitch + 31u) & ~31u) / XENOLITH_A_SQUARE_ACROSS;
     uint32_t samples = across_by * down_by;
+    size_t sample_bytes = copy->from_how_far ? 4u : XENOLITH_SURFACE_BYTES;
 
     work_out_a_square();
 
@@ -4660,11 +4711,11 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
         const uint32_t *in_the_square =
             &where_in_a_square[(row % XENOLITH_A_SQUARE_ACROSS) * XENOLITH_A_SQUARE_ACROSS];
         const unsigned char *first_row =
-            from + (size_t)(row - copy->top) * down_by * grid_across * 4u;
+            from + (size_t)(row - copy->top) * down_by * grid_across * sample_bytes;
 
         for (uint32_t at = copy->left; at < right; at++) {
             const unsigned char *one_sample =
-                first_row + (size_t)(at - copy->left) * across_by * 4u;
+                first_row + (size_t)(at - copy->left) * across_by * sample_bytes;
             /* A place holding one float rather than four colours takes the
              * brightness on its own, which is what a title puts in such a
              * place: it works out how bright the whole scene came out by
@@ -4693,22 +4744,22 @@ int xenolith_hand_back_what_was_drawn(uint8_t *base, const struct xenolith_copy 
                 }
                 colour = held << 8;
             } else {
-                uint32_t sum[4] = {0, 0, 0, 0};
+                float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 for (uint32_t down_in = 0; down_in < down_by; down_in++) {
                     const unsigned char *sample =
-                        one_sample + (size_t)down_in * grid_across * 4u;
+                        one_sample + (size_t)down_in * grid_across * sample_bytes;
                     for (uint32_t across_in = 0; across_in < across_by; across_in++) {
                         for (uint32_t part = 0; part < 4u; part++) {
-                            sum[part] += sample[across_in * 4u + part];
+                            sum[part] += a_half(sample + across_in * sample_bytes + part * 2u);
                         }
                     }
                 }
                 uint32_t part_of[4];
                 for (uint32_t part = 0; part < 4u; part++) {
-                    part_of[part] = (sum[part] + samples / 2u) / samples;
+                    part_of[part] = a_part_as_a_byte(sum[part] / (float)samples);
                 }
                 if (copy->as_one_float) {
-                    float bright = (float)part_of[0] / 255.0f;
+                    float bright = sum[0] / (float)samples;
                     memcpy(&colour, &bright, sizeof colour);
                 } else if (copy->red_and_blue_swapped) {
                     colour = (part_of[3] << 24) | (part_of[0] << 16) | (part_of[1] << 8)
@@ -4736,7 +4787,10 @@ int xenolith_keep_a_frame(const char *where) {
 
     /* Fetched first. Nothing else puts what is shown where a host can read it
      * any more, and this is only ever asked for by a run that says to write
-     * frames out, so what it costs does not matter. */
+     * frames out, so what it costs does not matter. A copy kept to be shown
+     * holds bytes and the surface holds half floats. */
+    VkImage shown = what_was_shown != VK_NULL_HANDLE ? what_was_shown : surface.image;
+    int in_halves = shown == surface.image;
     {
         VkCommandBuffer one = begin_one_lot_of_commands();
         if (one != VK_NULL_HANDLE) {
@@ -4746,11 +4800,8 @@ int xenolith_keep_a_frame(const char *where) {
             out.imageExtent.width = XENOLITH_ACROSS;
             out.imageExtent.height = XENOLITH_DOWN;
             out.imageExtent.depth = 1;
-            vkCmdCopyImageToBuffer(one,
-                                   what_was_shown != VK_NULL_HANDLE ? what_was_shown
-                                                                    : surface.image,
-                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, surface.readable, 1,
-                                   &out);
+            vkCmdCopyImageToBuffer(one, shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   surface.readable, 1, &out);
             finish_one_lot_of_commands(one);
         }
     }
@@ -4775,7 +4826,15 @@ int xenolith_keep_a_frame(const char *where) {
     fprintf(file, "P6\n%u %u\n255\n", XENOLITH_ACROSS, XENOLITH_DOWN);
     const unsigned char *from = pixels;
     for (uint32_t at = 0; at < XENOLITH_ACROSS * XENOLITH_DOWN; at++) {
-        fwrite(from + (size_t)at * 4, 1, 3, file);
+        if (!in_halves) {
+            fwrite(from + (size_t)at * 4, 1, 3, file);
+            continue;
+        }
+        for (uint32_t part = 0; part < 3u; part++) {
+            fputc((int)a_part_as_a_byte(
+                      a_half(from + (size_t)at * XENOLITH_SURFACE_BYTES + part * 2u)),
+                  file);
+        }
     }
 
     fclose(file);
