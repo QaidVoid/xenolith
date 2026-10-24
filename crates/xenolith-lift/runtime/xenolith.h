@@ -801,8 +801,9 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
 void xenolith_look_at_nothing(uint32_t slot);
 
 /* Says what shape of place a title is about to draw into, so that what each of
- * them holds is kept apart from what the others hold. */
-void xenolith_drawing_into(uint32_t shaped);
+ * them holds is kept apart from what the others hold, and how many samples
+ * across and down each of its pixels is. */
+void xenolith_drawing_into(uint32_t shaped, uint32_t across, uint32_t down);
 
 /* Says which register the next draw's pixel shader finds where its pixel is
  * in, which a title asks the hardware for rather than working out, or all ones

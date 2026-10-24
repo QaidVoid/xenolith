@@ -425,7 +425,17 @@ static void start_the_frame_in_its_place(const uint8_t *base) {
         finish_the_frame();
         shaped_as = shaped;
     }
-    xenolith_drawing_into(shaped);
+    /* The place is how many samples wide a row is rather than how many pixels,
+     * because that is what the memory beside the hardware holds. A pass of a
+     * quarter the size with four samples to a pixel is the same samples as one
+     * of the whole size with one, and a title draws into the one and copies
+     * out of the other: it lays a scene down at the whole size, draws its
+     * smoke and glows over it at the quarter, and copies the whole size out.
+     * Told apart, the glows went over whatever the quarter last held, and the
+     * copy was of that. */
+    xenolith_drawing_into(((drawn_laid_out & 0x3fffu) * samples_across)
+                              | ((drawn_onto & 0xf0000u) << 2),
+                          samples_across, samples_down);
     start_the_frame();
 }
 
@@ -1582,6 +1592,11 @@ static void copy_what_was_drawn(uint8_t *base) {
         (a_register(base, XENOLITH_HOW_FAR_IS_KEPT) & XENOLITH_KEPT_AS_A_FLOAT) != 0;
     what_a_copy_takes(base, &copy);
 
+    /* Copied out of the place the registers name, with its samples laid out
+     * the way they say, which is not always how the last draw left it: a title
+     * draws its glows with four samples to a pixel and copies the same memory
+     * out with one. */
+    start_the_frame_in_its_place(base);
     finish_the_frame();
     if (copy.into != 0 && copy.pitch != 0 && copy.height != 0) {
         xenolith_hand_back_what_was_drawn(base, &copy);

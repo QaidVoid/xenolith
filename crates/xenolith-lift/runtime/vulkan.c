@@ -382,6 +382,7 @@ static struct {
     int taken;
     int holds_something;
     unsigned long long when;
+    uint32_t laid;
 } put_aside[XENOLITH_PLACES_DRAWN_INTO];
 static unsigned long long places_turned_to;
 
@@ -389,11 +390,23 @@ static unsigned long long places_turned_to;
 static uint32_t drawing_into_shape;
 static unsigned drawing_into_which = XENOLITH_PLACES_DRAWN_INTO;
 
+/* How the samples of a pixel are laid out: two bits each for how many across
+ * and how many down. What the surface holds and what the place for how far away
+ * things are holds are each laid out the way the draws that made them were,
+ * and the next draw wants its own. */
+#define XENOLITH_LAID(across, down) ((across) | ((down) << 2))
+static uint32_t drawing_laid = XENOLITH_LAID(1u, 1u);
+static uint32_t surface_laid = XENOLITH_LAID(1u, 1u);
+static uint32_t how_far_laid = XENOLITH_LAID(1u, 1u);
+
 /* Says what shape of place a title is about to draw into.
  *
  * Told rather than read, because the registers naming it live in the guest's
  * memory and nothing in this file reaches that. */
-void xenolith_drawing_into(uint32_t shaped) { drawing_into_shape = shaped; }
+void xenolith_drawing_into(uint32_t shaped, uint32_t across, uint32_t down) {
+    drawing_into_shape = shaped;
+    drawing_laid = XENOLITH_LAID(across, down);
+}
 
 /* One lot of the commands that are not a frame at a time, because they all come
  * out of the one pool kept for them. */
@@ -1389,7 +1402,8 @@ static int make_somewhere_to_keep_how_far(void) {
     wanted.tiling = VK_IMAGE_TILING_OPTIMAL;
     /* Drawn into, and set to the far end of the view before a frame, which is
      * a transfer into it and has to be asked for separately. */
-    wanted.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    wanted.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                   | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     wanted.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     if (vkCreateImage(drawing.device, &wanted, NULL, &through.how_far) != VK_SUCCESS) {
@@ -1532,9 +1546,11 @@ static int keep_the_place_and_take_up_another(void) {
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         put_aside[drawing_into_which].holds_something = 1;
+        put_aside[drawing_into_which].laid = surface_laid;
     }
 
     int had_something = put_aside[wanted].holds_something;
+    surface_laid = had_something ? put_aside[wanted].laid : drawing_laid;
     if (had_something) {
         VkImageMemoryBarrier onto = {0};
         onto.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2759,6 +2775,155 @@ int xenolith_hand_over_constants(const uint8_t *from, const uint8_t *truths,
     return 1;
 }
 
+/* Somewhere to hold the surface, or how far away each place is, while the
+ * samples in it are moved round. */
+static struct {
+    VkImage image;
+    VkDeviceMemory memory;
+} moving_round[2];
+
+static VkImage somewhere_to_move_samples_round(int how_far) {
+    if (moving_round[how_far].image != VK_NULL_HANDLE) {
+        return moving_round[how_far].image;
+    }
+    VkImageCreateInfo wanted = {0};
+    wanted.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    wanted.imageType = VK_IMAGE_TYPE_2D;
+    wanted.format = how_far ? XENOLITH_HOW_FAR_FORMAT : XENOLITH_SURFACE_FORMAT;
+    wanted.extent.width = XENOLITH_GRID_ACROSS;
+    wanted.extent.height = XENOLITH_GRID_DOWN;
+    wanted.extent.depth = 1;
+    wanted.mipLevels = 1;
+    wanted.arrayLayers = 1;
+    wanted.samples = VK_SAMPLE_COUNT_1_BIT;
+    wanted.tiling = VK_IMAGE_TILING_OPTIMAL;
+    wanted.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    wanted.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage made = VK_NULL_HANDLE;
+    if (vkCreateImage(drawing.device, &wanted, NULL, &made) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    VkMemoryRequirements needs;
+    vkGetImageMemoryRequirements(drawing.device, made, &needs);
+    VkMemoryAllocateInfo asking = {0};
+    asking.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    asking.allocationSize = needs.size;
+    asking.memoryTypeIndex =
+        memory_that_suits(needs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkDeviceMemory its_own = VK_NULL_HANDLE;
+    if (vkAllocateMemory(drawing.device, &asking, NULL, &its_own) != VK_SUCCESS) {
+        vkDestroyImage(drawing.device, made, NULL);
+        return VK_NULL_HANDLE;
+    }
+    if (vkBindImageMemory(drawing.device, made, its_own, 0) != VK_SUCCESS) {
+        vkFreeMemory(drawing.device, its_own, NULL);
+        vkDestroyImage(drawing.device, made, NULL);
+        return VK_NULL_HANDLE;
+    }
+    moving_round[how_far].image = made;
+    moving_round[how_far].memory = its_own;
+    return made;
+}
+
+/* Says an image moved round is to be used next for something else. */
+static void samples_become(VkCommandBuffer on, VkImage which, VkImageAspectFlags aspect,
+                           VkImageLayout was, VkImageLayout now) {
+    VkImageMemoryBarrier turning = {0};
+    turning.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    turning.oldLayout = was;
+    turning.newLayout = now;
+    turning.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    turning.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    turning.image = which;
+    turning.subresourceRange.aspectMask = aspect;
+    turning.subresourceRange.levelCount = 1;
+    turning.subresourceRange.layerCount = 1;
+    turning.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    turning.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(on, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                         NULL, 0, NULL, 1, &turning);
+}
+
+/* How many columns and rows of samples are moved in one go. */
+#define XENOLITH_SAMPLES_MOVED ((XENOLITH_GRID_ACROSS > XENOLITH_GRID_DOWN ? XENOLITH_GRID_ACROSS \
+                                                                           : XENOLITH_GRID_DOWN) \
+                                / 2u)
+
+/* Swaps the second and third column, or row, of every four, in an image the
+ * frame being built holds for writing, and leaves it so.
+ *
+ * The console keeps the samples of a pixel drawn as more than one in a run of
+ * four with its neighbour's: the first sample of each, then the second of
+ * each. Here they are kept where they fall, a pixel's two side by side. Where
+ * a title draws into the same memory both ways, with one sample to a pixel and
+ * with more, what one way put in the second place the other reads in the third,
+ * and a title relies on it: it lays a scene down a pixel at a time already
+ * rearranged so that drawing over it with four samples to a pixel lines up.
+ * Swapping the two each time the way of drawing changes is the same in both
+ * directions. */
+static void swap_the_middle_of_every_four(VkCommandBuffer on, VkImage image, int how_far,
+                                          int across) {
+    VkImage held = somewhere_to_move_samples_round(how_far);
+    if (held == VK_NULL_HANDLE) {
+        return;
+    }
+    VkImageAspectFlags aspect = how_far ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    static VkImageCopy moves[XENOLITH_SAMPLES_MOVED];
+
+    VkImageCopy all = {0};
+    all.srcSubresource.aspectMask = aspect;
+    all.srcSubresource.layerCount = 1;
+    all.dstSubresource = all.srcSubresource;
+    all.extent.width = XENOLITH_GRID_ACROSS;
+    all.extent.height = XENOLITH_GRID_DOWN;
+    all.extent.depth = 1;
+
+    samples_become(on, image, aspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    samples_become(on, held, aspect, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdCopyImage(on, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, held,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &all);
+    samples_become(on, held, aspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    samples_become(on, image, aspect, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    uint32_t lines = across ? XENOLITH_GRID_ACROSS : XENOLITH_GRID_DOWN;
+    uint32_t count = 0;
+    for (uint32_t four = 0; four + 4u <= lines; four += 4u) {
+        for (uint32_t one = 1; one <= 2u; one++) {
+            VkImageCopy line = all;
+            uint32_t from = four + one;
+            uint32_t to = four + 3u - one;
+            if (across) {
+                line.srcOffset.x = (int32_t)from;
+                line.dstOffset.x = (int32_t)to;
+                line.extent.width = 1;
+            } else {
+                line.srcOffset.y = (int32_t)from;
+                line.dstOffset.y = (int32_t)to;
+                line.extent.height = 1;
+            }
+            moves[count++] = line;
+        }
+    }
+    vkCmdCopyImage(on, held, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, count, moves);
+}
+
+/* Lays the samples an image holds out the way the next draw wants them, from
+ * the way the draws that made it had them. */
+static void lay_the_samples_out_again(VkCommandBuffer on, VkImage image, int how_far,
+                                      uint32_t was, uint32_t now) {
+    if ((was & 3u) != (now & 3u)) {
+        swap_the_middle_of_every_four(on, image, how_far, 1);
+    }
+    if ((was >> 2) != (now >> 2)) {
+        swap_the_middle_of_every_four(on, image, how_far, 0);
+    }
+}
+
 static int xenolith_begin_a_frame_inside(void) {
     frames_begun++;
 
@@ -2832,6 +2997,10 @@ static int xenolith_begin_a_frame_inside(void) {
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cleared_to, 1,
                              &ready.subresourceRange);
     }
+    if (came_back_to_it && !wipe_the_colours) {
+        lay_the_samples_out_again(surface.commands, surface.image, 0, surface_laid, drawing_laid);
+    }
+    surface_laid = drawing_laid;
     wipe_the_colours = 0;
 
     VkImageMemoryBarrier to_draw_on = ready;
@@ -2860,6 +3029,10 @@ static int xenolith_begin_a_frame_inside(void) {
                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &as_far_as_it_goes, 1,
                                     &how_far_ready.subresourceRange);
     }
+    if (!wipe_how_far) {
+        lay_the_samples_out_again(surface.commands, through.how_far, 1, how_far_laid, drawing_laid);
+    }
+    how_far_laid = drawing_laid;
     wipe_how_far = 0;
 
     VkImageMemoryBarrier how_far_to_draw_on = how_far_ready;
@@ -5243,7 +5416,11 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
 
 void xenolith_look_at_nothing(uint32_t slot) { (void)slot; }
 
-void xenolith_drawing_into(uint32_t shaped) { (void)shaped; }
+void xenolith_drawing_into(uint32_t shaped, uint32_t across, uint32_t down) {
+    (void)shaped;
+    (void)across;
+    (void)down;
+}
 
 void xenolith_find_the_pixel_in(uint32_t which) { (void)which; }
 

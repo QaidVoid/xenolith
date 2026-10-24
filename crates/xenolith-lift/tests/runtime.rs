@@ -6194,6 +6194,94 @@ fn a_pixel_shader_finds_where_its_pixel_is() {
     }
 }
 
+/// Drawn into with one sample to a pixel and then with four, the same memory
+/// has the second and third column of every four swapped.
+///
+/// The console keeps the samples of a pixel drawn as four in a run with its
+/// neighbour's, and a title draws a scene a pixel at a time already rearranged
+/// for that before drawing over it with four samples to a pixel. The shader
+/// below colours each pixel by how far across it is, so after the change each
+/// column's colour says which column it came from. Needs a device to draw on,
+/// and returns where there is none.
+#[test]
+fn samples_drawn_one_way_are_laid_out_for_the_other() {
+    let run = (2u64 << 44) | (1u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    words.extend([
+        (1u32 << 15) | (0xf << 16) | (50 << 26),
+        0,
+        (1u32 << 24) | (1 << 31),
+    ]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    let program = a_triangle_drawn_by(
+        "{1.0f / 1280.0f, 1.0f / 720.0f, 0.0f, 0.0f}, {0.0f}, {0.0f}",
+        "xenolith_find_the_pixel_in(0u); xenolith_drawing_into(1280u, 1u, 1u);",
+    )
+    .replace(
+        "    printf(\"drawn\\n\");\n    return 0;",
+        r#"    struct xenolith_copy copy = {0};
+    copy.pitch = 1280u;
+    copy.height = 720u;
+    copy.top = 352u;
+    copy.right = 1280u;
+    copy.bottom = 384u;
+    copy.samples_across = 1u;
+    copy.samples_down = 1u;
+    copy.as_one_float = 1;
+    uint32_t before = 0x03000000u;
+    uint32_t after = 0x04000000u;
+    copy.into = before;
+    if (!xenolith_hand_back_what_was_drawn(base, &copy)) { return 8; }
+    xenolith_drawing_into(1280u, 2u, 2u);
+    if (!xenolith_begin_a_frame() || !xenolith_end_a_frame()) { return 7; }
+    copy.into = after;
+    if (!xenolith_hand_back_what_was_drawn(base, &copy)) { return 8; }
+    uint32_t sits[4];
+    for (uint32_t one = 0; one < 4u; one++) {
+        uint32_t along = 640u + one;
+        uint32_t down = 360u;
+        uint32_t far_apart = ((down >> 5) * (1280u >> 5) + (along >> 5)) << 6;
+        uint32_t near_together = (((down >> 1) & 7u) << 3) | (along & 7u);
+        uint32_t bytes = (far_apart | near_together) << 2;
+        uint32_t side = (down >> 4) & 1u;
+        uint32_t way = ((along >> 3) & 3u) ^ (((down >> 3) & 1u) << 1);
+        sits[one] = ((down & 1u) << 4) | (way << 6) | (side << 11) | (bytes & 0xfu)
+                    | (((bytes >> 4) & 1u) << 5) | (((bytes >> 5) & 7u) << 8)
+                    | ((bytes >> 8) << 12);
+    }
+    if (xenolith_load32(base, before + sits[1]) == xenolith_load32(base, before + sits[2])) {
+        fprintf(stderr, "the second and third columns were drawn the same\n");
+        return 9;
+    }
+    static const uint32_t from[4] = {0u, 2u, 1u, 3u};
+    for (uint32_t one = 0; one < 4u; one++) {
+        uint32_t got = xenolith_load32(base, after + sits[one]);
+        uint32_t wanted = xenolith_load32(base, before + sits[from[one]]);
+        if (got != wanted) {
+            fprintf(stderr, "column %u holds %#x, not column %u's %#x\n", 640u + one, got,
+                    640u + from[one], wanted);
+            return 10;
+        }
+    }
+    printf("drawn\n");
+    return 0;"#,
+    );
+    let ran = draw_with("samples_laid_out", &pixel.words, &program).expect("the draw ran");
+    if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+        return;
+    }
+    assert!(
+        String::from_utf8_lossy(&ran.stdout).contains("drawn"),
+        "the columns were not laid out for four samples"
+    );
+}
+
 /// A draw with a real pair of shaders puts something on the surface.
 ///
 /// Everything before this proves a piece works on its own: the renderer opens a

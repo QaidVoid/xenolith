@@ -429,7 +429,8 @@ something not being read.
 ## `xenolith_drawing_into`
 
 Says what shape of place a title is about to draw into, so that what each of
-them holds is kept apart from what the others hold.
+them holds is kept apart from what the others hold, and how many samples
+across and down each of its pixels is.
 
 ## `xenolith_find_the_pixel_in`
 
