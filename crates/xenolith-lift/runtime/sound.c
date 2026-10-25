@@ -56,6 +56,7 @@ typedef void *(*xenolith_pulse_new)(const char *, const char *, int, const char 
                                     const struct xenolith_pulse_format *, const void *,
                                     const struct xenolith_pulse_buffering *, int *);
 typedef int (*xenolith_pulse_write)(void *, const void *, size_t, int *);
+typedef void (*xenolith_pulse_free)(void *);
 
 static struct {
     void *library;
@@ -67,7 +68,9 @@ static struct {
     xenolith_pcm_close close;
     void *server_library;
     void *server;
+    xenolith_pulse_new server_new;
     xenolith_pulse_write server_write;
+    xenolith_pulse_free server_free;
     pthread_mutex_t handing;
     float queued[XENOLITH_QUEUED_FRAMES][XENOLITH_SAMPLES_PER_FRAME * XENOLITH_DEVICE_CHANNELS];
     unsigned reading;
@@ -80,22 +83,36 @@ static struct {
 
 static void start_the_output(void);
 
-/* Opens the desktop's sound server, where there is one to reach.
- *
- * Asked to keep about two frames' worth ahead of what is heard, so that what a
- * title mixes is heard soon after it is mixed. */
-static int open_the_sound_server(void) {
-    static const int float_little_end_first = 5;
-    static const int playback = 1;
-
+/* Reaches the desktop's sound server, once, for the ways of making, writing to
+ * and letting go of a stream. */
+static int reach_the_sound_server(void) {
+    if (output.server_library != NULL) {
+        return output.server_new != NULL && output.server_write != NULL &&
+               output.server_free != NULL;
+    }
     output.server_library = dlopen("libpulse-simple.so.0", RTLD_NOW);
     if (output.server_library == NULL) {
         return 0;
     }
-    xenolith_pulse_new make =
-        (xenolith_pulse_new)dlsym(output.server_library, "pa_simple_new");
+    output.server_new = (xenolith_pulse_new)dlsym(output.server_library, "pa_simple_new");
     output.server_write = (xenolith_pulse_write)dlsym(output.server_library, "pa_simple_write");
-    if (make == NULL || output.server_write == NULL) {
+    output.server_free = (xenolith_pulse_free)dlsym(output.server_library, "pa_simple_free");
+    return output.server_new != NULL && output.server_write != NULL &&
+           output.server_free != NULL;
+}
+
+/* Makes a stream on the desktop's sound server, asked to keep about two frames'
+ * worth ahead of what is heard, so that what a title mixes is heard soon after
+ * it is mixed.
+ *
+ * A stream is made rather than kept, because one that has failed is a dead
+ * connection and no amount of writing to it brings it back: a run mends its
+ * sound by making another where it stood. */
+static int make_the_sound_server(void) {
+    static const int float_little_end_first = 5;
+    static const int playback = 1;
+
+    if (!reach_the_sound_server()) {
         return 0;
     }
     struct xenolith_pulse_format format = {float_little_end_first, 48000u,
@@ -104,9 +121,17 @@ static int open_the_sound_server(void) {
     struct xenolith_pulse_buffering buffering = {0xffffffffu, a_frame * 8u, 0xffffffffu,
                                                  0xffffffffu, 0xffffffffu};
     int why = 0;
-    output.server = make(NULL, "xenolith", playback, NULL, "title", &format, NULL, &buffering,
-                         &why);
+    output.server = output.server_new(NULL, "xenolith", playback, NULL, "title", &format, NULL,
+                                      &buffering, &why);
     return output.server != NULL;
+}
+
+/* Lets a stream go, so that another can be made where it stood. */
+static void close_the_sound_server(void) {
+    if (output.server != NULL && output.server_free != NULL) {
+        output.server_free(output.server);
+    }
+    output.server = NULL;
 }
 
 /* Opens the host's sound, or says once why there is none.
@@ -125,7 +150,7 @@ static int open_the_output(void) {
     if (output.refused) {
         return 0;
     }
-    if (open_the_sound_server()) {
+    if (make_the_sound_server()) {
         return 1;
     }
     if (output.library == NULL) {
@@ -320,7 +345,11 @@ static uint32_t how_far_playback_has_got(void) {
     return (uint32_t)samples;
 }
 
-/* Feeds the device one frame at a time for as long as the run lasts. */
+/* Feeds the device one frame at a time for as long as the run lasts.
+ *
+ * A stream that fails is mended rather than mourned: the server's is let go
+ * and another made, the device's is recovered or closed and opened again, and
+ * a frame that cannot be written anywhere is waited out rather than spun on. */
 static void *keep_the_device_fed(void *given) {
     (void)given;
     for (;;) {
@@ -329,23 +358,39 @@ static void *keep_the_device_fed(void *given) {
 
         take_a_frame_out(frame, &quiet);
 
-        long written;
+        long written = -1;
         if (output.server != NULL) {
             int why = 0;
             written = output.server_write(output.server, frame, sizeof frame, &why) == 0
                           ? (long)XENOLITH_SAMPLES_PER_FRAME
                           : -1;
             if (written < 0) {
-                struct timespec a_frame = {0, 5333333L};
-                nanosleep(&a_frame, NULL);
+                close_the_sound_server();
+                if (make_the_sound_server()) {
+                    why = 0;
+                    written =
+                        output.server_write(output.server, frame, sizeof frame, &why) == 0
+                            ? (long)XENOLITH_SAMPLES_PER_FRAME
+                            : -1;
+                }
             }
-        } else {
+        } else if (output.device != NULL) {
             written = output.writei(output.device, frame, XENOLITH_SAMPLES_PER_FRAME);
+            if (written < 0 && output.recover(output.device, (int)written, 1) == 0) {
+                written = output.writei(output.device, frame, XENOLITH_SAMPLES_PER_FRAME);
+            }
+            if (written < 0) {
+                output.close(output.device);
+                output.device = NULL;
+                open_the_output();
+                if (output.device != NULL) {
+                    written = output.writei(output.device, frame, XENOLITH_SAMPLES_PER_FRAME);
+                }
+            }
         }
-        if (written == -32) {
-            /* The device ran dry, which the library calls EPIPE. */
-            output.recover(output.device, -32, 1);
-            written = output.writei(output.device, frame, XENOLITH_SAMPLES_PER_FRAME);
+        if (written < 0) {
+            struct timespec a_frame = {0, 5333333L};
+            nanosleep(&a_frame, NULL);
         }
         if (written > 0) {
             pthread_mutex_lock(&output.handing);
@@ -778,8 +823,16 @@ static uint32_t go_round_a_loop(uint8_t *base, uint32_t context, struct compress
 /* Moves sound from one context's input into its ring for as long as there is
  * input to read and room to put what comes of it. */
 static void decode_a_context(uint8_t *base, uint32_t context, struct compressed_sound *sound) {
+    /* A context that says no ring, or a write past its end, is one the title
+     * has not armed yet; there is nothing to do for it. */
+    uint32_t shape = xenolith_load32(base, context);
+    uint32_t ring_blocks = (shape >> 22) & 31u;
+    uint32_t write_at = (shape >> 27) & 31u;
+    if (ring_blocks == 0 || write_at >= ring_blocks) {
+        return;
+    }
     uint32_t second = xenolith_load32(base, context + 4u);
-    if ((second >> 31) == 0) {
+    if ((second & 0x80000000u) == 0) {
         return;
     }
     static const uint32_t rates[4] = {24000u, 32000u, 44100u, 48000u};
@@ -808,28 +861,36 @@ static void decode_a_context(uint8_t *base, uint32_t context, struct compressed_
         }
     }
 
+    uint32_t reading = xenolith_load32(base, context + 36u) & 31u;
+    if (reading >= ring_blocks) {
+        return;
+    }
+    uint32_t room = (reading + ring_blocks - write_at) % ring_blocks;
+    if (room == 0) {
+        room = ring_blocks;
+    }
     for (;;) {
         uint32_t first = xenolith_load32(base, context);
         uint32_t blocks = (first >> 22) & 31u;
         uint32_t writing = (first >> 27) & 31u;
-        uint32_t reading = xenolith_load32(base, context + 36u) & 31u;
         uint32_t ring = xenolith_load32(base, context + 28u) & (XENOLITH_PHYSICAL - 1u);
         if (blocks == 0 || writing >= blocks) {
             return;
         }
-        /* A ring a title has emptied reads the same as one never written, so
-         * one block is always left between the two to tell them apart. */
-        uint32_t room = (reading + blocks - writing - 1u) % blocks;
-        if (room == 0) {
-            return;
-        }
-
+        /* Output-valid distinguishes a full ring from an empty one when
+         * the offsets meet. Filling the offered space hands it back to the
+         * title, which advances the reader and rearms the output. */
         if (sound->waiting_bytes >= XENOLITH_BLOCK_BYTES) {
             memcpy(base + ring + writing * XENOLITH_BLOCK_BYTES, sound->waiting,
                    XENOLITH_BLOCK_BYTES);
             sound->waiting_bytes -= XENOLITH_BLOCK_BYTES;
             memmove(sound->waiting, sound->waiting + XENOLITH_BLOCK_BYTES, sound->waiting_bytes);
-            change_a_context_word(base, context, 0x07ffffffu, ((writing + 1u) % blocks) << 27);
+            change_a_context_word(base, context, 0x07ffffffu,
+                                  ((writing + 1u) % blocks) << 27);
+            if (--room == 0) {
+                change_a_context_word(base, context + 4u, 0x7fffffffu, 0);
+                return;
+            }
             continue;
         }
 

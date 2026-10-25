@@ -95,6 +95,7 @@ static const struct {
     {0xe0000000u, 0x1000u},
 };
 
+static void initialize_sound_contexts(uint8_t *base);
 static void say_what_was_read_in_total(void);
 static void say_what_was_read_and_stop(int which);
 static void say_a_report(const char *format, ...);
@@ -172,6 +173,7 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
         fprintf(stderr, "xenolith: %s held nothing\n", image);
         return NULL;
     }
+    initialize_sound_contexts(base);
     return (uint8_t *)base;
 }
 
@@ -510,13 +512,23 @@ static uint32_t sound_contexts;
 static uint8_t sound_context_taken[XENOLITH_SOUND_CONTEXTS];
 static pthread_mutex_t sound_contexts_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Hands out a context cleared to nothing, or nought where every one is taken. */
-static uint32_t take_a_sound_context(uint8_t *base) {
-    uint32_t context = 0;
+/* Publishes the physical context table before a title caches its address to
+ * turn context pointers into hardware IDs. The decoder's registers are little
+ * endian, unlike the context words themselves. */
+static void initialize_sound_contexts(uint8_t *base) {
     pthread_mutex_lock(&sound_contexts_lock);
     if (sound_contexts == 0) {
         sound_contexts = take_guest_memory(XENOLITH_SOUND_CONTEXTS * XENOLITH_SOUND_CONTEXT, 0);
     }
+    xenolith_store32(base, 0x7fea1800u, __builtin_bswap32(sound_contexts));
+    pthread_mutex_unlock(&sound_contexts_lock);
+}
+
+/* Hands out a context cleared to nothing, or nought where every one is taken. */
+static uint32_t take_a_sound_context(uint8_t *base) {
+    initialize_sound_contexts(base);
+    uint32_t context = 0;
+    pthread_mutex_lock(&sound_contexts_lock);
     for (uint32_t at = 0; sound_contexts != 0 && at < XENOLITH_SOUND_CONTEXTS; at++) {
         if (!sound_context_taken[at]) {
             sound_context_taken[at] = 1;
@@ -1167,34 +1179,32 @@ static uint32_t wait_for_any(struct object **waited, uint32_t count,
     }
 }
 
-/* The block a title reaches through r13, and the count of ticks inside it.
+/* The processor record reached through r13 names the current thread and CPU.
+ * A title uses the thread pointer to distinguish its audio worker from callers
+ * submitting work. Sharing that pointer makes unrelated callers look like the
+ * worker, bypassing the title's synchronization.
  *
- * The console gives every hardware thread a block holding what the kernel keeps
- * about it, and a title reads it for two things this runtime has to answer: how
- * many ticks have passed, and which processor this is.
+ * The tick field advances a thousand times a second. Its millisecond unit is an
+ * assumption, reported when the clock starts. Each thread sees the same clock
+ * through its own record, without sharing its identity.
  *
- * The count advances a thousand times a second. That the unit is a millisecond
- * is an assumption: what is checkable is that a title compares it against five
- * thousand and treats that as long enough to give up on a frame, and five
- * seconds is a length that fits. It is reported as an assumption rather than
- * left implied.
- *
- * Which processor this is matters for a reason worth writing down. A title's
- * vector code picks a slot in the block by that number and steps a counter
- * there. Left at nothing every thread reads processor nought, so they all take
- * the same slot and the same counter, and two threads stepping it at once carry
- * it past the end of the block. What that looks like is memory elsewhere in the
- * image turning into vectors. So each thread is given one of the six in turn. A
- * console runs many software threads on those six and only one holds a hardware
- * thread at a time; here they really are concurrent, so handing them out in
- * turn makes two threads sharing a block rare rather than impossible.
+ * Unpinned threads are assigned one of six processor numbers in turn. A title
+ * uses that number to select per-processor vector state, so telling every
+ * thread it is processor zero races that state immediately.
  */
-#define XENOLITH_PROCESSOR_SHARED 256u
+#define XENOLITH_PROCESSOR_THREAD 256u
+#define XENOLITH_THREAD_IN_PROCESSOR_BLOCK 0x1000u
 #define XENOLITH_PROCESSOR_TICKS 88u
 #define XENOLITH_PROCESSOR_NUMBER 268u
 #define XENOLITH_PROCESSORS 6u
 
-/* The block holding the tick count, shared by every processor's block. */
+/* The clock is shared, but the current-thread pointer is an identity and
+ * must be distinct. Each processor block reserves room for its thread record. */
+struct processor_block {
+    uint32_t at;
+    struct processor_block *next;
+};
+static struct processor_block *processor_blocks;
 static uint32_t shared_processor_state;
 static pthread_mutex_t starting_the_count = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1243,6 +1253,14 @@ static void *count_the_ticks(void *given) {
                              - (uint64_t)(began.tv_nsec / 1000000);
             xenolith_store32(base, shared_processor_state + XENOLITH_PROCESSOR_TICKS,
                              (uint32_t)since);
+            pthread_mutex_lock(&starting_the_count);
+            for (struct processor_block *block = processor_blocks; block != NULL;
+                 block = block->next) {
+                xenolith_store32(base, block->at + XENOLITH_THREAD_IN_PROCESSOR_BLOCK +
+                                          XENOLITH_PROCESSOR_TICKS,
+                                 (uint32_t)since);
+            }
+            pthread_mutex_unlock(&starting_the_count);
             if (time_stamp_bundle != 0) {
                 struct timespec running = {now.tv_sec - began.tv_sec, now.tv_nsec - began.tv_nsec};
                 if (running.tv_nsec < 0) {
@@ -1276,8 +1294,13 @@ static void put_the_thread_on_its_processor(struct object *thread) {
                     (uint8_t)__builtin_ctz(wanted));
 }
 
-/* Hands out a block for a guest thread, all of them sharing the one count. */
+/* Hands out a processor block and a distinct current-thread record. */
 static uint32_t take_processor_block(uint8_t *base) {
+    struct processor_block *record = malloc(sizeof *record);
+    if (record == NULL) {
+        say_a_report("no room for another processor block");
+        return 0;
+    }
     pthread_mutex_lock(&starting_the_count);
     if (shared_processor_state == 0) {
         assumed("the kernel's tick counts a millisecond",
@@ -1295,10 +1318,20 @@ static uint32_t take_processor_block(uint8_t *base) {
     static uint32_t processors_handed_out;
 
     uint32_t block = take_guest_memory(XENOLITH_HEAP_GRAIN, XENOLITH_HEAP_GRAIN);
+    if (block == 0) {
+        free(record);
+        return 0;
+    }
     uint32_t which = __atomic_fetch_add(&processors_handed_out, 1u, __ATOMIC_RELAXED);
-    xenolith_store32(base, block + XENOLITH_PROCESSOR_SHARED, shared_processor_state);
+    xenolith_store32(base, block + XENOLITH_PROCESSOR_THREAD,
+                     block + XENOLITH_THREAD_IN_PROCESSOR_BLOCK);
     xenolith_store8(base, block + XENOLITH_PROCESSOR_NUMBER,
                     (uint8_t)(which % XENOLITH_PROCESSORS));
+    record->at = block;
+    pthread_mutex_lock(&starting_the_count);
+    record->next = processor_blocks;
+    processor_blocks = record;
+    pthread_mutex_unlock(&starting_the_count);
     return block;
 }
 
@@ -4323,24 +4356,20 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         return 1;
     }
     case 116: {
-        /* Making a semaphore. The console keeps one in a structure the title
-         * owns, and nothing here uses that structure: what is kept is the
-         * runtime's own object, named by the handle the title hands over. So
-         * the structure is cleared and the handle stands for it.
-         *
-         * The count and the limit are what the title asked for and are not
-         * needed, because nothing here is limited: a semaphore released more
-         * times than its limit says would be a fault on the console, and
-         * counting releases is not something a title here depends on. */
+        /* Making a semaphore in a structure the title owns. The structure is
+         * written as the console lays it out, a head saying it is a semaphore
+         * of five words with the count in it, an empty wait list, and the
+         * limit, because the head is what the object is made from when the
+         * title first waits on it. Not a byte past those twenty is written:
+         * a title keeps its objects side by side, and the next one starts
+         * there. */
         uint32_t at = (uint32_t)ctx->r[3];
-        uint32_t count = (uint32_t)ctx->r[4];
-        uint32_t limit = (uint32_t)ctx->r[5];
-        (void)count;
-        (void)limit;
         if (at != 0) {
-            for (uint32_t word = 0; word < 8; word++) {
-                xenolith_store32(base, at + word * 4, 0);
-            }
+            xenolith_store32(base, at, (XENOLITH_KIND_SEMAPHORE << 24) | (5u << 8));
+            xenolith_store32(base, at + 4, (uint32_t)ctx->r[4]);
+            xenolith_store32(base, at + 8, at + 8);
+            xenolith_store32(base, at + 12, at + 8);
+            xenolith_store32(base, at + 16, (uint32_t)ctx->r[5]);
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
