@@ -651,6 +651,82 @@ int main(void) {
     }
 }
 
+/// A compressed sound goes round its loop as many times as its context says,
+/// and then carries on past the end of it.
+///
+/// A title's music says where in its buffer a piece loops from and to, and how
+/// many times, and is heard once through and then stops where nothing goes back.
+/// Needs the host's decoder, and returns where there is none.
+#[test]
+fn a_compressed_sound_goes_round_its_loop_as_often_as_it_says() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <dlfcn.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    void *decoder = dlopen("libavcodec.so.60", RTLD_NOW);
+    if (decoder == NULL) {
+        decoder = dlopen("libavcodec.so.58", RTLD_NOW);
+    }
+    if (decoder == NULL) {
+        printf("no decoder\n");
+        return 0;
+    }
+    uint8_t *base = mmap(NULL, (size_t)1 << 32, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) {
+        return 6;
+    }
+    xenolith_context ctx = {0};
+    ctx.r[3] = 64;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 548, "XMACreateContext");
+    uint32_t context = xenolith_load32(base, 64);
+    if (ctx.r[3] != 0u || context == 0) {
+        return 1;
+    }
+
+    /* Three packets, looping twice from the front of the second back from the
+     * front of the third. */
+    xenolith_store32(base, context + 20u, 0x20000u);
+    xenolith_store32(base, context + 28u, 0x30000u);
+    xenolith_store32(base, context + 8u, 32u);
+    xenolith_store32(base, context + 12u, 1u * 2048u * 8u + 32u);
+    xenolith_store32(base, context + 16u, 2u * 2048u * 8u + 32u);
+    xenolith_store32(base, context + 4u, (1u << 31) | (3u << 27));
+    xenolith_store32(base, context, 3u | (2u << 12) | (1u << 20) | (4u << 22));
+
+    for (int waited = 0; waited < 200; waited++) {
+        uint32_t first = xenolith_load32(base, context);
+        if ((first & (1u << 20)) == 0) {
+            if (((first >> 12) & 0xffu) != 0u) {
+                fprintf(stderr, "the buffer was finished with %u times round left\n",
+                        (first >> 12) & 0xffu);
+                return 2;
+            }
+            return 0;
+        }
+        struct timespec a_while = {0, 10000000L};
+        nanosleep(&a_while, NULL);
+    }
+    fprintf(stderr, "the buffer was never finished: %#x\n", xenolith_load32(base, context));
+    return 3;
+}
+"#;
+    if let Err(complaint) = runs("compressed_loop", program) {
+        panic!("a compressed sound did not go round its loop as often as it said:\n{complaint}");
+    }
+}
+
 /// A read that begins in the last bytes of the guest span lands on something.
 ///
 /// Guest addresses are four bytes wide and a read works out where it is reading

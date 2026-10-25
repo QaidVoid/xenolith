@@ -408,6 +408,7 @@ typedef int (*xenolith_av_to_context)(void *, const void *);
 typedef int (*xenolith_av_open)(void *, const void *, void **);
 typedef int (*xenolith_av_send)(void *, const void *);
 typedef int (*xenolith_av_receive)(void *, void *);
+typedef void (*xenolith_av_flush)(void *);
 
 #define XENOLITH_PARAMETERS_KIND 0u
 #define XENOLITH_PARAMETERS_EXTRA 16u
@@ -426,6 +427,11 @@ typedef int (*xenolith_av_receive)(void *, void *);
 #define XENOLITH_PACKET_BYTES 2048u
 #define XENOLITH_PACKET_HEADER_BITS 32u
 #define XENOLITH_PACKET_ROOM 64u
+
+/* How many samples a frame decodes to, and the parts a loop may begin or end
+ * part way through one at. */
+#define XENOLITH_FRAME_SAMPLES_OUT 512u
+#define XENOLITH_SUBFRAME_SAMPLES 128u
 
 /* What the ring is counted in: blocks of two hundred and fifty six bytes. */
 #define XENOLITH_BLOCK_BYTES 256u
@@ -448,6 +454,7 @@ static struct {
     xenolith_av_free frame_free;
     xenolith_av_send send;
     xenolith_av_receive receive;
+    xenolith_av_flush flush;
     const void *decoder;
     void *packet;
     void *frame;
@@ -502,12 +509,13 @@ static int reach_the_decoder(void) {
     decoding.frame_free = (xenolith_av_free)dlsym(decoding.library, "av_frame_free");
     decoding.send = (xenolith_av_send)dlsym(decoding.library, "avcodec_send_packet");
     decoding.receive = (xenolith_av_receive)dlsym(decoding.library, "avcodec_receive_frame");
+    decoding.flush = (xenolith_av_flush)dlsym(decoding.library, "avcodec_flush_buffers");
     if (decoding.find == NULL || decoding.alloc_context == NULL ||
         decoding.free_context == NULL || decoding.parameters_alloc == NULL ||
         decoding.parameters_free == NULL || decoding.to_context == NULL ||
         decoding.open == NULL || decoding.packet_alloc == NULL || decoding.packet_free == NULL ||
         decoding.frame_alloc == NULL || decoding.frame_free == NULL || decoding.send == NULL ||
-        decoding.receive == NULL) {
+        decoding.receive == NULL || decoding.flush == NULL) {
         say_a_report("compressed sound is not decoded: libavcodec is missing a way to "
                      "decode");
         return 0;
@@ -639,6 +647,48 @@ static void decode_a_packet(struct compressed_sound *sound, const uint8_t *packe
     }
 }
 
+/* Reads so many bits of a packet, the first of them the highest, from so many
+ * bits into it. */
+static uint32_t bits_of_a_packet(const uint8_t *packet, uint32_t at, uint32_t how_many) {
+    uint32_t value = 0;
+    for (uint32_t bit = at; bit < at + how_many; bit++) {
+        value = (value << 1) | ((packet[bit / 8u] >> (7u - bit % 8u)) & 1u);
+    }
+    return value;
+}
+
+/* How many of the frames that end in a packet start before a place, and how
+ * many start at it or after, the place counted in bits from the front of the
+ * packet.
+ *
+ * A packet says where the first frame to start in it begins, and each frame
+ * begins with how long it is, so the frames are walked one after another. One
+ * that runs on into the next packet ends there rather than here. */
+static void frames_ending_in_a_packet(const uint8_t *packet, uint32_t place, uint32_t *before,
+                                      uint32_t *after) {
+    static const uint32_t no_frame_starts = 0x7fffu;
+    static const uint32_t packet_bits = XENOLITH_PACKET_BYTES * 8u;
+    *before = 0;
+    *after = 0;
+    uint32_t first = bits_of_a_packet(packet, 6u, 15u);
+    if (first == no_frame_starts) {
+        return;
+    }
+    uint32_t at = first + XENOLITH_PACKET_HEADER_BITS;
+    while (at + 15u <= packet_bits) {
+        uint32_t length = bits_of_a_packet(packet, at, 15u);
+        if (length == 0 || length == no_frame_starts || at + length > packet_bits) {
+            return;
+        }
+        if (at < place) {
+            (*before)++;
+        } else {
+            (*after)++;
+        }
+        at += length;
+    }
+}
+
 /* Where the decoder has reached in a context's input, and how far it may go. */
 struct reading_a_context {
     uint32_t current;
@@ -666,6 +716,67 @@ static int find_the_input(uint8_t *base, uint32_t context, struct reading_a_cont
     reading->packets = current == 0 ? first & 0xfffu : xenolith_load32(base, context + 4u) & 0xfffu;
     reading->offset = xenolith_load32(base, context + 8u) & 0x3ffffffu;
     return 1;
+}
+
+/* Goes back to where a loop begins, where the packet just decoded holds where
+ * it ends and the context says to go round it again. Gives the packet to read
+ * next, or nought where there is no going back.
+ *
+ * Where a loop begins and ends is said as the frames it begins and ends at,
+ * counted in bits through the buffer, and as how many parts of a frame to leave
+ * off or take on at either end. What was decoded past the end is taken off what
+ * waits for the ring, the decoder starts again at the packet holding the
+ * beginning, and what that decodes before the beginning is taken off too. */
+static uint32_t go_round_a_loop(uint8_t *base, uint32_t context, struct compressed_sound *sound,
+                                const struct reading_a_context *input, uint32_t packet,
+                                uint32_t before) {
+    static const uint32_t packet_bits = XENOLITH_PACKET_BYTES * 8u;
+    static const uint32_t for_ever = 255u;
+    uint32_t first = xenolith_load32(base, context);
+    uint32_t times = (first >> 12) & 0xffu;
+    uint32_t second = xenolith_load32(base, context + 4u);
+    uint32_t begins = xenolith_load32(base, context + 12u) & 0x3ffffffu;
+    uint32_t ends = xenolith_load32(base, context + 16u) & 0x3ffffffu;
+    if (times == 0 || ends <= begins || ends / packet_bits != packet ||
+        begins / packet_bits >= input->packets) {
+        return 0;
+    }
+    uint32_t frame_bytes = XENOLITH_FRAME_SAMPLES_OUT * sound->channels * 2u;
+    uint32_t part_bytes = XENOLITH_SUBFRAME_SAMPLES * sound->channels * 2u;
+    uint32_t buffer = input->buffer & (XENOLITH_PHYSICAL - 1u);
+
+    uint32_t kept_before = 0;
+    uint32_t past_the_end = 0;
+    frames_ending_in_a_packet(base + buffer + packet * XENOLITH_PACKET_BYTES, ends % packet_bits,
+                              &kept_before, &past_the_end);
+    uint32_t taken_off = past_the_end * frame_bytes;
+    uint32_t parts_on = (second >> 14) & 7u;
+    if (past_the_end != 0 && taken_off >= parts_on * part_bytes) {
+        taken_off -= parts_on * part_bytes;
+    }
+    uint32_t decoded = sound->waiting_bytes - before;
+    sound->waiting_bytes -= taken_off < decoded ? taken_off : decoded;
+
+    uint32_t start = begins / packet_bits;
+    const uint8_t *beginning = base + buffer + start * XENOLITH_PACKET_BYTES;
+    decoding.flush(sound->decoder);
+    uint32_t from = sound->waiting_bytes;
+    decode_a_packet(sound, beginning);
+    uint32_t ahead = 0;
+    uint32_t in_the_loop = 0;
+    frames_ending_in_a_packet(beginning, begins % packet_bits, &ahead, &in_the_loop);
+    uint32_t left_off = ahead * frame_bytes + ((second >> 12) & 3u) * part_bytes;
+    uint32_t got = sound->waiting_bytes - from;
+    if (left_off > got) {
+        left_off = got;
+    }
+    memmove(sound->waiting + from, sound->waiting + from + left_off, got - left_off);
+    sound->waiting_bytes -= left_off;
+
+    if (times != for_ever) {
+        change_a_context_word(base, context, ~(0xffu << 12), (times - 1u) << 12);
+    }
+    return start + 1u + beginning[3];
 }
 
 /* Moves sound from one context's input into its ring for as long as there is
@@ -743,13 +854,16 @@ static void decode_a_context(uint8_t *base, uint32_t context, struct compressed_
             continue;
         }
         uint32_t at = (input.buffer & (XENOLITH_PHYSICAL - 1u)) + packet * XENOLITH_PACKET_BYTES;
+        uint32_t before = sound->waiting_bytes;
         decode_a_packet(sound, base + at);
         /* A sound of more than two channels is several streams whose packets
          * take turns in one buffer, a context reading one of them, and each
          * packet ends by saying how many after it belong to the others. */
         uint32_t next = packet + 1u + xenolith_load8(base, at + 3u);
+        uint32_t looped = go_round_a_loop(base, context, sound, &input, packet, before);
         change_a_context_word(base, context + 8u, 0xfc000000u,
-                              next * XENOLITH_PACKET_BYTES * 8u + XENOLITH_PACKET_HEADER_BITS);
+                              (looped != 0 ? looped : next) * XENOLITH_PACKET_BYTES * 8u +
+                                  XENOLITH_PACKET_HEADER_BITS);
     }
 }
 
