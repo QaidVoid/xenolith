@@ -1719,11 +1719,96 @@ int main(void) {
     xenolith_import(&ctx, base, "xboxkrnl.exe", 293, "RtlEnterCriticalSection");
     ctx.r[3] = xenolith_load32(base, 0x200u);
     xenolith_import(&ctx, base, "xboxkrnl.exe", 304, "RtlLeaveCriticalSection");
+
     return 0;
 }
 "#;
     if let Err(complaint) = runs("a_section_made_ready", program) {
         panic!("a section a title made ready itself could not be entered:\n{complaint}");
+    }
+}
+
+/// A thread waiting for a critical section gets in after the section is made
+/// ready again under it.
+///
+/// A title starts over the sections inside a set of its objects while another
+/// thread is in one, and the thread waiting for that one was counted before the
+/// count was started over. Left to wait to be handed it, it waits for ever,
+/// because the thread that held it no longer holds anything to hand over.
+#[test]
+fn a_thread_waiting_for_a_section_made_ready_again_gets_in() {
+    let program = r#"
+/* Asked for before anything is included, because a strict C compiler hides the
+ * threading interface otherwise. */
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+#define SECTION 0x10000u
+
+static uint8_t *memory;
+static volatile int in;
+
+static void call(xenolith_context *ctx, uint32_t ordinal, const char *name) {
+    ctx->r[3] = SECTION;
+    xenolith_import(ctx, memory, "xboxkrnl.exe", ordinal, name);
+}
+
+static void *wait_for_it(void *given) {
+    (void)given;
+    xenolith_context ctx = {0};
+    call(&ctx, 293, "RtlEnterCriticalSection");
+    in = 1;
+    call(&ctx, 304, "RtlLeaveCriticalSection");
+    return NULL;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) {
+        return 1;
+    }
+    fputc('x', made);
+    fclose(made);
+    memory = xenolith_boot(path, 0);
+    if (memory == NULL) {
+        return 2;
+    }
+    alarm(10);
+
+    xenolith_context ctx = {0};
+    call(&ctx, 303, "RtlInitializeCriticalSection");
+    call(&ctx, 293, "RtlEnterCriticalSection");
+    pthread_t waiting;
+    if (pthread_create(&waiting, NULL, wait_for_it, NULL) != 0) {
+        return 3;
+    }
+    struct timespec a_while = {0, 100000000L};
+    nanosleep(&a_while, NULL);
+    call(&ctx, 303, "RtlInitializeCriticalSection");
+    for (int waited = 0; waited < 20 && !in; waited++) {
+        nanosleep(&a_while, NULL);
+    }
+    if (!in) {
+        fprintf(stderr, "the waiting thread never got in\n");
+        return 4;
+    }
+    pthread_join(waiting, NULL);
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("a_section_made_ready_again", program) {
+        panic!("a thread waiting for a section made ready again did not get in:\n{complaint}");
     }
 }
 

@@ -694,12 +694,15 @@ static void check_executable_privilege(xenolith_context *ctx) {
     ctx->r[3] = which < 32u ? (declared_privileges >> which) & 1u : 0u;
 }
 
-/* Makes a critical section ready, as the console leaves one: nobody in it,
- * which it says by how many threads want it being one less than none. */
+/* Makes a critical section ready, as the console leaves one: a head saying it
+ * is an event that lets one waiter through, and nobody in it, which it says by
+ * how many threads want it being one less than none. */
 static void make_a_section_ready(uint8_t *base, uint32_t at) {
     for (uint32_t word = 0; word < 7; word++) {
         xenolith_store32(base, at + word * 4, 0);
     }
+    xenolith_store8(base, at, 1u);
+    xenolith_store8(base, at + 2, 4u);
     xenolith_store32(base, at + 16, 0xffffffffu);
 }
 
@@ -1549,13 +1552,25 @@ static void take_a_section(uint8_t *base, uint32_t at) {
     xenolith_store32(base, at + XENOLITH_SECTION_DEPTH, 1u);
 }
 
-/* Sleeps until the thread leaving a section hands it over. */
+/* Sleeps until the thread leaving a section hands it over.
+ *
+ * A waiter is one of those counted as wanting it, so a section that says
+ * nobody does was made ready again while this waited: a title starts over the
+ * sections inside a set of its objects while another thread is in one. Nobody
+ * is left to hand that one over, so the waiter takes it once it is seen free. */
 static void wait_to_be_handed_a_section(uint8_t *base, uint32_t at) {
     uint32_t *signalled = a_lock_word(base, at + XENOLITH_SECTION_SIGNALLED);
+    uint32_t *wanted = a_lock_word(base, at + XENOLITH_SECTION_WANTED);
     for (;;) {
         uint32_t was = __atomic_load_n(signalled, __ATOMIC_ACQUIRE);
         if (was == 0u) {
-            syscall(SYS_futex, signalled, FUTEX_WAIT, 0u, NULL, NULL, 0);
+            struct timespec a_while = {0, 50000000L};
+            syscall(SYS_futex, signalled, FUTEX_WAIT, 0u, &a_while, NULL, 0);
+            uint32_t nobody = 0xffffffffu;
+            if (__atomic_compare_exchange_n(wanted, &nobody, 0u, 0, __ATOMIC_ACQUIRE,
+                                            __ATOMIC_RELAXED)) {
+                return;
+            }
             continue;
         }
         uint32_t less = __builtin_bswap32(__builtin_bswap32(was) - 1u);
