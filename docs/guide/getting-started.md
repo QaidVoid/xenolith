@@ -1,8 +1,22 @@
 # Getting started
 
-## Building
+## What you need
 
-Nothing beyond a Rust toolchain is needed. Rust 1.85 or later.
+| need | for |
+|---|---|
+| Rust 1.85 or later | building the tool (the repository pins a toolchain in `rust-toolchain.toml`) |
+| a C compiler | building a lifted title, and most of the test suite |
+| the static key | decoding a retail title, see [Key material](/guide/keys) |
+| Vulkan and its loader | drawing |
+| X11 or Wayland | a window to show what is drawn |
+| `wayland-protocols` and `wayland-scanner` | the Wayland window |
+| PulseAudio (or PipeWire's PulseAudio server), or ALSA | sound |
+| libavcodec 58 or 60 | music and voices, which a title keeps as XMA |
+
+Everything after the C compiler is optional. A lifted title builds without
+it and reports, in one line each, what it is running without.
+
+## Building
 
 ```sh
 git clone https://github.com/QaidVoid/xenolith
@@ -10,21 +24,22 @@ cd xenolith
 cargo build --release
 ```
 
-The binary lands at `target/release/xenolith`.
+The binary is `target/release/xenolith`. Building also leaves
+`libxenolith_shader.a` beside it, which a lift copies into its output so that a
+running title can translate shaders it loads from its data files.
 
 ```sh
 cargo test
 ```
 
-The suite passes on a clean checkout with no game data present. Tests that need
-a real title read a path from the environment and skip when it is unset, so a
-green result there says less than it looks like. See
-[Environment](/reference/environment) for what to set to run them for real.
+The suite passes on a clean checkout with no game data. Tests that need a real
+title, a cross toolchain or an emulator are skipped unless their paths are set;
+see [Environment](/reference/environment).
 
 ## Looking at a container
 
-`inspect` reads the headers only, so it works on an encrypted title with no key
-to hand.
+`inspect` reads the headers only, so it works on an encrypted title without a
+key.
 
 ```sh
 xenolith inspect default.xex
@@ -57,10 +72,7 @@ default.xex
     xboxkrnl.exe      264 imports   version 2.0.3424.0 (min 2.0.2858.0)
 ```
 
-Everything past this point needs the image decoded, which for a retail title
-needs a key. That is [its own page](/guide/keys).
-
-## Reading some code
+## Reading code
 
 ```sh
 xenolith disasm default.xex --start 0x82090000 --length 64
@@ -74,7 +86,7 @@ xenolith disasm default.xex --start 0x82090000 --length 64
 0x82090010  3d608205   lis r11, -32251
 ```
 
-A word the decoder does not recognize is printed as `.long` with a question
+A word the decoder does not recognise is printed as `.long` with a question
 mark, never as a plausible guess.
 
 ## Finding the functions
@@ -83,32 +95,49 @@ mark, never as a plausible guess.
 xenolith analyze default.xex
 ```
 
-The report gives how many functions were discovered, how they were found, what
-proportion of the executable words are claimed by one, and how many indirect
-branches had their jump tables recovered. `--functions` and `--tables` list them.
+The report gives how many functions were found and how, what share of the
+executable words they claim, and how many indirect branches had their jump
+tables recovered. `--functions` and `--tables` list them.
 
-## Writing C
+## Lifting and running a title
 
 ```sh
-xenolith lift default.xex --out ./lifted --blockers
-make -C ./lifted -j8
+xenolith lift default.xex --out ./lifted
+cd ./lifted
+make -j"$(nproc)"
+./lifted
 ```
 
-`lift` writes a directory: numbered translation units, a header holding every
-declaration, the runtime interface header, and a makefile that builds them.
-
 ```
-functions               27447
-  lifted                26908  (98.036 percent)
-    import thunks         156
-  not lifted              539
-declarations            27569
-units                      88
-  largest             6015615 bytes
+functions               22006
+  lifted                22006  (100.000 percent)
+    import thunks         241
+  not lifted                0
+helper entries             57
+declarations            22063
+units                      39
+  largest             4448200 bytes
 ```
 
-`--blockers` ranks the instructions that stopped functions by how many functions
-each blocked, which is the list to work from if you want to move the number.
+The program starts the title at its recorded entry point. It reads the title's
+other files from the directory it runs in, so put the lift output beside the
+title's data (symbolic links are fine). What the title saves goes in
+`content/`.
 
-The build stops at `liblifted.a` rather than a link, because nothing implements
-the runtime the units call. That is covered in [Lifting a title](/guide/lifting).
+### Controls
+
+| key | button |
+|---|---|
+| arrow keys | the pad |
+| `z` | A |
+| `x` | B |
+| enter | start |
+
+### What a run prints
+
+A run reports on stderr, one line each, what it assumed about the console, what
+the host could not provide (no window, no sound device, no libavcodec), and a
+count of what it read from the title's GPU commands when it ends. None of those
+lines is an error in the translation.
+
+[Lifting a title](/guide/lifting) covers the output in more detail.

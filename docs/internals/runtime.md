@@ -1,156 +1,162 @@
 # The runtime
 
-The emitted C is written against `xenolith.h`, which this project ships. That
-interface is what makes a title's code run: it maps guest memory, loads the
-image, answers the kernel entry points a title asks for, and reads the commands a
-title writes for the graphics hardware.
+The emitted C is written against `xenolith.h`, and the runtime is what
+implements it. It stands in for the console: guest memory, the kernel and
+system library calls a title makes, threads and synchronisation, the GPU,
+sound, input and files. It is plain C, copied into every lift and compiled with
+the emitted code.
 
-The runtime is ordinary C, included into one translation unit by `xenolith.c`,
-and it is compiled with the emitted code rather than linked as a library.
+| file | what it holds |
+|---|---|
+| `xenolith.h` | the interface the emitted code calls, see [the reference](/reference/interface) |
+| `xenolith.c` | memory, threads, synchronisation, imports, files, and the files below |
+| `command_stream.c` | reading the GPU command ring, included by `xenolith.c` |
+| `drawing.c` | turning a draw command into a host draw, included by `xenolith.c` |
+| `sound.c` | sound output and XMA decoding, included by `xenolith.c` |
+| `vulkan.c` | the renderer and the window, built when Vulkan is present |
 
 ## Guest memory
 
-The whole four gigabyte guest address space is mapped once, read and write,
-anonymously. A guest address is an index into that mapping, so a load is a byte
-read at `base + address` and nothing else.
+The whole 4 GiB guest address space is one mapping, and a guest address is an
+offset into it. A load is a read at `base + address`. The console also reaches
+its physical memory through three mirrored ranges, so the lower 512 MiB is
+mapped again at each of them, backed by the same shared memory: a word written
+through one address is read through another.
 
-That is what makes the runtime dangerous to itself: there is no bounds check
-anywhere, because a check would cost the one thing this is measured on. The
-sanitizer run in the gate is what catches a read or write outside the mapping,
-and it is the reason that run exists.
+The console is big endian. Loads and stores go through `xenolith_load32` and
+its siblings, which assemble values from bytes in the guest's order, so the
+emitted code never depends on the host's byte order.
 
-Loads and stores go through `xenolith_load8` and its siblings, which assemble a
-value from bytes in the guest's own byte order. A `stw` is four byte stores, not
-a host store, because the host may not share the guest's order and the guest's
-memory is a byte array rather than a typed one.
+There is no bounds check on a guest access, since one would cost on every load
+and store. The sanitizer runs in the gate are what catch an access outside the
+mapping.
 
 ## Allocation
 
-Two allocators, one arena. A guest address handed out for virtual memory and one
-handed out for physical memory come from the same run of grains, and a grain is
-64 KiB.
-
-A size that cannot be rounded into a grain is refused rather than handed back as
-the nought it rounds to, which a title would take for an answer.
-
-Nothing is ever given back. Freeing an address is answered with success and the
-memory is not reused, which is written down where the memory is handed out. A
-runtime that reused it would have to know what the title still holds, and nothing
-here does.
+Virtual and physical allocations come from one arena in 64 KiB grains. A size
+that cannot be rounded into a grain is refused. Freed memory is not reused,
+because nothing here knows what a title still holds.
 
 ## Threads
 
-A guest thread is a real host thread with its own register state and stack. Each
-gets a megabyte of the guest address space for its stack, taken from the top
-downward.
+A guest thread is a host thread with its own register context and a 1 MiB
+stack in guest memory. It reaches its processor block through `r13`, as on the
+console: the block holds the processor number, the tick count and the state
+the kernel keeps per processor. Thread local slots are numbered globally and
+hold a value per thread.
 
-A thread reaches its own state through `r13`, which holds a block of its own:
-the processor number, a counter, and the shared word a title spins on. The first
-thread a title runs on needs the same block, and the boot program sets it, which
-is a thing that was missing and showed up as a title reading processor nought on
-every thread.
+## Synchronisation
 
-Waits are condition variables. A wait with a timeout is a timed wait, and a
-pulse releases every waiter.
+Kernel objects a title creates (events, semaphores, timers, threads) are host
+objects behind handles, and a wait is a condition variable wait. An object a
+title keeps in its own memory and names by address is created on first use from
+the header the title wrote.
 
-Thread-local slots are numbered across all threads. A title puts something in a
-slot on one thread and expects to read it back on that thread and nowhere else,
-so one set shared between threads gives every thread the last value written by
-any of them.
+Critical sections and spin locks are kept in the title's memory, in the
+console's own layout, so a title that lays out or reads a section itself sees
+what it expects. A free section counts its users as minus one, as on the
+console, and a thread that has to wait sleeps on a host futex in the section's
+header. A title that re-initialises a section while another thread waits on it
+does not strand that thread: a waiter that finds the section started over takes
+it.
 
 ## Imports
 
-A title reaches the operating system by calling a thunk. The thunk's first two
-words are placeholders the loader overwrites, so the lift emits a call to the
-runtime's import entry point instead, naming the library and the ordinal.
+A title reaches the console's system libraries through thunks, which the lift
+turns into calls to `xenolith_import` with the library and ordinal. The runtime
+answers the ordinals it implements and reports the ones it does not. An import
+is never silently answered with nothing.
 
-The runtime answers the ordinals it implements and reports the ones it does not.
-An import is not guessed at: answering one with nothing when it was meant to
-allocate memory or open a file is a lie the title will believe, and everything
-after it describes the answer it was given rather than the title.
+Some answers depend on how a console was set up rather than on the title: the
+video cable, display mode, region, language, signed in profile and the time
+base rate. Each is answered with what the title's startup requires and reported
+once when the run starts.
 
-What each answer rests on is stated when the run starts, if it rests on anything
-but the container. A privilege, a display setting, the video cable and the
-timebase rate are all assumptions, and each is reported once, in a line naming
-what was assumed and why it could not be recovered.
+## The GPU
 
-## The graphics command stream
+A title talks to the GPU by writing command packets into a ring buffer and
+publishing how far it has written. A runtime thread reads the ring and carries
+out the packets: register writes, shader constant loads, shader loads, draws,
+copies and the memory writes a title waits on. Packets with no visible effect
+are read for their length and counted.
 
-A title does not call the graphics hardware. It writes packets into a ring buffer
-and publishes where it has got to by storing into a mapped register. A thread in
-the runtime reads the ring, walks the packets, and carries out the ones a title
-can see the effect of.
+### Shaders
 
-A packet's length field is one less than the number of words after the header,
-which is checkable against a real buffer: the lengths land exactly on the next
-header, four packets running, with nothing left over.
+A title hands over its shaders as the console's microcode. Every shader found in
+the image is translated at lift time into SPIR-V in `shaders.c`, and looked up
+by a hash of its words. A shader the title loads from its data files instead is
+translated when it is first handed over, using the shader library copied into
+the lift. See [Reading a shader](/internals/shader).
 
-What a packet does depends on the opcode. Setting registers, loading constants
-into the shader constant block, setting up a buffer or a shader, and drawing are
-read. Anything else is read for its length and passed over, and a run says how
-many it passed over rather than pretending it drew them.
+### Vertices
 
-A packet whose effect a title can see, which is a write to an address it named,
-is carried out, because a title waits on that and never carries on without it.
+A console shader fetches its own vertices from memory by index. The runtime
+copies the memory each draw's shaders read into a per frame buffer that the
+translated shader reads, and passes where each stream begins beside the shader
+constants. A table that many draws read, such as the per object transforms of a
+city, is copied once a frame and shared by every draw that reads it.
 
-## Drawing
+Index lists are read as the title wrote them, including the console's 24 bit
+indices and its restart value. Quads are drawn as pairs of triangles.
+Rectangles, which the console describes with three corners, are finished on the
+device by a geometry shader that adds the fourth corner after the vertex shader
+has run.
 
-The renderer opens the host's device, translates a title's own shaders, and
-issues the draws the command stream asks for. It is in `vulkan.c`, and it is
-built only when the build has Vulkan.
+### Render targets and copies
 
-A draw is read out of the packet and turned into what the renderer is asked for:
-the vertex buffer, the stride, the shader pair, the viewport, the scissor, and
-the shape. The shaders are a title's own, translated from the words it handed
-over, and looked up by the sum of those words.
+The console draws into a small on chip memory and copies (resolves) results out
+to main memory, where they are used as textures or shown. The runtime keeps a
+surface for each layout a title draws into, keyed by its pitch, sample count and
+format, so that two passes sharing the same memory see each other's results. A
+copy writes the surface back into guest memory in the console's tiled layout,
+including depth in its 24 bit form, and refreshes any texture already made from
+that memory.
 
-Where the host has no way to show a frame, the run says so in one line and
-carries on drawing offscreen. That is a limit of the host and not a fault in the
-title.
+### Textures
+
+Textures are read from guest memory in the console's tiled layout and byte
+order and uploaded in a format the host takes. Compressed formats are handed to
+the device as BC1, BC2 and BC3 without decompressing.
+
+### Frames
+
+The renderer records one frame while the previous one runs on the device, with
+two sets of per frame buffers. A frame the title asks to show is presented in a
+window on X11 or Wayland. Without a window the run says so once and keeps
+drawing off screen; `XENOLITH_FRAMES` writes shown frames to disk.
 
 ## Sound
 
-A title hands over a mixed frame and expects to be told it was taken, because
-that answer is the clock it paces itself by. The runtime folds the console's six
-channels to two and plays them through the desktop's sound server, or through
-ALSA where there is none, each loaded at run time. A desktop's server holds the
-device itself, so ALSA cannot open it past one without a plugin to reach it.
+A title mixes six channels and hands over a frame of 256 samples at a time,
+paced by the runtime's answer to how far playback has got. The runtime folds
+the frames to stereo and plays them through PulseAudio (including PipeWire's
+PulseAudio server) or, failing that, ALSA. Both are loaded at run time.
 
-A host with no device is reported once and the run carries on without sound.
+Music and voices are XMA. A title fills in decoder contexts with two input
+buffers and an output ring, and the runtime decodes them with the host's
+libavcodec, loaded at run time. It follows the packets of the stream each
+context reads, honours loop points, and moves the buffer offsets and valid
+flags the way the console's decoder does. A title starts a context through
+hardware registers the runtime cannot observe, so any context with input and a
+ring to fill is decoded.
 
-Music and voices reach that mix compressed, through contexts a title fills in
-for the console's decoder: two buffers of packets to read and a ring to put the
-decoded sound in. The runtime decodes them with the host's libavcodec, loaded at
-run time, following the packets of the one stream each context reads and moving
-the offsets and the marks of a finished buffer the way the hardware would. A
-title starts a context by writing to the decoder's registers, which nothing here
-can see, so a context with a buffer to read and a ring to fill is taken as one
-the title wants decoded. A host without libavcodec is reported once and the
-title's music and voices are silent.
+A host without a sound device or without libavcodec is reported once, and the
+run continues silently.
 
 ## Input
 
-A controller is read from the desktop's own way of reading a keyboard, because a
-host without a console controller still has to give a title something. The arrow
-keys are the pad, `z` and `x` are the two face buttons, and enter is start.
-
-A run with no window can be told what is held with `XENOLITH_HOLD`, which is what
-takes a title past the screen that waits for a button.
+The keyboard stands in for a controller: the arrow keys are the pad, `z` and
+`x` are A and B, and enter is start. A run without a window can be given held
+buttons with `XENOLITH_HOLD`.
 
 ## Files
 
-A title's own files are read from beside the program, through the host's own
-file calls. A file is opened, read, written, and closed with the semantics the
-title asked for, and the mapping between a guest handle and a host one is a
-table in the runtime.
+A title's files are read from the directory the program runs in, through the
+host's file calls. Saves go under `content/`.
 
 ## Reporting
 
-A run says what it did rather than only what it did not. The graphics and sound
-reports, the assumptions, and the end-of-run count of what was read are all on
-stderr, one line each, under a lock so a line arrives whole from whichever thread
-wrote it.
-
-The trace variables in [Environment](/reference/environment) make a run report
-and carry on instead of stopping, for the cases where a list of what a title
-wanted is more useful than a stop.
+Everything a run reports goes to stderr, one line per report, written under a
+lock so lines from different threads do not interleave. The trace variables in
+[Environment](/reference/environment) make a run report and carry on where it
+would otherwise stop.

@@ -77,10 +77,8 @@ about whether its fields were read correctly. This comparison extracts the
 numbers each side printed and compares them as a sorted multiset, over every
 distinct encoding in both titles.
 
-That comparison found eight rendering bugs. It has a documented blind spot: a
-field printed as the wrong kind of thing, where the number happens to coincide,
-is invisible to it. `srawi r4, r3, r4`, which printed a shift amount as a
-register, was found by reading rather than by the comparison.
+It has a blind spot: a field printed as the wrong kind of thing, where the
+number happens to coincide, is invisible to it.
 
 The objdump comparison reads every distinct encoding in the section, with
 nothing sampled out. A cap decides which encodings matter, and the one that is

@@ -23,8 +23,8 @@ is the same for every retail title, and it has been public for well over a
 decade. It is not derived from your console, it is not tied to any particular
 game, and knowing it does not decrypt anything you do not already have.
 
-It is not shipped here because a project that distributes it is distributing a
-console's key material, and there is no need to.
+It is not shipped here, because distributing it would mean distributing a
+console's key material.
 
 ## Supplying it
 
@@ -34,14 +34,10 @@ Three sources are consulted, in order:
 2. The `XENOLITH_XEX_KEY` environment variable, as 32 hexadecimal digits.
 3. `~/.config/xenolith/xex.key`.
 
-The order is the one above and not the other way round. A caller who names a
-file has said which one they mean, and the variable is a fallback for a caller
-who said nothing, so `--key-file` wins even when the variable is set. The
-reverse was true for a while, which made the flag do nothing at all in exactly
-the case a caller was most likely to reach for it.
+An explicit `--key-file` always wins, even when the variable is set.
 
-The file form is usually what you want, since it survives across shells and does
-not end up in your history.
+The file is usually the most convenient, since it survives across shells and
+is never typed on a command line.
 
 ```sh
 mkdir -p ~/.config/xenolith

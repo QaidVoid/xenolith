@@ -53,9 +53,7 @@ branch the same way.
 Discovery and recovery are alternated to a fixed point rather than run once
 each. A recovered table names blocks that were never walked, walking them finds
 calls to functions never discovered, and those functions have tables of their
-own. Alternating raised coverage on one title from 75.8% to 88.0%, and feeding
-recovered targets back into discovery as additional entry points took it to
-95.3%.
+own.
 
 ## Register save and restore helpers
 

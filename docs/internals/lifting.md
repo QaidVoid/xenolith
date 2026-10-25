@@ -34,8 +34,8 @@ and each edge a branch to one. Where a block falls through, the fall through is
 written out explicitly, so reordering the blocks cannot change what the code
 does.
 
-Every instruction is emitted under its own disassembly. That doubles the volume
-of the output and it is the only review this code can get until it can be run.
+Every instruction is emitted under its own disassembly, so the C can be read
+against the original code.
 
 Control leaving the function:
 
@@ -59,8 +59,8 @@ says which address was reached and from where, which is the report worth having.
 
 ## The runtime interface
 
-The emitted code is written against `xenolith.h`, which this project ships and
-does not implement.
+The emitted code is written against `xenolith.h`, which
+[the runtime](/internals/runtime) implements.
 
 It declares a processor context holding the general purpose registers, the
 floating point registers, the vector registers, the condition register fields,
@@ -82,7 +82,7 @@ that comparison is made at the width of the register, which is 64 bits. Narrowin
 it to 32 would report a negative result as positive whenever the top half is not
 a sign extension of the bottom.
 
-These entry points are declared for the environment to provide:
+These entry points connect emitted code to the runtime:
 
 ```c
 void xenolith_trap(xenolith_context *ctx, uint8_t *base, uint32_t address);
@@ -94,13 +94,11 @@ uint8_t xenolith_conditional32(uint8_t *base, uint32_t address, uint32_t value);
 uint64_t xenolith_timebase(void);
 ```
 
-A trap leaves the function it was in, so what happens next is not something
-emitted code can express. A dispatch is the single place an address unknown at
-lift time becomes a function. An import is a call into what the console
-provided. A reservation goes through the runtime rather than becoming a plain
-load and store, so that a program which one day has threads has somewhere to put
-real atomicity. The time base is a counter, and what it counts at is the
-environment's decision. None of them exist.
+A trap leaves the function it was in. A dispatch is the single place an address
+unknown at lift time becomes a function. An import is a call into the console's
+system libraries. A reservation pair goes through the runtime rather than
+becoming a plain load and store, so it is atomic across guest threads. The time
+base is a counter whose rate the runtime decides.
 
 ## How a vector lane is reached
 
@@ -188,16 +186,13 @@ downstream can tell. That is the cost, and it is why this section exists.
 
 ## How this is checked
 
-**Against an emitted corpus.** 1.19 million instructions another project emitted
-for the same title, compared on which registers each one reads and writes. That
-found nine model bugs.
+**Against an emitted corpus.** Millions of instructions another project emitted
+for the same titles, compared on which registers each one reads and writes.
 
 **Against hardware.** The same encoding is executed on emulated PowerPC with
 seeded registers and scratch memory, and run through the C emitted for it, and
-the architectural state afterwards is compared. That found seven more, described
-on [the verification page](/verification/), the last of them by not finishing.
+the architectural state afterwards is compared. See
+[the model oracles](/verification/model).
 
 **That it compiles.** Every function of both titles is emitted and compiled with
-`-Wall -Wextra`, with no warnings. Compiling only a sample used to be enough
-until a function with no blocks emitted a `goto` to a label never written, which
-only appeared once everything was built.
+`-Wall -Wextra`, with no warnings.

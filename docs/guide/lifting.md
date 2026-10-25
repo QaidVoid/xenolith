@@ -1,68 +1,63 @@
 # Lifting a title
 
-`lift` is the subcommand that produces C. This page covers what it writes, what
-that output can and cannot do, and how to read the report.
+`lift` is the subcommand that produces C. This page covers what it writes, how
+to build and run the result, and how to read the report.
 
-## What lands in the output directory
+## The output
 
 ```sh
 xenolith lift default.xex --out ./lifted
 ```
 
+The output directory holds everything needed to build the title on its own:
+
 | file | what it is |
 |---|---|
-| `lifted.<first>-<last>.c` | a translation unit, named after the address range of the functions in it |
-| `lifted.h` | every function declaration, written once |
-| `xenolith.h` | the runtime interface the emitted code is written against |
-| `xenolith.c` | a runtime implementing that interface and nothing more |
+| `lifted.<first>-<last>.c` | a translation unit holding the functions in that address range |
+| `lifted.h` | every function declaration |
+| `table.c` | every lifted function, for indirect branches to resolve against |
 | `unlifted.c` | a trap for every address that could not be lifted |
-| `table.c` | every lifted function, for an indirect branch to resolve against |
-| `main.c` | boots the runtime and enters the guest |
-| `image.bin` | the decoded image, which the runtime loads |
-| `Makefile` | builds every unit and links them into a program |
+| `shaders.c` | every shader found in the image, translated to SPIR-V |
+| `main.c` | boots the runtime and enters the title |
+| `xenolith.h`, `xenolith.c` and the rest | the runtime |
+| `image.bin` | the decoded image the runtime loads |
+| `Makefile` | builds and links everything into `lifted` |
 
-A retail title emits hundreds of megabytes of C. As one file that is a
-translation unit no compiler can build in reasonable time, and a C build
-parallelizes across translation units and nowhere else, so one file also means
-one core. The output is split for that reason, at a byte budget rather than a
-function count, since function sizes span several orders of magnitude and a
-fixed count per unit would produce units whose compile times differ as widely.
+[What a lift writes](/reference/output) lists every file and the build options.
+Units a previous lift left in the same directory are removed first.
 
-A function is never split across units. The budget is checked between functions,
-so a unit ends slightly over it rather than part way through a body.
+### Why it is split
 
-```sh
-xenolith lift default.xex --out ./lifted --part-size 0x200000
-```
+A retail title emits hundreds of megabytes of C. As one file no compiler builds
+it in reasonable time, and a C build only parallelises across files. The output
+is split at a byte budget (4 MiB by default, `--part-size` to change it) rather
+than a function count, because function sizes vary by orders of magnitude. A
+function is never split across units.
 
-## Building it
+## Building and running
 
 ```sh
-make -C ./lifted -j8
+make -C ./lifted -j"$(nproc)"
+./lifted/lifted
 ```
 
-The larger of the two test titles builds in about two and a half minutes wall
-clock on a machine with enough cores, from 91 units, at `-O2` with `-Wall
--Wextra`, with no warnings.
+The makefile builds at `-O2` with `-Wall -Wextra` and picks up Vulkan, X11,
+Wayland and the shader library when they are present. The link matters as much
+as the compile: only the link shows that tens of thousands of functions agree
+about what exists and that nothing is defined twice.
 
-The makefile links into a program called `lifted`. That matters for more than
-tidiness: compiling a unit says it is well formed on its own, and only a link
-says twelve thousand functions agree with each other about what exists and that
-nothing is defined twice. Nothing else checks that.
+The program enters the title at its recorded entry point. Given an image and an
+address it enters there instead, which is useful for running one function:
 
 ```sh
 ./lifted image.bin 0x82090000
 ```
 
-The program takes an image and an address, so you can enter anywhere rather than
-only at the recorded entry point. Entering a title at its entry point reaches
-something unimplemented and stops, naming the address.
-
 ## What the emitted C looks like
 
-Each function becomes a C function named from its address. Each basic block
-becomes a label and each edge a branch to one. Every instruction is emitted
-under its own disassembly, so the two can be read against each other.
+Each function becomes a C function named from its address. Each basic block is
+a label and each edge a branch to one. Every instruction is emitted under its
+own disassembly, so the two can be read side by side.
 
 ```c
 /* 0x82090000 */
@@ -86,99 +81,58 @@ loc_82090000:;
     goto loc_8209002c;
 ```
 
-Nothing is reordered and nothing is optimized. Blocks become labels because that
-is what the control flow graph says, and anything else would be a transformation
-that has to be justified. The C compiler is better placed to optimize this than
-the emitter is.
+Nothing is reordered or optimised by the emitter. The C compiler is better
+placed to do that.
 
 ## Reading the report
 
 ```
-functions               32738
-  lifted                32727  (99.966 percent)
-    import thunks         156
-  not lifted               11
-helper entries             50
-declarations            32868
-units                     106
-  largest             4809077 bytes
+functions               22006
+  lifted                22006  (100.000 percent)
+    import thunks         241
+  not lifted                0
+helper entries             57
+declarations            22063
+units                      39
+  largest             4448200 bytes
 ```
 
-**functions** is what discovery found. **lifted** is how many were emitted.
-**import thunks** counts those that are calls into the operating system rather
-than translated code, reported apart because an import was never going to be
-lifted and counting it either as a success or as a failure overstates something.
+| line | meaning |
+|---|---|
+| functions | what discovery found |
+| lifted | how many were emitted |
+| import thunks | calls into the console's system libraries, emitted as calls into the runtime rather than translated |
+| not lifted | functions refused because they hold an instruction the model cannot express |
+| helper entries | entry points part way into the register save and restore helpers, which calls land on |
+| declarations | every name the C refers to, which is more than the functions because of the helper entries |
 
-**declarations** exceeds the function count because emitted code names more than
-discovered functions: a call into a register save helper lands part way through
-one, and discovery does not claim those. Every name is declared or the C would
-not compile.
-
-## Finding what to work on
+## When something is not lifted
 
 ```sh
 xenolith lift default.xex --out ./lifted --blockers
 ```
 
-```
-instructions blocking the most functions
-  vpkd3d128             6
-  vupkd3d128            5
-```
-
-This is the instruction that stopped the most functions, not the instruction
-that appears most often, and the two are not the same list. Modelling the top
-entry moves the coverage figure by roughly its count.
-
-`--unlifted` lists every function that was not emitted, with the address and
-mnemonic that stopped it, which is where to look once you want to know why.
+`--blockers` ranks the instructions that stopped functions by how many functions
+each one blocked. Modelling the top entry moves the coverage by roughly its
+count. `--unlifted` lists every function that was not emitted, with the address
+and mnemonic that stopped it.
 
 ## Feeding a run back
 
-A built program that reaches an address nothing was lifted for says where it was
-going. Setting `XENOLITH_TRACE_DISPATCH` makes it report every such address and
-carry on, rather than stopping at the first:
+A running title that reaches an address nothing was lifted for reports it.
+`XENOLITH_TRACE_DISPATCH` makes it report every such address and carry on:
 
 ```sh
 XENOLITH_TRACE_DISPATCH=1 ./lifted 2>&1 | grep '^dispatch ' | awk '{print $2}' | sort -u > roots.txt
 xenolith lift default.xex --out ./lifted --roots-from roots.txt
 ```
 
-This is worth doing when the trace names an address inside the image. Such an
-address is a function that discovery did not find, and feeding it back is the
-evidence discovery could not have had. A function reached only through a table
-the title writes while it runs leaves nothing to find it by: no prologue, and no
-branch naming it.
-
-It is worth doing only then. A trace also names addresses that are not code at
-all, and those are the more common case once a title is failing: a value the
-title wrote into its own memory and then read back as a function pointer, or an
-address outside the image entirely. Handing one of those to `--roots-from` adds
-nothing, because there is no code there to lift.
+This helps when the address is inside the image: it is a function discovery
+missed, typically one reached only through a table the title builds at run
+time. An address outside the image, or one that is not code, is the title
+failing for some other reason, and lifting more will not help.
 
 ```sh
 xenolith disasm default.xex --start 0x82871af0 --length 4
 # error: 0x82871af0 is not in an executable section
 ```
-
-An address the image does not hold is a title in a failure state rather than a
-gap in the translation. The question it raises is which step of the title's own
-initialisation did not happen, and no amount of lifting answers it.
-
-## What it cannot do yet
-
-The runtime that ships with it maps guest memory, loads the image, resolves an
-indirect branch against the table, services the kernel entry points a title's
-startup reaches, and reports anything it cannot do. Guest threads are real host
-threads with their own register state and stack.
-
-Both titles run their whole startup, every static constructor, and every kernel
-entry point they ask for. What they do not do is play. On the title this has been
-taken furthest with, the renderer opens the host's device, translates the title's
-own shaders, reads the command stream it writes, and issues its draws, and the
-picture that comes out is black. The title stops by dispatching to an address
-outside its own image, which is its own failure state rather than a gap in the
-translation. The other title tried gets less far, and the runtime reports which
-entry point it asked for that nothing answers. Both are recorded in the project's
-research notes rather than here, because each is a finding about one title rather
-than a property of the translator.

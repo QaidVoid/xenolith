@@ -53,8 +53,7 @@ thing written, because what it says is not one subject:
   types and the reasons a shader is refused.
 
 No file in `src` may exceed 700 lines, and `tests/file_size.rs` fails the build
-where one does. The translator arrived as a single file of nearly four thousand
-lines, and the cap is what stops that happening again.
+where one does.
 
 ## Finding one in an image, and naming it
 

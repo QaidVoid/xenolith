@@ -1,22 +1,19 @@
 # xenolith
 
-A static recompiler for Xbox 360 executables. It reads a XEX container, decodes
-the PowerPC code inside it, works out where the functions are, and writes C that
-compiles into a program.
+A static recompiler for Xbox 360 games. It reads a XEX executable, finds every
+function in it, translates the PowerPC code to C, and builds that C together
+with a runtime into a native Linux program that runs the game.
 
-Linux only, and deliberately so. There is no Windows support and none planned.
+There is no per game configuration. Function boundaries, jump tables, register
+save helpers and imports are all recovered from the executable itself, and
+anything that cannot be recovered is reported rather than guessed.
 
-Fuller documentation lives in `docs/`, covering each stage of the pipeline, the
-oracle each stage is checked against, and every subcommand. Build it with
-`cd docs && bun install && bun run dev`.
+Linux only.
 
 ## Status
 
-This turns a retail game into C that compiles and runs its own startup. It does
-not yet turn one into a game you can play.
-
-Measured against two retail titles, with
-`xenolith analyze <title>` and `xenolith lift <title> --out <dir>`:
+Two retail titles lift completely and compile without warnings. Both boot,
+reach the renderer and draw with their own translated shaders.
 
 | | title A | title B |
 |---|---|---|
@@ -24,58 +21,103 @@ Measured against two retail titles, with
 | executable words claimed | 868,194 (98.130%) | 2,678,143 (99.067%) |
 | functions lifted to C | 22,006 (100%) | 36,737 (100%) |
 | of those, import thunks | 241 | 189 |
-| emitted C compiles | yes, all of it | yes, all of it |
 | helper entries emitted beside them | 57 | 47 |
-| reaches the renderer | yes | yes |
-| issues draws with its own shaders | yes | yes |
-| runs until stopped | yes | yes |
-| shows what it copies out | yes | not yet looked at |
+| emitted C compiles | yes | yes |
 
-Both titles lift completely, both compile, both reach the renderer and draw
-with their own translated shaders, and both keep running until they are
-stopped. Title A copies its frames out of the graphics hardware and hands them
-to the display, and its opening logos, notices, opening film and menus come
-out as the title drew them. Past the menus it draws the opening of its first mission a part of
-the screen at a time, with parts of each scene still missing, and nothing
-decodes its compressed sound, so its music and voices are not heard.
+Title A is the one taken furthest. It plays its logos, opening film and menus,
+runs the mission briefing and flies the first mission, with music and voices.
+Some scenes still draw wrong, and it is not yet playable end to end.
 
-Whether a frame is right is not measured by anything here. The runtime reports
-what it drew, and `XENOLITH_FRAMES` writes out what was shown so it can be
-looked at.
+## Quick start
 
-## Building and running
+You need a Rust toolchain, a C compiler, and the key material for the title
+(see [Key material](docs/guide/keys.md)). Vulkan, a desktop session, PulseAudio
+and libavcodec are picked up when present, for graphics, a window, sound and
+music.
 
 ```sh
 cargo build --release
-target/release/xenolith lift ../xen/corpus/ac6_extract/default.xex --out /tmp/lifted
-cd /tmp/lifted && make -j16 && ./lifted
+target/release/xenolith lift path/to/default.xex --out /tmp/lifted
+cd /tmp/lifted
+make -j"$(nproc)"
+./lifted
 ```
 
-The lift writes C, the runtime it is written against, a `Makefile`, and the
-decoded image beside it. `make` links the units into one program. Run it where
-the image is. A title's files are read from the directory the image is in, and
-what it saves is kept in `content/` there.
+`lift` writes the translated C, the runtime, a `Makefile` and the decoded
+image. Run the program from that directory, with the title's other files beside
+it, since the game reads its data from there. Saves go in `content/`.
 
-A key is needed to decode an encrypted container. It is read from `--key-file`,
-then `XENOLITH_XEX_KEY`, then `~/.config/xenolith/xex.key`. No key and no game
-data is in this repository.
+The key is read from `--key-file`, then `XENOLITH_XEX_KEY`, then
+`~/.config/xenolith/xex.key`. No key and no game data is in this repository.
 
-## What it does not do
+Controls: arrow keys for the pad, `z` and `x` for the face buttons, enter for
+start.
 
-- **Play a game.** Title A plays its opening film and the opening of its first mission, with parts of each scene missing, and goes no further yet.
-- **Reproduce a console's settings.** A privilege, the video cable, two display
-  settings, the region, the language and a signed in profile are answered from
-  what a title's own startup requires, because what a console was set to is not
-  a property of the title. Every such answer is reported as an assumption when
-  the run starts.
-- **Run without a host C compiler.** Most of the test suite checks the emitted C
-  by compiling it, and a suite that skipped those would be comparing strings.
-- **Model the whole instruction set.** What the two titles exercise is modelled.
-  What they do not exercise is not, and a function holding an unmodelled
-  instruction is refused whole rather than emitted with a hole in it.
-- **Run its strongest oracle everywhere.** The differential against hardware
-  needs a big endian ppc64 cross toolchain and an emulator. It runs in the gate
-  when both are installed and says so when they are not.
+## How it works
+
+```
+default.xex
+  -> xenolith-xex       decrypt and decompress the container
+  -> xenolith-ppc       decode PowerPC, AltiVec and VMX128 instructions
+  -> xenolith-analysis  find functions, blocks and jump tables
+  -> xenolith-lift      emit C for every function, plus the runtime
+  -> xenolith-shader    translate the game's GPU shaders to SPIR-V
+  -> cc                 one native program
+```
+
+The runtime is plain C that ships with the lift. It maps the guest address
+space, services the kernel calls a game makes, runs guest threads as host
+threads, replays the GPU command stream through Vulkan, decodes XMA audio
+through libavcodec, and reads files beside the program.
+
+## Repository layout
+
+| path | what it holds |
+|---|---|
+| `crates/xenolith` | the `xenolith` command line tool |
+| `crates/xenolith-xex` | the container reader |
+| `crates/xenolith-ppc` | the instruction decoder |
+| `crates/xenolith-analysis` | function and jump table discovery |
+| `crates/xenolith-lift` | the C emitter, and the runtime in `runtime/` |
+| `crates/xenolith-shader` | the shader translator |
+| `docs/` | the documentation site |
+| `scripts/` | the checks the project is gated on |
+
+## Documentation
+
+The full documentation lives in [`docs/`](docs/): a user guide, a walk through
+each stage of the pipeline, how each stage is verified, and a reference for the
+commands, environment variables and runtime interface. To browse it as a site:
+
+```sh
+cd docs && bun install && bun run dev
+```
+
+## Testing
+
+```sh
+scripts/check          # format, lints, tests, docs and text checks
+scripts/check-oracles  # the comparisons that need a title, a cross toolchain or an emulator
+```
+
+`cargo test` passes with no game data present. Tests that need a real title,
+a big endian PowerPC toolchain or an emulator read their paths from the
+environment and are skipped without them. See
+[How it is checked](docs/verification/index.md).
+
+## Limitations
+
+- **Not every scene renders correctly yet**, and some GPU features are missing.
+  Shaders that use something unsupported are reported and their draws skipped.
+- **Console settings are assumed.** The video cable, display mode, region,
+  language, signed in profile and similar settings are not part of a game, so
+  the runtime answers with what the game requires and reports each assumption
+  when it starts.
+- **Only what the two titles use is modelled.** A function containing an
+  instruction the translator does not model is refused whole, never emitted with
+  a hole in it.
+- **A host C compiler is required to run the tests**, since most of them check
+  the emitted C by compiling it.
 
 ## Licence
 

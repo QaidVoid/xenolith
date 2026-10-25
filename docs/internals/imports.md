@@ -41,11 +41,6 @@ memory like any other data, so there is nothing to translate.
 The first two words are placeholders the loader overwrites with the halves of
 the address it resolved. The two after them build a jump to whatever those hold.
 
-Before this was read, those addresses were the single largest thing stopping
-functions from lifting on both titles: 187 functions on one and 156 on the
-other, all reported as having no blocks, because the first word of each is not
-an instruction and never was.
-
 A record declared to be a thunk is confirmed to have a thunk's shape before it is
 believed: a second word holding the same record with the next kind, then the jump
 through the count register. A record that does not is rejected naming its
@@ -75,8 +70,8 @@ told what 0 meant.
 version, which is per title configuration arriving by another route. The ordinal
 is what the container says, so the ordinal is what is reported.
 
-**No import is implemented.** `xenolith_import` is a declaration. What ordinal
-651 of `xam.xex` does is the environment's problem, and there is no environment.
+**Imports are not part of the translation.** What ordinal 651 of `xam.xex`
+does is answered by the runtime, see [The runtime](/internals/runtime#imports).
 
 ## Reading them
 

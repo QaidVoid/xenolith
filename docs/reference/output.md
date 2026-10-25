@@ -40,10 +40,8 @@ it looked at.
 
 ## The units
 
-A retail title emits hundreds of megabytes of C. As one file that is a
-translation unit no compiler can build in reasonable time, and a C build
-parallelises across translation units and nowhere else, so one file also means
-one core.
+A retail title emits hundreds of megabytes of C. As one file no compiler builds
+it in reasonable time, and a C build only parallelises across files.
 
 The output is split at a byte budget rather than a function count, because
 function sizes span several orders of magnitude and a fixed count per unit would
@@ -88,16 +86,14 @@ libxenolith_shader.a)`.
 
 ## What the program does
 
-It links and it does not play a game. The first import the guest reaches ends
-it, which is an accurate account of how far the translation has got.
-
-Building it matters for more than tidiness. Compiling a unit says it is well
-formed on its own; only a link says the units agree with each other about what
-exists and that nothing is defined twice. Nothing else checks that.
-
-It takes the image and an address, so you can enter anywhere rather than only at
-the recorded entry point:
+`lifted` boots the runtime, loads `image.bin` from the directory it runs in, and
+enters the title at its recorded entry point. Given an image and an address it
+enters there instead, which runs one function on its own:
 
 ```sh
 ./lifted image.bin 0x82090000
 ```
+
+The link is a check in its own right: compiling a unit says it is well formed
+alone, and only the link says the units agree about what exists and that
+nothing is defined twice.
