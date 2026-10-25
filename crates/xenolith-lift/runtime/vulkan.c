@@ -355,6 +355,10 @@ static struct {
 /* Which lot is being recorded into, or is next to be, and which was handed
  * over last. */
 static uint32_t current_lot;
+
+/* How many times the room draws take has been given out again, which says
+ * whether words put there earlier are still there. */
+static uint32_t room_given_out_again;
 static uint32_t last_sent_lot;
 static unsigned long lots_sent;
 
@@ -647,9 +651,11 @@ static int make_somewhere_to_draw(void) {
  * to a position, as something to multiply by and something to add. */
 /* Two for the scale and offset a position is brought through, two more holding
  * the two hundred and fifty six truths a shader asks after when it jumps on one
- * rather than on the predicate, and eight more holding the thirty two counts a
- * shader reads to know how many times to go round a loop. */
-#define XENOLITH_BESIDE_THE_CONSTANTS 12u
+ * rather than on the predicate, eight more holding the thirty two counts a
+ * shader reads to know how many times to go round a loop, and twenty four
+ * saying where each of the streams a fetch can name begins. */
+#define XENOLITH_BESIDE_THE_CONSTANTS 36u
+#define XENOLITH_THE_STARTS (XENOLITH_ALL_THE_CONSTANTS + 12u)
 
 /* How many the hardware holds altogether: twice what one shader names, because
  * the two kinds of shader do not share them. */
@@ -659,10 +665,14 @@ static int make_somewhere_to_draw(void) {
 
 /* How much of a title's memory a shader can go and get its vertices from.
  *
- * The first words of it say where each of a title's fetches reads from, and the
- * rest is what those fetches read. It is a window rather than the whole of
- * memory because the whole of it is half a gigabyte and none of a frame's
- * drawing touches more than a little of it. A fetch reaching past the end reads
+ * The first words of each draw's room say where each of a title's fetches reads
+ * from, and the rest is what those fetches read. A shader is told the same
+ * beside its constants, counted from the front of the frame's share, which is
+ * what it fetches from, so a table two draws read can be put there once.
+ *
+ * It is a window rather than the whole of memory because the whole of it is
+ * half a gigabyte and none of a frame's drawing touches more than a little of
+ * it. A fetch reaching past the end reads
  * nothing, which is what a device does with a read past the end of a buffer it
  * was given, rather than anything this decides. */
 #define XENOLITH_VERTEX_SLOTS 96u
@@ -2897,6 +2907,22 @@ uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
     return through.vertex_words + through.vertex_from / 4u;
 }
 
+uint32_t xenolith_where_the_room_begins(uint32_t *given_out) {
+    if (given_out != NULL) {
+        *given_out = room_given_out_again;
+    }
+    return (uint32_t)((through.vertex_from - (VkDeviceSize)current_lot * XENOLITH_VERTEX_ROOM)
+                      / 4u);
+}
+
+void xenolith_streams_begin_at(const uint32_t *where) {
+    if (!through.made || where == NULL) {
+        return;
+    }
+    uint32_t *words = (uint32_t *)(through.constant_bytes + through.constant_from);
+    memcpy(&words[XENOLITH_THE_STARTS * 4u], where, XENOLITH_VERTEX_SLOTS * sizeof *where);
+}
+
 void xenolith_done_with_vertices(uint32_t words) {
     if (!through.made) {
         return;
@@ -3638,6 +3664,7 @@ static void finish_the_lot(uint32_t lot);
 
 /* Gives the lot being recorded into its share of the room draws take. */
 static void give_out_the_room_again(void) {
+    room_given_out_again++;
     through.vertex_at = (VkDeviceSize)current_lot * XENOLITH_VERTEX_ROOM;
     through.constant_at = (VkDeviceSize)current_lot * XENOLITH_CONSTANT_ROOM;
     sayings_taken = 0;
@@ -5200,9 +5227,10 @@ int xenolith_draw_now_inside(uint32_t blending, uint32_t written, uint32_t how_f
     pointing[0].buffer = through.constants;
     pointing[0].offset = through.constant_from;
     pointing[0].range = XENOLITH_CONSTANT_BYTES;
+    VkDeviceSize share = (VkDeviceSize)current_lot * XENOLITH_VERTEX_ROOM;
     pointing[1].buffer = through.vertices;
-    pointing[1].offset = through.vertex_from;
-    pointing[1].range = through.vertex_wide;
+    pointing[1].offset = share;
+    pointing[1].range = through.vertex_from + through.vertex_wide - share;
 
     VkWriteDescriptorSet saying[2] = {{0}, {0}};
     saying[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -6841,6 +6869,15 @@ uint32_t *xenolith_room_for_vertices(uint32_t *how_many) {
     (void)how_many;
     return NULL;
 }
+
+uint32_t xenolith_where_the_room_begins(uint32_t *given_out) {
+    if (given_out != NULL) {
+        *given_out = 0;
+    }
+    return 0;
+}
+
+void xenolith_streams_begin_at(const uint32_t *where) { (void)where; }
 
 void xenolith_done_with_vertices(uint32_t words) { (void)words; }
 

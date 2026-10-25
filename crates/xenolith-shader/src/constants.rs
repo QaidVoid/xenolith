@@ -48,7 +48,7 @@ pub const CARRIED: u32 = 16;
 
 /// How many more than the constants a shader names are handed to it.
 ///
-/// Twelve, which is what the two things kept beside the constants need.
+/// Thirty six, which is what the three things kept beside the constants need.
 ///
 /// The first two are what the hardware would have done to a position after the
 /// shader put it out, as something to multiply by and something to add. On the
@@ -59,10 +59,14 @@ pub const CARRIED: u32 = 16;
 /// itself.
 ///
 /// The other eight are the truths and the counts a shader asks after when it
-/// jumps, at [`THE_TRUTHS`] and [`THE_COUNTS`]. Twelve is the exact number those
-/// need, not a round one: two for the scale and the offset, two more before the
-/// truths, and eight for the counts.
-pub(crate) const BESIDE_THE_CONSTANTS: u32 = 12;
+/// jumps, at [`THE_TRUTHS`] and [`THE_COUNTS`]: two more before the truths, and
+/// eight for the counts.
+///
+/// The last twenty four say where each of the ninety six streams a fetch can
+/// name begins among what a host hands a shader to fetch from, at
+/// [`THE_STARTS`]. Said here rather than at the front of what is fetched from,
+/// so that two draws reading the same table can be handed the one copy of it.
+pub(crate) const BESIDE_THE_CONSTANTS: u32 = 36;
 
 /// Where among the constants the truths a shader asks after when it jumps are
 /// kept: after the scale and the offset, two lots of four words holding the two
@@ -72,6 +76,10 @@ pub(crate) const THE_TRUTHS: u32 = ALL_THE_CONSTANTS + 2;
 /// Where among the constants the counts sit: eight lots of four words holding
 /// the thirty two a shader reads to know how many times to go round a loop.
 pub(crate) const THE_COUNTS: u32 = ALL_THE_CONSTANTS + 4;
+/// Where among the constants the starts of the streams sit: twenty four lots
+/// of four words, a word for each stream, in words from the front of what is
+/// fetched from.
+pub(crate) const THE_STARTS: u32 = ALL_THE_CONSTANTS + 12;
 
 /// How many constants the hardware holds altogether.
 ///

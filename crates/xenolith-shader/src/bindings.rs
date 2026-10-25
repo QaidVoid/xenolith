@@ -30,8 +30,8 @@ pub(crate) fn what_a_fetch_reads(
      * A draw hands a shader a number and nothing else, and the shader works out
      * from it where its vertex sits and reads it. What it reads is memory the
      * title filled in, so this is a window on that memory rather than anything
-     * this decides: the runtime puts what a fetch names into it and says where,
-     * and the first words of it are those wheres. */
+     * this decides: the runtime puts what a fetch names into it and says where
+     * beside the constants. */
     let run_of_words = module.name();
     module.add(
         opcodes::TYPE_RUNTIME_ARRAY,

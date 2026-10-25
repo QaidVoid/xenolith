@@ -859,6 +859,17 @@ void xenolith_import_variable(uint8_t *base, uint32_t slot, const char *library,
  * there is room for. Returns nothing where there is nothing to draw with. */
 uint32_t *xenolith_room_for_vertices(uint32_t *how_many);
 
+/* Where the room last given begins, in words from the front of what a shader
+ * fetches from, and through `given_out` a number that changes whenever room
+ * given earlier is given out again, which says whether words put there earlier
+ * are still there for a later draw to read. */
+uint32_t xenolith_where_the_room_begins(uint32_t *given_out);
+
+/* Says where each of the next draw's streams begins, a word for each of the
+ * ninety six a fetch can name, in words from the front of what a shader fetches
+ * from. Said after the draw's constants are handed over. */
+void xenolith_streams_begin_at(const uint32_t *where);
+
 /* Says the vertices are in place, and how many words of the room given were
  * written. A frame keeps every draw's words at once, so what one draw took has
  * to be known before the next is given room. */

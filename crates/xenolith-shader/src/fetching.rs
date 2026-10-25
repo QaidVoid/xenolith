@@ -9,8 +9,9 @@
 //! decides is [`crate::layout::stretches`] and this only reads what is there
 //! once that has said so.
 
+use crate::constants::THE_STARTS;
 use crate::opcodes;
-use crate::operands::read_whole;
+use crate::operands::{read_a_constant, read_whole};
 use crate::picture::{
     Runs, how_far_between_texels, look_at_a_picture, read_pictures_at_a_level,
     the_level_a_place_reads, whether_a_fetch_runs,
@@ -40,6 +41,23 @@ pub(crate) fn one_word(module: &mut Module, named: &Named, at: u32) -> u32 {
         &[named.whole.number(), value.number(), where_from.number()],
     );
     value.number()
+}
+
+/// Where among what a shader fetches from the stream a fetch names begins, in
+/// words, which the host says beside the constants.
+fn where_a_stream_begins(module: &mut Module, named: &Named, slot: u32) -> u32 {
+    let held = read_a_constant(module, named, THE_STARTS + slot / 4);
+    let one = module.name();
+    module.add(
+        opcodes::COMPOSITE_EXTRACT,
+        &[named.float.number(), one.number(), held, slot % 4],
+    );
+    let begins = module.name();
+    module.add(
+        opcodes::BITCAST,
+        &[named.whole.number(), begins.number(), one.number()],
+    );
+    begins.number()
 }
 
 /// Puts the four numbers of a register together the way a fetch says to.
@@ -325,7 +343,7 @@ pub(crate) fn taken_apart(
 /// draw handed the shader, times how far apart two vertices are, plus how far
 /// into one this part sits, from wherever the title said that fetch reads from.
 /// That last is the only piece this cannot get from the instruction, so it is
-/// read out of the first words of the window, where the runtime put it.
+/// read from beside the constants, where the runtime put it.
 ///
 /// # Errors
 ///
@@ -374,7 +392,7 @@ pub(crate) fn go_and_get(
             number(stride)?,
         ],
     );
-    let from = one_word(module, named, number(slot)?);
+    let from = where_a_stream_begins(module, named, slot);
     let began = module.name();
     module.add(
         opcodes::INTEGER_ADD,

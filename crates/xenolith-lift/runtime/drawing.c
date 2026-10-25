@@ -1187,6 +1187,72 @@ static uint32_t what_a_shader_reads_of(const uint32_t *reads, uint32_t streams, 
     return most;
 }
 
+/* What one frame's draws have put in the room already, by where in a title's
+ * memory it came from and how much of it, so that a table many draws read is
+ * put there once a frame rather than once a draw.
+ *
+ * A title's city reads every building's place out of one table of hundreds of
+ * kilobytes, as does its smoke, and copying it again for each of thousands of
+ * draws was most of what a frame cost. What a frame reads is what was there
+ * when the frame was put together, which is what the console's own hardware
+ * reads too, so the one copy is the same words as the many. */
+#define XENOLITH_COPIES_KEPT 1024u
+
+/* The large ones are also kept a few at a time in the order they were made,
+ * for a stream that lies inside one of them to be read from there. A title
+ * keeps its smoke's corners in one long run and starts each draw's view of it
+ * somewhere along, running to the end, so no two views are the same but the
+ * first one copied holds every one after it that starts further along. */
+#define XENOLITH_LARGE_COPIES_KEPT 32u
+#define XENOLITH_A_LARGE_COPY 4096u
+
+struct a_copy_kept {
+    uint32_t where;
+    uint32_t words;
+    uint32_t at;
+    uint32_t given_out;
+};
+
+static struct a_copy_kept copies_kept[XENOLITH_COPIES_KEPT];
+static struct a_copy_kept large_copies_kept[XENOLITH_LARGE_COPIES_KEPT];
+static uint32_t large_copies_made;
+
+static uint32_t which_copy(uint32_t where, uint32_t words) {
+    uint32_t mixed = where * 0x9e3779b1u ^ words;
+    mixed ^= mixed >> 16;
+    mixed *= 0x85ebca6bu;
+    mixed ^= mixed >> 13;
+    return mixed % XENOLITH_COPIES_KEPT;
+}
+
+/* Where in the room the words a title keeps at `where` were already put this
+ * frame, or nought where they were not. */
+static uint32_t where_it_was_put(uint32_t where, uint32_t words, uint32_t given_out) {
+    const struct a_copy_kept *same = &copies_kept[which_copy(where, words)];
+    if (same->given_out == given_out && same->where == where && same->words == words
+        && same->at != 0) {
+        return same->at;
+    }
+    for (uint32_t at = 0; at < XENOLITH_LARGE_COPIES_KEPT; at++) {
+        const struct a_copy_kept *large = &large_copies_kept[at];
+        if (large->given_out == given_out && large->at != 0 && where >= large->where
+            && (where - large->where) / 4u + words <= large->words
+            && (where - large->where) % 4u == 0) {
+            return large->at + (where - large->where) / 4u;
+        }
+    }
+    return 0;
+}
+
+static void say_where_it_was_put(uint32_t where, uint32_t words, uint32_t given_out,
+                                 uint32_t at) {
+    struct a_copy_kept kept = {where, words, at, given_out};
+    copies_kept[which_copy(where, words)] = kept;
+    if (words >= XENOLITH_A_LARGE_COPY) {
+        large_copies_kept[large_copies_made++ % XENOLITH_LARGE_COPIES_KEPT] = kept;
+    }
+}
+
 static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, uint32_t shape,
                                        const uint32_t *declared, uint32_t declared_streams,
                                        uint32_t by, uint32_t listed_at, uint32_t listed_count,
@@ -1196,6 +1262,9 @@ static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, u
     if (window == NULL || room <= XENOLITH_FETCH_SLOTS) {
         return 0;
     }
+    uint32_t given_out = 0;
+    uint32_t begins = xenolith_where_the_room_begins(&given_out);
+    uint32_t starts[XENOLITH_FETCH_SLOTS] = {0};
 
     /* Which number this draw's first vertex arrives at its shader with.
      *
@@ -1279,6 +1348,18 @@ static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, u
             continue;
         }
 
+        /* A rectangle's fourth corners are written into its stream, so a stream
+         * of one is its own rather than one another draw can share. */
+        if (shape != XENOLITH_SHAPE_RECTANGLES) {
+            uint32_t put = where_it_was_put(where, words, given_out);
+            if (put != 0) {
+                starts[slot] = put - skipped;
+                continue;
+            }
+            say_where_it_was_put(where, words, given_out, begins + filled);
+        }
+
+        starts[slot] = begins + filled - skipped;
         window[slot] = filled - skipped;
         began[slot] = filled;
         for (uint32_t step = 0; step < words; step++) {
@@ -1297,6 +1378,7 @@ static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, u
         }
     }
 
+    xenolith_streams_begin_at(starts);
     uint32_t numbered = number_the_corners(base, window, room, filled, shape, vertices, listed_at,
                                            listed_count, listed_wide, first_vertex);
     say_what_is_being_drawn_from(window, filled, room, vertices, shape, declared, declared_streams,

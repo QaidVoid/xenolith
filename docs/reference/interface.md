@@ -514,6 +514,19 @@ current for as long as the run lasts. One this does not know is reported.
 Somewhere to put the vertices a shader goes and gets, and how many words of it
 there is room for. Returns nothing where there is nothing to draw with.
 
+## `xenolith_where_the_room_begins`
+
+Where the room last given begins, in words from the front of what a shader
+fetches from, and through `given_out` a number that changes whenever room given
+earlier is given out again, which says whether words put there earlier are still
+there for a later draw to read.
+
+## `xenolith_streams_begin_at`
+
+Says where each of the next draw's streams begins, a word for each of the
+ninety six a fetch can name, in words from the front of what a shader fetches
+from. Said after the draw's constants are handed over.
+
 ## `xenolith_done_with_vertices`
 
 Says the vertices are in place, and how many words of the room given were
