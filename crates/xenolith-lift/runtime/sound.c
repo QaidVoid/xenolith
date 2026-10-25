@@ -207,15 +207,11 @@ static float bring_a_sample_in(float given) {
     return given;
 }
 
-/* Reads one of a title's samples out of the guest.
- *
- * A sample is a float kept the other way round from the host's, because the
- * console keeps everything that way. Read as it stands it is a number no device
- * can play, which is silence at best and a crackle at worst. */
+/* Reads one of a title's samples out of the guest: a float in the console's
+ * byte order, which the guest word accessor already turns into the host's. */
 static float read_a_guest_sample(const uint8_t *base, uint32_t at) {
     uint32_t word = xenolith_load32(base, at);
     float given;
-    word = __builtin_bswap32(word);
     memcpy(&given, &word, sizeof given);
     return bring_a_sample_in(given);
 }
@@ -231,7 +227,7 @@ static void hand_a_frame_over(const uint8_t *base, uint32_t at) {
     static const float everywhere = 1.0f / (1.0f + 0.70710678f + 0.5f);
 
     start_the_output();
-    if (output.device == NULL) {
+    if (output.device == NULL && output.server == NULL) {
         return;
     }
 

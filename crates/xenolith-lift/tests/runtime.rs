@@ -5496,9 +5496,7 @@ int main(void) {
     uint32_t frame = 0x01000000u;
     for (unsigned channel = 0; channel < 6; channel++) {
         for (unsigned sample = 0; sample < 256; sample++) {
-            uint32_t bits = 0x3f000000u;
-            bits = __builtin_bswap32(bits);
-            xenolith_store32(base, frame + (channel * 256u + sample) * 4u, bits);
+            xenolith_store32(base, frame + (channel * 256u + sample) * 4u, 0x3f000000u);
         }
     }
 
