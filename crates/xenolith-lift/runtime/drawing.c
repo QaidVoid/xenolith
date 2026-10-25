@@ -736,48 +736,6 @@ static void say_what_was_drawn(uint32_t shape, uint32_t vertices, uint32_t verte
     fprintf(stderr, "\n");
 }
 
-static uint32_t complete_the_rectangle(uint32_t *window, uint32_t room, const uint32_t *began,
-                                       const uint32_t *reads, uint32_t streams) {
-    uint32_t reached = 0;
-    for (uint32_t one = 0; one < streams; one++) {
-        uint32_t slot = reads[one * XENOLITH_WORDS_A_STREAM];
-        uint32_t stride = reads[one * XENOLITH_WORDS_A_STREAM + 1];
-        uint32_t offset = reads[one * XENOLITH_WORDS_A_STREAM + 2];
-        uint32_t words = reads[one * XENOLITH_WORDS_A_STREAM + 3];
-        if (slot >= XENOLITH_FETCH_SLOTS || stride == 0 || words == 0
-            || reads[one * XENOLITH_WORDS_A_STREAM + 4] != 0) {
-            continue;
-        }
-
-        uint32_t at = began[slot];
-        if (at == 0 || at + 5u * stride + offset + words > room) {
-            continue;
-        }
-
-        for (uint32_t word = 0; word < words; word++) {
-            uint32_t first = window[at + offset + word];
-            uint32_t second = window[at + stride + offset + word];
-            uint32_t third = window[at + 2u * stride + offset + word];
-            float near, middle, far;
-            memcpy(&near, &first, sizeof near);
-            memcpy(&middle, &second, sizeof middle);
-            memcpy(&far, &third, sizeof far);
-
-            float across = near - middle + far;
-            uint32_t fourth;
-            memcpy(&fourth, &across, sizeof fourth);
-
-            window[at + 3u * stride + offset + word] = first;
-            window[at + 4u * stride + offset + word] = third;
-            window[at + 5u * stride + offset + word] = fourth;
-            if (at + 5u * stride + offset + word + 1u > reached) {
-                reached = at + 5u * stride + offset + word + 1u;
-            }
-        }
-    }
-    return reached;
-}
-
 /* Where a title says what number in its list starts a run of shapes again,
  * and the bit of how shapes are filled that says to look for it at all. The
  * hardware reads only the low twenty four bits of a number four bytes wide,
@@ -1280,11 +1238,9 @@ static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, u
     uint32_t most = (listed_at != 0 ? furthest : (vertices != 0 ? vertices - 1u : 0u))
                     + first_vertex;
 
-    uint32_t began[XENOLITH_FETCH_SLOTS];
     uint32_t filled = XENOLITH_FETCH_SLOTS;
     for (uint32_t slot = 0; slot < XENOLITH_FETCH_SLOTS; slot++) {
         window[slot] = 0;
-        began[slot] = 0;
 
         uint32_t low = xenolith_load32(
             base, XENOLITH_REGISTERS + (XENOLITH_FETCH_REGISTER + slot * 2u) * 4u);
@@ -1348,20 +1304,15 @@ static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, u
             continue;
         }
 
-        /* A rectangle's fourth corners are written into its stream, so a stream
-         * of one is its own rather than one another draw can share. */
-        if (shape != XENOLITH_SHAPE_RECTANGLES) {
-            uint32_t put = where_it_was_put(where, words, given_out);
-            if (put != 0) {
-                starts[slot] = put - skipped;
-                continue;
-            }
-            say_where_it_was_put(where, words, given_out, begins + filled);
+        uint32_t put = where_it_was_put(where, words, given_out);
+        if (put != 0) {
+            starts[slot] = put - skipped;
+            continue;
         }
+        say_where_it_was_put(where, words, given_out, begins + filled);
 
         starts[slot] = begins + filled - skipped;
         window[slot] = filled - skipped;
-        began[slot] = filled;
         for (uint32_t step = 0; step < words; step++) {
             window[filled + step] = xenolith_load32(base, where + step * 4u);
         }
@@ -1369,13 +1320,6 @@ static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, u
         drawn_reads_from = where;
         drawn_reads_slot = slot;
         filled += words;
-    }
-
-    if (declared != NULL && shape == XENOLITH_SHAPE_RECTANGLES) {
-        uint32_t reached = complete_the_rectangle(window, room, began, declared, declared_streams);
-        if (reached > filled) {
-            filled = reached;
-        }
     }
 
     xenolith_streams_begin_at(starts);
@@ -1764,14 +1708,7 @@ static void draw_what_was_asked_for(uint8_t *base, uint32_t stream, uint32_t at,
             drawn_how = how;
             drawn_from_a_packet = opcode;
 
-            /* A rectangle arrives as three of its corners, the hardware
-             * having worked out the fourth. A host draws it as the two
-             * triangles that shape comes to, so twice as many vertices are
-             * drawn and the shader is asked where it reads them from. */
             uint32_t laid_out_as = shape;
-            if (shape == XENOLITH_SHAPE_RECTANGLES && in_hand[0].reads != NULL) {
-                vertices *= 2u;
-            }
 
             /* A run of quads is one shape for every four corners, and the
              * nearest a host has is a fan, which is one shape however many

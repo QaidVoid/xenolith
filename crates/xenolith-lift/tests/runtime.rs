@@ -6615,6 +6615,55 @@ fn a_constant_read_without_its_sign_is_positive() {
     );
 }
 
+/// A rectangle is drawn whole: the three corners a title gives and the fourth
+/// the hardware works out across from the right angle.
+///
+/// One title draws its trees and much of what it composites as rectangles, and
+/// drawn as the triangle its three corners make, half of every one is missing
+/// and the half that is drawn shows a picture's corner stretched across it. The
+/// triangle drawn here is given as a rectangle, so what is lit has to reach the
+/// fourth corner, well to the right of where the triangle alone reaches. Needs
+/// a device to draw on, and returns where there is none.
+#[test]
+fn a_rectangle_is_drawn_with_its_fourth_corner() {
+    let run = (2u64 << 44) | (1u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    let max_of = |source: u32| (2u32 << 24) | (source << 16) | (source << 8) | source;
+    let keeps = 50u32 << 26;
+    let exports_every_lane = (1u32 << 15) | (0xf << 16);
+    words.extend([exports_every_lane | keeps, 0, max_of(0)]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    let program = a_triangle_drawn_by("{1.0f, 0.0f, 0.0f, 1.0f}, {0.0f}, {0.0f}", "")
+        .replace("XENOLITH_SHAPE_TRIANGLES", "XENOLITH_SHAPE_RECTANGLES");
+    let ran = draw_with("a_rectangle", &pixel.words, &program).expect("the draw ran");
+    if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+        return;
+    }
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("a_rectangle");
+    let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+    let inside = a_pixel_of(&picture, 640, 360).expect("the frame is too short");
+    let fourth = a_pixel_of(&picture, 1000, 450).expect("the frame is too short");
+    let outside = a_pixel_of(&picture, 100, 650).expect("the frame is too short");
+    assert_eq!(
+        inside,
+        [255, 0, 0],
+        "the three corners given were not drawn"
+    );
+    assert_eq!(
+        fourth,
+        [255, 0, 0],
+        "the half reaching the fourth corner was not drawn"
+    );
+    assert_ne!(outside, [255, 0, 0], "more than the rectangle was drawn");
+}
+
 /// A shape drawn where another already lies is drawn over it when the title
 /// pushes it nearer, and is left behind it when the title does not.
 ///

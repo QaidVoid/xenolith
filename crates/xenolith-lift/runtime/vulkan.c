@@ -147,6 +147,10 @@ static uint32_t family_that_draws(VkPhysicalDevice adapter) {
     return count;
 }
 
+/* Whether the device finishes a rectangle, which it does where it can run the
+ * shader that does. */
+static int rectangles_finished_on_the_device;
+
 /* Opens what the host has, once, and says what came of it.
  *
  * Nothing is asked of the device beyond being able to draw. A title's own
@@ -247,8 +251,13 @@ static int open_something_to_draw_with(void) {
          * is lost, taking every other program on the machine's drawing with it.
          * With it, the read comes back as nothing, which is what a shader
          * reading somewhere a title never filled should see. */
+        VkPhysicalDeviceFeatures what_the_device_has = {0};
+        vkGetPhysicalDeviceFeatures(adapters[at], &what_the_device_has);
         VkPhysicalDeviceFeatures safely = {0};
         safely.robustBufferAccess = VK_TRUE;
+        /* What finishes a rectangle, where a device can run it. */
+        safely.geometryShader = what_the_device_has.geometryShader;
+        rectangles_finished_on_the_device = what_the_device_has.geometryShader == VK_TRUE;
         /* A title's pictures are kept squeezed, in a way a host squeezes them
          * too, so they are handed over as they are rather than opened out
          * first. Saying so is what lets a device be handed one. */
@@ -258,8 +267,6 @@ static int open_something_to_draw_with(void) {
          * shader put out stops mattering, so a shape that is there shows and one
          * that never got that far still does not. */
         if (painting_over_everything()) {
-            VkPhysicalDeviceFeatures what_the_device_has = {0};
-            vkGetPhysicalDeviceFeatures(adapters[at], &what_the_device_has);
             safely.logicOp = what_the_device_has.logicOp;
         }
 
@@ -2522,6 +2529,177 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
 }
 
 /* Turns a run of words into something a device holds. */
+/* What finishes a rectangle on the device: handed the three corners a title
+ * gave, after its vertex shader has run on each, it passes them on and then
+ * the second triangle, whose new corner is across from the right angle, every
+ * part of it worked out as the two corners beside it less the one across. The
+ * right angle is the corner across from the longest side as it lands on the
+ * screen, which is the one a title names wherever it starts. Both triangles
+ * are wound the way the three corners were. Made once, outside the build. */
+static const uint32_t the_rest_of_a_rectangle[] = {
+    0x07230203u, 0x00010000u, 0x0008000bu, 0x000000b7u, 0x00000000u, 0x00020011u,
+    0x00000002u, 0x0006000bu, 0x00000001u, 0x4c534c47u, 0x6474732eu, 0x3035342eu,
+    0x00000000u, 0x0003000eu, 0x00000000u, 0x00000001u, 0x0009000fu, 0x00000003u,
+    0x00000004u, 0x6e69616du, 0x00000000u, 0x00000015u, 0x0000001cu, 0x00000030u,
+    0x00000034u, 0x00030010u, 0x00000004u, 0x00000016u, 0x00040010u, 0x00000004u,
+    0x00000000u, 0x00000001u, 0x00030010u, 0x00000004u, 0x0000001du, 0x00040010u,
+    0x00000004u, 0x0000001au, 0x00000006u, 0x00030047u, 0x00000013u, 0x00000002u,
+    0x00050048u, 0x00000013u, 0x00000000u, 0x0000000bu, 0x00000000u, 0x00030047u,
+    0x00000017u, 0x00000002u, 0x00050048u, 0x00000017u, 0x00000000u, 0x0000000bu,
+    0x00000000u, 0x00040047u, 0x00000030u, 0x0000001eu, 0x00000000u, 0x00040047u,
+    0x00000034u, 0x0000001eu, 0x00000000u, 0x00020013u, 0x00000002u, 0x00030021u,
+    0x00000003u, 0x00000002u, 0x00040015u, 0x00000006u, 0x00000020u, 0x00000001u,
+    0x00040020u, 0x00000007u, 0x00000007u, 0x00000006u, 0x00040021u, 0x00000008u,
+    0x00000002u, 0x00000007u, 0x00030016u, 0x0000000cu, 0x00000020u, 0x00040017u,
+    0x0000000du, 0x0000000cu, 0x00000002u, 0x00040021u, 0x0000000eu, 0x0000000du,
+    0x00000007u, 0x00040017u, 0x00000012u, 0x0000000cu, 0x00000004u, 0x0003001eu,
+    0x00000013u, 0x00000012u, 0x00040020u, 0x00000014u, 0x00000003u, 0x00000013u,
+    0x0004003bu, 0x00000014u, 0x00000015u, 0x00000003u, 0x0004002bu, 0x00000006u,
+    0x00000016u, 0x00000000u, 0x0003001eu, 0x00000017u, 0x00000012u, 0x00040015u,
+    0x00000018u, 0x00000020u, 0x00000000u, 0x0004002bu, 0x00000018u, 0x00000019u,
+    0x00000003u, 0x0004001cu, 0x0000001au, 0x00000017u, 0x00000019u, 0x00040020u,
+    0x0000001bu, 0x00000001u, 0x0000001au, 0x0004003bu, 0x0000001bu, 0x0000001cu,
+    0x00000001u, 0x00040020u, 0x0000001eu, 0x00000001u, 0x00000012u, 0x00040020u,
+    0x00000021u, 0x00000003u, 0x00000012u, 0x0004002bu, 0x00000006u, 0x0000002au,
+    0x00000010u, 0x00020014u, 0x0000002bu, 0x0004002bu, 0x00000018u, 0x0000002du,
+    0x00000010u, 0x0004001cu, 0x0000002eu, 0x00000012u, 0x0000002du, 0x00040020u,
+    0x0000002fu, 0x00000003u, 0x0000002eu, 0x0004003bu, 0x0000002fu, 0x00000030u,
+    0x00000003u, 0x0004001cu, 0x00000032u, 0x0000002eu, 0x00000019u, 0x00040020u,
+    0x00000033u, 0x00000001u, 0x00000032u, 0x0004003bu, 0x00000033u, 0x00000034u,
+    0x00000001u, 0x0004002bu, 0x00000006u, 0x0000003bu, 0x00000001u, 0x00040020u,
+    0x0000003du, 0x00000007u, 0x00000012u, 0x00040020u, 0x00000042u, 0x00000007u,
+    0x0000000cu, 0x0004002bu, 0x0000000cu, 0x00000046u, 0x358637bdu, 0x00040020u,
+    0x00000048u, 0x00000007u, 0x0000000du, 0x0004002bu, 0x00000006u, 0x0000005bu,
+    0x00000002u, 0x0004002bu, 0x00000006u, 0x0000007fu, 0x00000003u, 0x00050036u,
+    0x00000002u, 0x00000004u, 0x00000000u, 0x00000003u, 0x000200f8u, 0x00000005u,
+    0x0004003bu, 0x00000042u, 0x00000058u, 0x00000007u, 0x0004003bu, 0x00000007u,
+    0x00000059u, 0x00000007u, 0x0004003bu, 0x00000007u, 0x0000005cu, 0x00000007u,
+    0x0004003bu, 0x00000042u, 0x0000005fu, 0x00000007u, 0x0004003bu, 0x00000007u,
+    0x00000060u, 0x00000007u, 0x0004003bu, 0x00000007u, 0x00000062u, 0x00000007u,
+    0x0004003bu, 0x00000042u, 0x00000065u, 0x00000007u, 0x0004003bu, 0x00000007u,
+    0x00000066u, 0x00000007u, 0x0004003bu, 0x00000007u, 0x00000068u, 0x00000007u,
+    0x0004003bu, 0x00000007u, 0x0000006bu, 0x00000007u, 0x0004003bu, 0x00000007u,
+    0x00000073u, 0x00000007u, 0x0004003bu, 0x00000007u, 0x0000007cu, 0x00000007u,
+    0x0004003bu, 0x00000007u, 0x00000081u, 0x00000007u, 0x0004003bu, 0x00000007u,
+    0x00000085u, 0x00000007u, 0x0004003bu, 0x00000007u, 0x00000087u, 0x00000007u,
+    0x0004003bu, 0x00000007u, 0x00000089u, 0x00000007u, 0x0004003bu, 0x00000007u,
+    0x0000008bu, 0x00000007u, 0x0004003bu, 0x00000007u, 0x0000009au, 0x00000007u,
+    0x0004003bu, 0x00000007u, 0x000000b4u, 0x00000007u, 0x0003003eu, 0x00000059u,
+    0x0000003bu, 0x00050039u, 0x0000000du, 0x0000005au, 0x00000010u, 0x00000059u,
+    0x0003003eu, 0x0000005cu, 0x0000005bu, 0x00050039u, 0x0000000du, 0x0000005du,
+    0x00000010u, 0x0000005cu, 0x0007000cu, 0x0000000cu, 0x0000005eu, 0x00000001u,
+    0x00000043u, 0x0000005au, 0x0000005du, 0x0003003eu, 0x00000058u, 0x0000005eu,
+    0x0003003eu, 0x00000060u, 0x0000005bu, 0x00050039u, 0x0000000du, 0x00000061u,
+    0x00000010u, 0x00000060u, 0x0003003eu, 0x00000062u, 0x00000016u, 0x00050039u,
+    0x0000000du, 0x00000063u, 0x00000010u, 0x00000062u, 0x0007000cu, 0x0000000cu,
+    0x00000064u, 0x00000001u, 0x00000043u, 0x00000061u, 0x00000063u, 0x0003003eu,
+    0x0000005fu, 0x00000064u, 0x0003003eu, 0x00000066u, 0x00000016u, 0x00050039u,
+    0x0000000du, 0x00000067u, 0x00000010u, 0x00000066u, 0x0003003eu, 0x00000068u,
+    0x0000003bu, 0x00050039u, 0x0000000du, 0x00000069u, 0x00000010u, 0x00000068u,
+    0x0007000cu, 0x0000000cu, 0x0000006au, 0x00000001u, 0x00000043u, 0x00000067u,
+    0x00000069u, 0x0003003eu, 0x00000065u, 0x0000006au, 0x0004003du, 0x0000000cu,
+    0x0000006cu, 0x00000058u, 0x0004003du, 0x0000000cu, 0x0000006du, 0x0000005fu,
+    0x000500beu, 0x0000002bu, 0x0000006eu, 0x0000006cu, 0x0000006du, 0x0004003du,
+    0x0000000cu, 0x0000006fu, 0x00000058u, 0x0004003du, 0x0000000cu, 0x00000070u,
+    0x00000065u, 0x000500beu, 0x0000002bu, 0x00000071u, 0x0000006fu, 0x00000070u,
+    0x000500a7u, 0x0000002bu, 0x00000072u, 0x0000006eu, 0x00000071u, 0x000300f7u,
+    0x00000075u, 0x00000000u, 0x000400fau, 0x00000072u, 0x00000074u, 0x00000076u,
+    0x000200f8u, 0x00000074u, 0x0003003eu, 0x00000073u, 0x00000016u, 0x000200f9u,
+    0x00000075u, 0x000200f8u, 0x00000076u, 0x0004003du, 0x0000000cu, 0x00000077u,
+    0x0000005fu, 0x0004003du, 0x0000000cu, 0x00000078u, 0x00000065u, 0x000500beu,
+    0x0000002bu, 0x00000079u, 0x00000077u, 0x00000078u, 0x000600a9u, 0x00000006u,
+    0x0000007au, 0x00000079u, 0x0000003bu, 0x0000005bu, 0x0003003eu, 0x00000073u,
+    0x0000007au, 0x000200f9u, 0x00000075u, 0x000200f8u, 0x00000075u, 0x0004003du,
+    0x00000006u, 0x0000007bu, 0x00000073u, 0x0003003eu, 0x0000006bu, 0x0000007bu,
+    0x0004003du, 0x00000006u, 0x0000007du, 0x0000006bu, 0x00050080u, 0x00000006u,
+    0x0000007eu, 0x0000007du, 0x0000003bu, 0x0005008bu, 0x00000006u, 0x00000080u,
+    0x0000007eu, 0x0000007fu, 0x0003003eu, 0x0000007cu, 0x00000080u, 0x0004003du,
+    0x00000006u, 0x00000082u, 0x0000006bu, 0x00050080u, 0x00000006u, 0x00000083u,
+    0x00000082u, 0x0000005bu, 0x0005008bu, 0x00000006u, 0x00000084u, 0x00000083u,
+    0x0000007fu, 0x0003003eu, 0x00000081u, 0x00000084u, 0x0003003eu, 0x00000085u,
+    0x00000016u, 0x00050039u, 0x00000002u, 0x00000086u, 0x0000000au, 0x00000085u,
+    0x0003003eu, 0x00000087u, 0x0000003bu, 0x00050039u, 0x00000002u, 0x00000088u,
+    0x0000000au, 0x00000087u, 0x0003003eu, 0x00000089u, 0x0000005bu, 0x00050039u,
+    0x00000002u, 0x0000008au, 0x0000000au, 0x00000089u, 0x000100dbu, 0x0004003du,
+    0x00000006u, 0x0000008cu, 0x0000007cu, 0x0003003eu, 0x0000008bu, 0x0000008cu,
+    0x00050039u, 0x00000002u, 0x0000008du, 0x0000000au, 0x0000008bu, 0x0004003du,
+    0x00000006u, 0x0000008eu, 0x0000007cu, 0x00060041u, 0x0000001eu, 0x0000008fu,
+    0x0000001cu, 0x0000008eu, 0x00000016u, 0x0004003du, 0x00000012u, 0x00000090u,
+    0x0000008fu, 0x0004003du, 0x00000006u, 0x00000091u, 0x00000081u, 0x00060041u,
+    0x0000001eu, 0x00000092u, 0x0000001cu, 0x00000091u, 0x00000016u, 0x0004003du,
+    0x00000012u, 0x00000093u, 0x00000092u, 0x00050081u, 0x00000012u, 0x00000094u,
+    0x00000090u, 0x00000093u, 0x0004003du, 0x00000006u, 0x00000095u, 0x0000006bu,
+    0x00060041u, 0x0000001eu, 0x00000096u, 0x0000001cu, 0x00000095u, 0x00000016u,
+    0x0004003du, 0x00000012u, 0x00000097u, 0x00000096u, 0x00050083u, 0x00000012u,
+    0x00000098u, 0x00000094u, 0x00000097u, 0x00050041u, 0x00000021u, 0x00000099u,
+    0x00000015u, 0x00000016u, 0x0003003eu, 0x00000099u, 0x00000098u, 0x0003003eu,
+    0x0000009au, 0x00000016u, 0x000200f9u, 0x0000009bu, 0x000200f8u, 0x0000009bu,
+    0x000400f6u, 0x0000009du, 0x0000009eu, 0x00000000u, 0x000200f9u, 0x0000009fu,
+    0x000200f8u, 0x0000009fu, 0x0004003du, 0x00000006u, 0x000000a0u, 0x0000009au,
+    0x000500b1u, 0x0000002bu, 0x000000a1u, 0x000000a0u, 0x0000002au, 0x000400fau,
+    0x000000a1u, 0x0000009cu, 0x0000009du, 0x000200f8u, 0x0000009cu, 0x0004003du,
+    0x00000006u, 0x000000a2u, 0x0000009au, 0x0004003du, 0x00000006u, 0x000000a3u,
+    0x0000007cu, 0x0004003du, 0x00000006u, 0x000000a4u, 0x0000009au, 0x00060041u,
+    0x0000001eu, 0x000000a5u, 0x00000034u, 0x000000a3u, 0x000000a4u, 0x0004003du,
+    0x00000012u, 0x000000a6u, 0x000000a5u, 0x0004003du, 0x00000006u, 0x000000a7u,
+    0x00000081u, 0x0004003du, 0x00000006u, 0x000000a8u, 0x0000009au, 0x00060041u,
+    0x0000001eu, 0x000000a9u, 0x00000034u, 0x000000a7u, 0x000000a8u, 0x0004003du,
+    0x00000012u, 0x000000aau, 0x000000a9u, 0x00050081u, 0x00000012u, 0x000000abu,
+    0x000000a6u, 0x000000aau, 0x0004003du, 0x00000006u, 0x000000acu, 0x0000006bu,
+    0x0004003du, 0x00000006u, 0x000000adu, 0x0000009au, 0x00060041u, 0x0000001eu,
+    0x000000aeu, 0x00000034u, 0x000000acu, 0x000000adu, 0x0004003du, 0x00000012u,
+    0x000000afu, 0x000000aeu, 0x00050083u, 0x00000012u, 0x000000b0u, 0x000000abu,
+    0x000000afu, 0x00050041u, 0x00000021u, 0x000000b1u, 0x00000030u, 0x000000a2u,
+    0x0003003eu, 0x000000b1u, 0x000000b0u, 0x000200f9u, 0x0000009eu, 0x000200f8u,
+    0x0000009eu, 0x0004003du, 0x00000006u, 0x000000b2u, 0x0000009au, 0x00050080u,
+    0x00000006u, 0x000000b3u, 0x000000b2u, 0x0000003bu, 0x0003003eu, 0x0000009au,
+    0x000000b3u, 0x000200f9u, 0x0000009bu, 0x000200f8u, 0x0000009du, 0x000100dau,
+    0x0004003du, 0x00000006u, 0x000000b5u, 0x00000081u, 0x0003003eu, 0x000000b4u,
+    0x000000b5u, 0x00050039u, 0x00000002u, 0x000000b6u, 0x0000000au, 0x000000b4u,
+    0x000100dbu, 0x000100fdu, 0x00010038u, 0x00050036u, 0x00000002u, 0x0000000au,
+    0x00000000u, 0x00000008u, 0x00030037u, 0x00000007u, 0x00000009u, 0x000200f8u,
+    0x0000000bu, 0x0004003bu, 0x00000007u, 0x00000023u, 0x00000007u, 0x0004003du,
+    0x00000006u, 0x0000001du, 0x00000009u, 0x00060041u, 0x0000001eu, 0x0000001fu,
+    0x0000001cu, 0x0000001du, 0x00000016u, 0x0004003du, 0x00000012u, 0x00000020u,
+    0x0000001fu, 0x00050041u, 0x00000021u, 0x00000022u, 0x00000015u, 0x00000016u,
+    0x0003003eu, 0x00000022u, 0x00000020u, 0x0003003eu, 0x00000023u, 0x00000016u,
+    0x000200f9u, 0x00000024u, 0x000200f8u, 0x00000024u, 0x000400f6u, 0x00000026u,
+    0x00000027u, 0x00000000u, 0x000200f9u, 0x00000028u, 0x000200f8u, 0x00000028u,
+    0x0004003du, 0x00000006u, 0x00000029u, 0x00000023u, 0x000500b1u, 0x0000002bu,
+    0x0000002cu, 0x00000029u, 0x0000002au, 0x000400fau, 0x0000002cu, 0x00000025u,
+    0x00000026u, 0x000200f8u, 0x00000025u, 0x0004003du, 0x00000006u, 0x00000031u,
+    0x00000023u, 0x0004003du, 0x00000006u, 0x00000035u, 0x00000009u, 0x0004003du,
+    0x00000006u, 0x00000036u, 0x00000023u, 0x00060041u, 0x0000001eu, 0x00000037u,
+    0x00000034u, 0x00000035u, 0x00000036u, 0x0004003du, 0x00000012u, 0x00000038u,
+    0x00000037u, 0x00050041u, 0x00000021u, 0x00000039u, 0x00000030u, 0x00000031u,
+    0x0003003eu, 0x00000039u, 0x00000038u, 0x000200f9u, 0x00000027u, 0x000200f8u,
+    0x00000027u, 0x0004003du, 0x00000006u, 0x0000003au, 0x00000023u, 0x00050080u,
+    0x00000006u, 0x0000003cu, 0x0000003au, 0x0000003bu, 0x0003003eu, 0x00000023u,
+    0x0000003cu, 0x000200f9u, 0x00000024u, 0x000200f8u, 0x00000026u, 0x000100dau,
+    0x000100fdu, 0x00010038u, 0x00050036u, 0x0000000du, 0x00000010u, 0x00000000u,
+    0x0000000eu, 0x00030037u, 0x00000007u, 0x0000000fu, 0x000200f8u, 0x00000011u,
+    0x0004003bu, 0x0000003du, 0x0000003eu, 0x00000007u, 0x0004003bu, 0x00000048u,
+    0x00000049u, 0x00000007u, 0x0004003du, 0x00000006u, 0x0000003fu, 0x0000000fu,
+    0x00060041u, 0x0000001eu, 0x00000040u, 0x0000001cu, 0x0000003fu, 0x00000016u,
+    0x0004003du, 0x00000012u, 0x00000041u, 0x00000040u, 0x0003003eu, 0x0000003eu,
+    0x00000041u, 0x00050041u, 0x00000042u, 0x00000043u, 0x0000003eu, 0x00000019u,
+    0x0004003du, 0x0000000cu, 0x00000044u, 0x00000043u, 0x0006000cu, 0x0000000cu,
+    0x00000045u, 0x00000001u, 0x00000004u, 0x00000044u, 0x000500bau, 0x0000002bu,
+    0x00000047u, 0x00000045u, 0x00000046u, 0x000300f7u, 0x0000004bu, 0x00000000u,
+    0x000400fau, 0x00000047u, 0x0000004au, 0x00000052u, 0x000200f8u, 0x0000004au,
+    0x0004003du, 0x00000012u, 0x0000004cu, 0x0000003eu, 0x0007004fu, 0x0000000du,
+    0x0000004du, 0x0000004cu, 0x0000004cu, 0x00000000u, 0x00000001u, 0x00050041u,
+    0x00000042u, 0x0000004eu, 0x0000003eu, 0x00000019u, 0x0004003du, 0x0000000cu,
+    0x0000004fu, 0x0000004eu, 0x00050050u, 0x0000000du, 0x00000050u, 0x0000004fu,
+    0x0000004fu, 0x00050088u, 0x0000000du, 0x00000051u, 0x0000004du, 0x00000050u,
+    0x0003003eu, 0x00000049u, 0x00000051u, 0x000200f9u, 0x0000004bu, 0x000200f8u,
+    0x00000052u, 0x0004003du, 0x00000012u, 0x00000053u, 0x0000003eu, 0x0007004fu,
+    0x0000000du, 0x00000054u, 0x00000053u, 0x00000053u, 0x00000000u, 0x00000001u,
+    0x0003003eu, 0x00000049u, 0x00000054u, 0x000200f9u, 0x0000004bu, 0x000200f8u,
+    0x0000004bu, 0x0004003du, 0x0000000du, 0x00000055u, 0x00000049u, 0x000200feu,
+    0x00000055u, 0x00010038u,
+};
+
 static VkShaderModule module_of(const uint32_t *said, uint32_t length) {
     VkShaderModuleCreateInfo asking = {0};
     asking.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -2539,8 +2717,9 @@ static VkShaderModule module_of(const uint32_t *said, uint32_t length) {
  *
  * Two of these are not the same thing on both sides and are worth saying so. A
  * rectangle is three corners on the console and the fourth is worked out from
- * them; drawn as a triangle here, half of it is missing. A quad is four corners,
- * which a fan of triangles covers exactly, so that one loses nothing.
+ * them, which is done on the device after the vertex shader where a device can,
+ * and where it cannot, half of it is missing. A quad is four corners, which a
+ * fan of triangles covers exactly, so that one loses nothing.
  */
 static VkPrimitiveTopology topology_of(uint32_t kind) {
     switch (kind) {
@@ -2555,9 +2734,8 @@ static VkPrimitiveTopology topology_of(uint32_t kind) {
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
     case XENOLITH_SHAPE_TRIANGLE_RUN:
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-    /* A rectangle reaches a host as the six vertices of the two triangles it
-     * comes to, the fourth corner having been worked out where the vertices
-     * were laid out, so what is drawn is triangles. */
+    /* A rectangle reaches a host as its three corners, a triangle the device
+     * finishes into two. */
     case XENOLITH_SHAPE_RECTANGLES:
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     default:
@@ -2600,7 +2778,7 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
         return VK_NULL_HANDLE;
     }
 
-    VkPipelineShaderStageCreateInfo stages[2] = {{0}, {0}};
+    VkPipelineShaderStageCreateInfo stages[3] = {{0}, {0}, {0}};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = first;
@@ -2609,6 +2787,19 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = second;
     stages[1].pName = "main";
+    uint32_t stages_used = 2;
+    VkShaderModule third = VK_NULL_HANDLE;
+    if (kind == XENOLITH_SHAPE_RECTANGLES && rectangles_finished_on_the_device) {
+        third = module_of(the_rest_of_a_rectangle,
+                          sizeof the_rest_of_a_rectangle / sizeof *the_rest_of_a_rectangle);
+    }
+    if (third != VK_NULL_HANDLE) {
+        stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[2].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+        stages[2].module = third;
+        stages[2].pName = "main";
+        stages_used = 3;
+    }
 
     /* The test on how solid a place has to be to be drawn, which a pixel shader
      * was written to make but not told the terms of. Settling it here rather
@@ -2721,7 +2912,7 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
 
     VkGraphicsPipelineCreateInfo asking = {0};
     asking.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    asking.stageCount = 2;
+    asking.stageCount = stages_used;
     asking.pStages = stages;
     asking.pVertexInputState = &nothing_fetched;
     asking.pInputAssemblyState = &shape;
@@ -2739,6 +2930,9 @@ static VkPipeline pipeline_for(uint32_t blending, uint32_t written, uint32_t how
                                               &made);
     vkDestroyShaderModule(drawing.device, first, NULL);
     vkDestroyShaderModule(drawing.device, second, NULL);
+    if (third != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(drawing.device, third, NULL);
+    }
 
     if (said != VK_SUCCESS) {
         return VK_NULL_HANDLE;
@@ -3117,6 +3311,7 @@ static void samples_become(VkCommandBuffer on, VkImage which, VkImageAspectFlags
     vkCmdPipelineBarrier(on, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &turning);
 }
+
 
 /* Shaders of the runtime's own. One covers the whole of what is drawn into with
  * a single triangle. Two move the samples of a place round in one draw, each
