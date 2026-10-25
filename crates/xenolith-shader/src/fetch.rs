@@ -71,6 +71,8 @@ pub enum Format {
     TwoHalfwords,
     /// Four halfwords in two words.
     FourHalfwords,
+    /// Two sixteen bit floats in one word.
+    TwoHalfFloats,
     /// Four sixteen bit floats in two words.
     FourHalfFloats,
     /// A number this crate has no reading of.
@@ -90,6 +92,7 @@ impl Format {
             17 => Self::ATenAndTwoElevens,
             25 => Self::TwoHalfwords,
             26 => Self::FourHalfwords,
+            31 => Self::TwoHalfFloats,
             32 => Self::FourHalfFloats,
             36 => Self::OneFloat,
             37 => Self::TwoFloats,
@@ -104,7 +107,7 @@ impl Format {
     pub fn count(self) -> Option<u32> {
         match self {
             Self::OneFloat => Some(1),
-            Self::TwoFloats | Self::TwoHalfwords => Some(2),
+            Self::TwoFloats | Self::TwoHalfwords | Self::TwoHalfFloats => Some(2),
             Self::ThreeFloats | Self::TwoElevensAndATen | Self::ATenAndTwoElevens => Some(3),
             Self::FourFloats
             | Self::FourBytes
@@ -136,8 +139,10 @@ impl Format {
     /// How many words this format reads.
     #[must_use]
     pub fn words(self) -> Option<u32> {
-        if matches!(self, Self::FourHalfFloats) {
-            return Some(2);
+        match self {
+            Self::TwoHalfFloats => return Some(1),
+            Self::FourHalfFloats => return Some(2),
+            _ => {}
         }
         match self.packed() {
             Some(packed) => Some(
@@ -319,6 +324,14 @@ mod tests {
         [0x3008_1000, 0x0039_3a88, 0x0000_0007],
         [0x5008_0001, 0x1f1f_f688, 0x0000_4000],
     ];
+
+    #[test]
+    fn two_sixteen_bit_floats_are_read_out_of_one_word() {
+        let format = Format::from_bits(31);
+        assert_eq!(format, Format::TwoHalfFloats);
+        assert_eq!(format.count(), Some(2));
+        assert_eq!(format.words(), Some(1));
+    }
 
     #[test]
     fn a_fetch_a_title_holds_reads_as_one() {

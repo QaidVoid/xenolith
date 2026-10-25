@@ -150,11 +150,16 @@ pub(crate) fn the_numbers_in_the_words(
 ) -> Result<Vec<Option<u32>>, Refused> {
     let how_many = format.count().ok_or(Refused::Fetch)?;
     let mut fetched = Vec::new();
-    /* Four sixteen bit floats come two to a word, and a host turns a word back
-     * into two of them in one step, so each word is unpacked to a pair and the
-     * four numbers are the two pairs' halves. */
-    if matches!(format, Format::FourHalfFloats) {
-        for word in 0..2u32 {
+    /* Sixteen bit floats come two to a word, and a host turns a word back into
+     * two of them in one step, so each word is unpacked to a pair and the
+     * numbers are the pairs' halves. */
+    if matches!(format, Format::TwoHalfFloats | Format::FourHalfFloats) {
+        let pairs = if matches!(format, Format::TwoHalfFloats) {
+            1u32
+        } else {
+            2u32
+        };
+        for word in 0..pairs {
             let from = *words.get(word as usize).ok_or(Refused::Fetch)?;
             let pair = module.name();
             module.add(
@@ -176,6 +181,7 @@ pub(crate) fn the_numbers_in_the_words(
                 fetched.push(Some(one.number()));
             }
         }
+        fetched.resize(4, None);
         return Ok(fetched);
     }
     if let Some(packed) = format.packed() {
