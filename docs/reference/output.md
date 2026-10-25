@@ -14,7 +14,7 @@ checks that this list and the directory agree.
 | `xenolith.c` | the runtime, implementing that interface |
 | `command_stream.c` | the part of the runtime that reads a title's commands for the graphics hardware |
 | `drawing.c` | the part that turns a draw command into what the renderer is asked for |
-| `sound.c` | the part that plays the sound a title mixes |
+| `sound.c` | the part that plays the sound a title mixes, and decodes the compressed sound it mixes from |
 | `vulkan.c` | the renderer, which turns those commands into host draw calls |
 | `shaders.c` | every shader the image holds, translated, where the runtime finds them by the words a title hands over |
 | `unlifted.c` | a trap for every address that could not be lifted |

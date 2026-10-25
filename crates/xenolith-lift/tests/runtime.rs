@@ -568,6 +568,89 @@ int main(void) {
     }
 }
 
+/// A buffer of compressed sound a context reads is read to its end, said to be
+/// done with, and followed by the other, skipping the packets that belong to
+/// another stream.
+///
+/// A title streaming a sound refills the buffer the decoder has finished while
+/// it reads the other, and waits to see one finished before refilling it. A
+/// buffer never finished is a sound that plays its first buffer and stops. A
+/// sound of six channels is three streams whose packets take turns, and a
+/// context reading every packet plays a third of each in turn with silence
+/// between. Needs the host's decoder, and returns where there is none.
+#[test]
+fn a_buffer_of_compressed_sound_is_read_and_handed_back() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <dlfcn.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <time.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    void *decoder = dlopen("libavcodec.so.60", RTLD_NOW);
+    if (decoder == NULL) {
+        decoder = dlopen("libavcodec.so.58", RTLD_NOW);
+    }
+    if (decoder == NULL) {
+        printf("no decoder\n");
+        return 0;
+    }
+    uint8_t *base = mmap(NULL, (size_t)1 << 32, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (base == MAP_FAILED) {
+        return 6;
+    }
+    xenolith_context ctx = {0};
+    ctx.r[3] = 64;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 548, "XMACreateContext");
+    uint32_t context = xenolith_load32(base, 64);
+    if (ctx.r[3] != 0u || context == 0) {
+        return 1;
+    }
+
+    /* Two packets to read in the first buffer, a ring of four blocks to put
+     * what comes of them in, one channel at forty eight thousand. The first
+     * packet says the three after it are another stream's, which takes the
+     * next of this one two packets into the other buffer. */
+    xenolith_store8(base, 0x20000u + 3u, 3u);
+    xenolith_store32(base, context + 20u, 0x20000u);
+    xenolith_store32(base, context + 28u, 0x30000u);
+    xenolith_store32(base, context + 8u, 32u);
+    xenolith_store32(base, context + 4u, (1u << 31) | (3u << 27));
+    xenolith_store32(base, context, 2u | (1u << 20) | (4u << 22));
+
+    for (int waited = 0; waited < 200; waited++) {
+        uint32_t first = xenolith_load32(base, context);
+        if ((first & (1u << 20)) == 0) {
+            uint32_t current = xenolith_load32(base, context + 16u) >> 31;
+            uint32_t offset = xenolith_load32(base, context + 8u) & 0x3ffffffu;
+            if (current != 1u || offset != 2u * 2048u * 8u + 32u) {
+                fprintf(stderr, "the next buffer is %u, read from bit %u\n", current, offset);
+                return 2;
+            }
+            return 0;
+        }
+        struct timespec a_while = {0, 10000000L};
+        nanosleep(&a_while, NULL);
+    }
+    fprintf(stderr, "the buffer was never finished: %#x, read to bit %u\n",
+            xenolith_load32(base, context), xenolith_load32(base, context + 8u) & 0x3ffffffu);
+    return 3;
+}
+"#;
+    if let Err(complaint) = runs("compressed_sound", program) {
+        panic!("a buffer of compressed sound was not read and handed back:\n{complaint}");
+    }
+}
+
 /// A read that begins in the last bytes of the guest span lands on something.
 ///
 /// Guest addresses are four bytes wide and a read works out where it is reading

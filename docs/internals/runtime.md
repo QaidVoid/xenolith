@@ -116,6 +116,16 @@ channels to two and plays them through the host's ALSA, loaded at run time.
 
 A host with no device is reported once and the run carries on without sound.
 
+Music and voices reach that mix compressed, through contexts a title fills in
+for the console's decoder: two buffers of packets to read and a ring to put the
+decoded sound in. The runtime decodes them with the host's libavcodec, loaded at
+run time, following the packets of the one stream each context reads and moving
+the offsets and the marks of a finished buffer the way the hardware would. A
+title starts a context by writing to the decoder's registers, which nothing here
+can see, so a context with a buffer to read and a ring to fill is taken as one
+the title wants decoded. A host without libavcodec is reported once and the
+title's music and voices are silent.
+
 ## Input
 
 A controller is read from the desktop's own way of reading a keyboard, because a

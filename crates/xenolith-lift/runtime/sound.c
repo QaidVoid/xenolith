@@ -316,3 +316,418 @@ static void start_the_output(void) {
     }
 }
 
+
+/* Compressed sound, decoded the way the console's decoder would.
+ *
+ * A title fills in a context for each compressed sound it plays: two input
+ * buffers of packets two kilobytes long, a ring of blocks for the decoded sound,
+ * and offsets into each that the decoder and the title move between them. The
+ * decoder reads packets from whichever input buffer is current, puts sixteen bit
+ * samples into the ring for as long as there is room, marks a buffer it has
+ * finished as no longer valid, and moves on to the other.
+ *
+ * The title starts a context by writing to the decoder's registers, which are
+ * ordinary memory here, so a write to them cannot be seen. What a context says
+ * is what is decoded instead: one with somewhere to put sound and a buffer to
+ * read is one the title wants decoded.
+ *
+ * The decoding is the host's own libavcodec, reached at run time for the same
+ * reason the device is. Its structures are read at the places its own headers
+ * give them, which have stayed put across the versions reached for. */
+typedef void *(*xenolith_av_find)(const char *);
+typedef void *(*xenolith_av_alloc_context)(const void *);
+typedef void *(*xenolith_av_alloc)(void);
+typedef void (*xenolith_av_free)(void **);
+typedef int (*xenolith_av_to_context)(void *, const void *);
+typedef int (*xenolith_av_open)(void *, const void *, void **);
+typedef int (*xenolith_av_send)(void *, const void *);
+typedef int (*xenolith_av_receive)(void *, void *);
+
+#define XENOLITH_PARAMETERS_KIND 0u
+#define XENOLITH_PARAMETERS_EXTRA 16u
+#define XENOLITH_PARAMETERS_EXTRA_SIZE 24u
+#define XENOLITH_PARAMETERS_CHANNELS 112u
+#define XENOLITH_PARAMETERS_RATE 116u
+#define XENOLITH_PARAMETERS_BLOCK 120u
+#define XENOLITH_PACKET_DATA 24u
+#define XENOLITH_PACKET_SIZE 32u
+#define XENOLITH_FRAME_SAMPLES 112u
+#define XENOLITH_FRAME_FORMAT 116u
+#define XENOLITH_AUDIO 1
+#define XENOLITH_FLOATS_APART 8
+
+/* What a packet is, and how much room a decoder asks to be left after one. */
+#define XENOLITH_PACKET_BYTES 2048u
+#define XENOLITH_PACKET_HEADER_BITS 32u
+#define XENOLITH_PACKET_ROOM 64u
+
+/* What the ring is counted in: blocks of two hundred and fifty six bytes. */
+#define XENOLITH_BLOCK_BYTES 256u
+
+/* Decoded sound waiting for room in a ring: a few packets' worth. */
+#define XENOLITH_WAITING_BYTES 65536u
+
+static struct {
+    void *library;
+    xenolith_av_find find;
+    xenolith_av_alloc_context alloc_context;
+    xenolith_av_free free_context;
+    xenolith_av_alloc parameters_alloc;
+    xenolith_av_free parameters_free;
+    xenolith_av_to_context to_context;
+    xenolith_av_open open;
+    xenolith_av_alloc packet_alloc;
+    xenolith_av_free packet_free;
+    xenolith_av_alloc frame_alloc;
+    xenolith_av_free frame_free;
+    xenolith_av_send send;
+    xenolith_av_receive receive;
+    const void *decoder;
+    void *packet;
+    void *frame;
+    int refused;
+} decoding;
+
+/* What is kept about one context between one look at it and the next. */
+struct compressed_sound {
+    void *decoder;
+    int unopenable;
+    uint32_t channels;
+    uint32_t rate;
+    uint8_t waiting[XENOLITH_WAITING_BYTES];
+    uint32_t waiting_bytes;
+};
+
+static struct compressed_sound *compressed_sounds[XENOLITH_SOUND_CONTEXTS];
+static pthread_mutex_t compressed_sounds_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Reaches the host's decoder, or says once why there is none. */
+static int reach_the_decoder(void) {
+    if (decoding.decoder != NULL) {
+        return 1;
+    }
+    if (decoding.refused) {
+        return 0;
+    }
+    decoding.refused = 1;
+    static const char *const names[] = {"libavcodec.so.60", "libavcodec.so.58",
+                                        "libavcodec.so"};
+    for (size_t at = 0; at < sizeof names / sizeof *names && decoding.library == NULL; at++) {
+        decoding.library = dlopen(names[at], RTLD_NOW);
+    }
+    if (decoding.library == NULL) {
+        say_a_report("compressed sound is not decoded: libavcodec is not on this host");
+        return 0;
+    }
+    decoding.find = (xenolith_av_find)dlsym(decoding.library, "avcodec_find_decoder_by_name");
+    decoding.alloc_context =
+        (xenolith_av_alloc_context)dlsym(decoding.library, "avcodec_alloc_context3");
+    decoding.free_context = (xenolith_av_free)dlsym(decoding.library, "avcodec_free_context");
+    decoding.parameters_alloc =
+        (xenolith_av_alloc)dlsym(decoding.library, "avcodec_parameters_alloc");
+    decoding.parameters_free =
+        (xenolith_av_free)dlsym(decoding.library, "avcodec_parameters_free");
+    decoding.to_context =
+        (xenolith_av_to_context)dlsym(decoding.library, "avcodec_parameters_to_context");
+    decoding.open = (xenolith_av_open)dlsym(decoding.library, "avcodec_open2");
+    decoding.packet_alloc = (xenolith_av_alloc)dlsym(decoding.library, "av_packet_alloc");
+    decoding.packet_free = (xenolith_av_free)dlsym(decoding.library, "av_packet_free");
+    decoding.frame_alloc = (xenolith_av_alloc)dlsym(decoding.library, "av_frame_alloc");
+    decoding.frame_free = (xenolith_av_free)dlsym(decoding.library, "av_frame_free");
+    decoding.send = (xenolith_av_send)dlsym(decoding.library, "avcodec_send_packet");
+    decoding.receive = (xenolith_av_receive)dlsym(decoding.library, "avcodec_receive_frame");
+    if (decoding.find == NULL || decoding.alloc_context == NULL ||
+        decoding.free_context == NULL || decoding.parameters_alloc == NULL ||
+        decoding.parameters_free == NULL || decoding.to_context == NULL ||
+        decoding.open == NULL || decoding.packet_alloc == NULL || decoding.packet_free == NULL ||
+        decoding.frame_alloc == NULL || decoding.frame_free == NULL || decoding.send == NULL ||
+        decoding.receive == NULL) {
+        say_a_report("compressed sound is not decoded: libavcodec is missing a way to "
+                     "decode");
+        return 0;
+    }
+    decoding.decoder = decoding.find("xma2");
+    decoding.packet = decoding.packet_alloc();
+    decoding.frame = decoding.frame_alloc();
+    if (decoding.decoder == NULL || decoding.packet == NULL || decoding.frame == NULL) {
+        decoding.decoder = NULL;
+        say_a_report("compressed sound is not decoded: libavcodec has no decoder for it");
+        return 0;
+    }
+    decoding.refused = 0;
+    return 1;
+}
+
+static void put_an_int(void *into, uint32_t at, int value) {
+    memcpy((uint8_t *)into + at, &value, sizeof value);
+}
+
+/* Opens a decoder for a stream of so many channels at so many samples a second.
+ *
+ * What the decoder is told of the stream is the console's own description of
+ * one, after the part every sound format shares: one stream, which channels it
+ * carries, and how big a block is. */
+static void *open_a_decoder(uint32_t channels, uint32_t rate) {
+    uint8_t *described = calloc(34u + XENOLITH_PACKET_ROOM, 1);
+    void *parameters = decoding.parameters_alloc();
+    if (described == NULL || parameters == NULL) {
+        free(described);
+        decoding.parameters_free(&parameters);
+        return NULL;
+    }
+    uint32_t which_channels = channels == 2u ? 3u : 4u;
+    described[0] = 1;
+    memcpy(described + 2, &which_channels, 4);
+    uint32_t block = XENOLITH_PACKET_BYTES;
+    memcpy(described + 10, &block, 4);
+
+    put_an_int(parameters, XENOLITH_PARAMETERS_KIND, XENOLITH_AUDIO);
+    memcpy((uint8_t *)parameters + XENOLITH_PARAMETERS_EXTRA, &described, sizeof described);
+    put_an_int(parameters, XENOLITH_PARAMETERS_EXTRA_SIZE, 34);
+    put_an_int(parameters, XENOLITH_PARAMETERS_CHANNELS, (int)channels);
+    put_an_int(parameters, XENOLITH_PARAMETERS_RATE, (int)rate);
+    put_an_int(parameters, XENOLITH_PARAMETERS_BLOCK, (int)XENOLITH_PACKET_BYTES);
+
+    void *decoder = decoding.alloc_context(decoding.decoder);
+    int made = decoder != NULL && decoding.to_context(decoder, parameters) >= 0 &&
+               decoding.open(decoder, decoding.decoder, NULL) >= 0;
+
+    void *nothing = NULL;
+    memcpy((uint8_t *)parameters + XENOLITH_PARAMETERS_EXTRA, &nothing, sizeof nothing);
+    decoding.parameters_free(&parameters);
+    free(described);
+    if (!made) {
+        decoding.free_context(&decoder);
+        return NULL;
+    }
+    return decoder;
+}
+
+/* Forgets what was decoded for a context, which a title has made again or let
+ * go, so that a sound played in it next starts from nothing. */
+static void forget_a_compressed_sound(uint32_t context) {
+    pthread_mutex_lock(&compressed_sounds_lock);
+    if (sound_contexts != 0 && context >= sound_contexts) {
+        uint32_t at = (context - sound_contexts) / XENOLITH_SOUND_CONTEXT;
+        if (at < XENOLITH_SOUND_CONTEXTS && compressed_sounds[at] != NULL) {
+            struct compressed_sound *sound = compressed_sounds[at];
+            if (sound->decoder != NULL) {
+                decoding.free_context(&sound->decoder);
+            }
+            sound->unopenable = 0;
+            sound->waiting_bytes = 0;
+        }
+    }
+    pthread_mutex_unlock(&compressed_sounds_lock);
+}
+
+/* Changes some bits of one of a context's words, leaving the rest as whoever
+ * else is writing them left them. */
+static void change_a_context_word(uint8_t *base, uint32_t at, uint32_t keep, uint32_t put) {
+    uint32_t *word = (uint32_t *)(void *)(base + at);
+    uint32_t was = __atomic_load_n(word, __ATOMIC_RELAXED);
+    uint32_t now;
+    do {
+        now = __builtin_bswap32((__builtin_bswap32(was) & keep) | put);
+    } while (!__atomic_compare_exchange_n(word, &was, now, 1, __ATOMIC_ACQ_REL,
+                                          __ATOMIC_RELAXED));
+}
+
+static int16_t a_sixteen_bit_sample(float given) {
+    float in_range = given > 1.0f ? 1.0f : (given < -1.0f ? -1.0f : given);
+    return (int16_t)(in_range * 32767.0f);
+}
+
+/* Decodes one packet, putting what comes out after what is already waiting as
+ * sixteen bit samples, the channels taken in turn, in the title's byte order. */
+static void decode_a_packet(struct compressed_sound *sound, const uint8_t *packet) {
+    uint8_t padded[XENOLITH_PACKET_BYTES + XENOLITH_PACKET_ROOM] = {0};
+    memcpy(padded, packet, XENOLITH_PACKET_BYTES);
+    uint8_t *data = padded;
+    memcpy((uint8_t *)decoding.packet + XENOLITH_PACKET_DATA, &data, sizeof data);
+    put_an_int(decoding.packet, XENOLITH_PACKET_SIZE, (int)XENOLITH_PACKET_BYTES);
+    if (decoding.send(sound->decoder, decoding.packet) < 0) {
+        return;
+    }
+    while (decoding.receive(sound->decoder, decoding.frame) >= 0) {
+        int samples = 0;
+        int format = 0;
+        memcpy(&samples, (uint8_t *)decoding.frame + XENOLITH_FRAME_SAMPLES, sizeof samples);
+        memcpy(&format, (uint8_t *)decoding.frame + XENOLITH_FRAME_FORMAT, sizeof format);
+        float *planes[2] = {NULL, NULL};
+        memcpy(planes, decoding.frame, sizeof planes);
+        if (format != XENOLITH_FLOATS_APART || planes[0] == NULL ||
+            (sound->channels == 2u && planes[1] == NULL)) {
+            continue;
+        }
+        for (int at = 0; at < samples; at++) {
+            for (uint32_t channel = 0; channel < sound->channels; channel++) {
+                if (sound->waiting_bytes + 2u > XENOLITH_WAITING_BYTES) {
+                    return;
+                }
+                uint16_t sample = (uint16_t)a_sixteen_bit_sample(planes[channel][at]);
+                sound->waiting[sound->waiting_bytes++] = (uint8_t)(sample >> 8);
+                sound->waiting[sound->waiting_bytes++] = (uint8_t)sample;
+            }
+        }
+    }
+}
+
+/* Where the decoder has reached in a context's input, and how far it may go. */
+struct reading_a_context {
+    uint32_t current;
+    uint32_t buffer;
+    uint32_t packets;
+    uint32_t offset;
+};
+
+/* Finds the input buffer to read next, moving to the other where the current
+ * one is not valid. Nought where neither is. */
+static int find_the_input(uint8_t *base, uint32_t context, struct reading_a_context *reading) {
+    uint32_t first = xenolith_load32(base, context);
+    uint32_t valid[2] = {(first >> 20) & 1u, (first >> 21) & 1u};
+    uint32_t current = xenolith_load32(base, context + 16u) >> 31;
+    if (!valid[current]) {
+        if (!valid[current ^ 1u]) {
+            return 0;
+        }
+        current ^= 1u;
+        change_a_context_word(base, context + 16u, 0x7fffffffu, current << 31);
+        change_a_context_word(base, context + 8u, 0xfc000000u, XENOLITH_PACKET_HEADER_BITS);
+    }
+    reading->current = current;
+    reading->buffer = xenolith_load32(base, context + 20u + current * 4u);
+    reading->packets = current == 0 ? first & 0xfffu : xenolith_load32(base, context + 4u) & 0xfffu;
+    reading->offset = xenolith_load32(base, context + 8u) & 0x3ffffffu;
+    return 1;
+}
+
+/* Moves sound from one context's input into its ring for as long as there is
+ * input to read and room to put what comes of it. */
+static void decode_a_context(uint8_t *base, uint32_t context, struct compressed_sound *sound) {
+    uint32_t second = xenolith_load32(base, context + 4u);
+    if ((second >> 31) == 0) {
+        return;
+    }
+    static const uint32_t rates[4] = {24000u, 32000u, 44100u, 48000u};
+    uint32_t channels = (second >> 29) & 1u ? 2u : 1u;
+    uint32_t rate = rates[(second >> 27) & 3u];
+    if (sound->channels != channels || sound->rate != rate) {
+        if (sound->decoder != NULL) {
+            decoding.free_context(&sound->decoder);
+        }
+        sound->unopenable = 0;
+        sound->channels = channels;
+        sound->rate = rate;
+        sound->waiting_bytes = 0;
+    }
+    if (sound->decoder == NULL) {
+        if (sound->unopenable) {
+            return;
+        }
+        sound->decoder = open_a_decoder(channels, rate);
+        if (sound->decoder == NULL) {
+            sound->unopenable = 1;
+            say_a_report("compressed sound of %u channels at %u is not decoded: libavcodec "
+                         "would not open a decoder for it",
+                         channels, rate);
+            return;
+        }
+    }
+
+    for (;;) {
+        uint32_t first = xenolith_load32(base, context);
+        uint32_t blocks = (first >> 22) & 31u;
+        uint32_t writing = (first >> 27) & 31u;
+        uint32_t reading = xenolith_load32(base, context + 36u) & 31u;
+        uint32_t ring = xenolith_load32(base, context + 28u) & (XENOLITH_PHYSICAL - 1u);
+        if (blocks == 0 || writing >= blocks) {
+            return;
+        }
+        /* A ring a title has emptied reads the same as one never written, so
+         * one block is always left between the two to tell them apart. */
+        uint32_t room = (reading + blocks - writing - 1u) % blocks;
+        if (room == 0) {
+            return;
+        }
+
+        if (sound->waiting_bytes >= XENOLITH_BLOCK_BYTES) {
+            memcpy(base + ring + writing * XENOLITH_BLOCK_BYTES, sound->waiting,
+                   XENOLITH_BLOCK_BYTES);
+            sound->waiting_bytes -= XENOLITH_BLOCK_BYTES;
+            memmove(sound->waiting, sound->waiting + XENOLITH_BLOCK_BYTES, sound->waiting_bytes);
+            change_a_context_word(base, context, 0x07ffffffu, ((writing + 1u) % blocks) << 27);
+            continue;
+        }
+
+        struct reading_a_context input;
+        if (!find_the_input(base, context, &input)) {
+            return;
+        }
+        uint32_t packet = input.offset / (XENOLITH_PACKET_BYTES * 8u);
+        if (packet >= input.packets) {
+            /* What is left of a skip past the end of one buffer is taken in
+             * the other, which carries on where this one stops. */
+            uint32_t past = packet - input.packets;
+            change_a_context_word(base, context, ~(1u << (20u + input.current)), 0);
+            change_a_context_word(base, context + 16u, 0x7fffffffu, (input.current ^ 1u) << 31);
+            change_a_context_word(base, context + 8u, 0xfc000000u,
+                                  past * XENOLITH_PACKET_BYTES * 8u +
+                                      XENOLITH_PACKET_HEADER_BITS);
+            continue;
+        }
+        uint32_t at = (input.buffer & (XENOLITH_PHYSICAL - 1u)) + packet * XENOLITH_PACKET_BYTES;
+        decode_a_packet(sound, base + at);
+        /* A sound of more than two channels is several streams whose packets
+         * take turns in one buffer, a context reading one of them, and each
+         * packet ends by saying how many after it belong to the others. */
+        uint32_t next = packet + 1u + xenolith_load8(base, at + 3u);
+        change_a_context_word(base, context + 8u, 0xfc000000u,
+                              next * XENOLITH_PACKET_BYTES * 8u + XENOLITH_PACKET_HEADER_BITS);
+    }
+}
+
+/* Looks at every context a title holds, often enough that a ring a title is
+ * playing from never runs dry. */
+static void *keep_compressed_sound_decoded(void *given) {
+    uint8_t *base = given;
+    for (;;) {
+        for (uint32_t at = 0; at < XENOLITH_SOUND_CONTEXTS; at++) {
+            pthread_mutex_lock(&sound_contexts_lock);
+            int taken = sound_context_taken[at];
+            pthread_mutex_unlock(&sound_contexts_lock);
+            if (!taken) {
+                continue;
+            }
+            pthread_mutex_lock(&compressed_sounds_lock);
+            if (compressed_sounds[at] == NULL) {
+                compressed_sounds[at] = calloc(1, sizeof *compressed_sounds[at]);
+            }
+            if (compressed_sounds[at] != NULL) {
+                decode_a_context(base, sound_contexts + at * XENOLITH_SOUND_CONTEXT,
+                                 compressed_sounds[at]);
+            }
+            pthread_mutex_unlock(&compressed_sounds_lock);
+        }
+        struct timespec a_while = {0, 2000000};
+        nanosleep(&a_while, NULL);
+    }
+    return NULL;
+}
+
+/* Starts decoding the first time a title makes a context, or says once why
+ * nothing will be. */
+static void start_decoding_compressed_sound(uint8_t *base) {
+    static int started;
+    if (started) {
+        return;
+    }
+    started = 1;
+    if (!reach_the_decoder()) {
+        return;
+    }
+    pthread_t decoder;
+    if (pthread_create(&decoder, NULL, keep_compressed_sound_decoded, base) == 0) {
+        pthread_detach(decoder);
+    }
+}

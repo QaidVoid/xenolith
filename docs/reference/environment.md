@@ -82,7 +82,8 @@ on without them.
 A host with no way to show a frame prints one line beginning `no frame will be
 shown, because`, names what was missing, and says the run carries on. A host with
 no sound device prints one line beginning `no sound will be heard:` and does the
-same. Neither stops the run, and neither is a translation defect.
+same, and one without libavcodec prints one line beginning `compressed sound is
+not decoded:`. None of them stops the run, and none is a translation defect.
 
 ## Running the checks for real
 

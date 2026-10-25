@@ -5017,28 +5017,22 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
          *
          * A context is a block of memory the title fills in with where its
          * compressed sound is and where the decoded sound should go, and the
-         * hardware reads and updates it. Nothing here decodes that kind of
-         * sound, so the block is made and handed over, the title fills it in,
-         * and nothing ever plays: that is said once rather than left for a
-         * title to fall silent without a word. */
-        static int said;
-        if (!said) {
-            said = 1;
-            say_a_report("compressed sound is not decoded here, so a title's music and "
-                         "voices are not heard");
-        }
+         * hardware reads and updates it. */
         uint32_t into = (uint32_t)ctx->r[3];
         uint32_t context = take_a_sound_context(base);
         if (into == 0 || context == 0) {
             ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
             return 1;
         }
+        start_decoding_compressed_sound(base);
+        forget_a_compressed_sound(context);
         xenolith_store32(base, into, context);
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
     case 550:
         /* Letting a context go, so that it can be handed out again. */
+        forget_a_compressed_sound((uint32_t)ctx->r[3]);
         give_back_a_sound_context((uint32_t)ctx->r[3]);
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
