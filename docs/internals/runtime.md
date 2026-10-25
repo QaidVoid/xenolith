@@ -112,7 +112,9 @@ title.
 
 A title hands over a mixed frame and expects to be told it was taken, because
 that answer is the clock it paces itself by. The runtime folds the console's six
-channels to two and plays them through the host's ALSA, loaded at run time.
+channels to two and plays them through the desktop's sound server, or through
+ALSA where there is none, each loaded at run time. A desktop's server holds the
+device itself, so ALSA cannot open it past one without a plugin to reach it.
 
 A host with no device is reported once and the run carries on without sound.
 

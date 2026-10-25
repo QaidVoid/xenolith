@@ -38,6 +38,25 @@ typedef long (*xenolith_pcm_writei)(void *, const void *, unsigned long);
 typedef int (*xenolith_pcm_recover)(void *, int, int);
 typedef int (*xenolith_pcm_close)(void *);
 
+/* The same for a desktop's sound server, which holds the device itself where
+ * there is one, so that the device cannot be opened past it. */
+struct xenolith_pulse_format {
+    int format;
+    uint32_t rate;
+    uint8_t channels;
+};
+struct xenolith_pulse_buffering {
+    uint32_t most;
+    uint32_t aimed_at;
+    uint32_t before_starting;
+    uint32_t least_asked;
+    uint32_t taken_at_once;
+};
+typedef void *(*xenolith_pulse_new)(const char *, const char *, int, const char *, const char *,
+                                    const struct xenolith_pulse_format *, const void *,
+                                    const struct xenolith_pulse_buffering *, int *);
+typedef int (*xenolith_pulse_write)(void *, const void *, size_t, int *);
+
 static struct {
     void *library;
     void *device;
@@ -46,6 +65,9 @@ static struct {
     xenolith_pcm_writei writei;
     xenolith_pcm_recover recover;
     xenolith_pcm_close close;
+    void *server_library;
+    void *server;
+    xenolith_pulse_write server_write;
     pthread_mutex_t handing;
     float queued[XENOLITH_QUEUED_FRAMES][XENOLITH_SAMPLES_PER_FRAME * XENOLITH_DEVICE_CHANNELS];
     unsigned reading;
@@ -58,6 +80,35 @@ static struct {
 
 static void start_the_output(void);
 
+/* Opens the desktop's sound server, where there is one to reach.
+ *
+ * Asked to keep about two frames' worth ahead of what is heard, so that what a
+ * title mixes is heard soon after it is mixed. */
+static int open_the_sound_server(void) {
+    static const int float_little_end_first = 5;
+    static const int playback = 1;
+
+    output.server_library = dlopen("libpulse-simple.so.0", RTLD_NOW);
+    if (output.server_library == NULL) {
+        return 0;
+    }
+    xenolith_pulse_new make =
+        (xenolith_pulse_new)dlsym(output.server_library, "pa_simple_new");
+    output.server_write = (xenolith_pulse_write)dlsym(output.server_library, "pa_simple_write");
+    if (make == NULL || output.server_write == NULL) {
+        return 0;
+    }
+    struct xenolith_pulse_format format = {float_little_end_first, 48000u,
+                                           XENOLITH_DEVICE_CHANNELS};
+    uint32_t a_frame = XENOLITH_SAMPLES_PER_FRAME * XENOLITH_DEVICE_CHANNELS * sizeof(float);
+    struct xenolith_pulse_buffering buffering = {0xffffffffu, a_frame * 8u, 0xffffffffu,
+                                                 0xffffffffu, 0xffffffffu};
+    int why = 0;
+    output.server = make(NULL, "xenolith", playback, NULL, "title", &format, NULL, &buffering,
+                         &why);
+    return output.server != NULL;
+}
+
 /* Opens the host's sound, or says once why there is none.
  *
  * One line, naming the library or the device that was not there, is the whole
@@ -68,11 +119,14 @@ static int open_the_output(void) {
     static const int interleaved = 3;
     static const int floats_of_the_host = 14;
 
-    if (output.device != NULL) {
+    if (output.device != NULL || output.server != NULL) {
         return 1;
     }
     if (output.refused) {
         return 0;
+    }
+    if (open_the_sound_server()) {
+        return 1;
     }
     if (output.library == NULL) {
         output.library = dlopen("libasound.so.2", RTLD_NOW);
@@ -279,7 +333,19 @@ static void *keep_the_device_fed(void *given) {
 
         take_a_frame_out(frame, &quiet);
 
-        long written = output.writei(output.device, frame, XENOLITH_SAMPLES_PER_FRAME);
+        long written;
+        if (output.server != NULL) {
+            int why = 0;
+            written = output.server_write(output.server, frame, sizeof frame, &why) == 0
+                          ? (long)XENOLITH_SAMPLES_PER_FRAME
+                          : -1;
+            if (written < 0) {
+                struct timespec a_frame = {0, 5333333L};
+                nanosleep(&a_frame, NULL);
+            }
+        } else {
+            written = output.writei(output.device, frame, XENOLITH_SAMPLES_PER_FRAME);
+        }
         if (written == -32) {
             /* The device ran dry, which the library calls EPIPE. */
             output.recover(output.device, -32, 1);

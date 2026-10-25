@@ -5452,10 +5452,16 @@ int main(void) {
         panic!("a run with no sound device did not carry on:\n{complaint}");
     }
 
-    /* The one line names what is missing, and says it once. */
+    /* The one line names what is missing, and says it once. The run is
+     * pointed at a sound server and a device configuration that are not there,
+     * so that a machine with sound runs it as one without. */
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("no_device");
+    std::fs::write(directory.join("no_devices.conf"), "")
+        .unwrap_or_else(|error| panic!("writing an empty configuration: {error}"));
     let said = Command::new(directory.join("program"))
         .current_dir(&directory)
+        .env("PULSE_SERVER", "unix:/nonexistent")
+        .env("ALSA_CONFIG_PATH", directory.join("no_devices.conf"))
         .output()
         .unwrap_or_else(|error| panic!("running the check: {error}"));
     let complaint = String::from_utf8_lossy(&said.stderr);
