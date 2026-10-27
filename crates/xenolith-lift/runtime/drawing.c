@@ -1163,6 +1163,7 @@ static uint32_t what_a_shader_reads_of(const uint32_t *reads, uint32_t streams, 
 struct a_copy_kept {
     uint32_t where;
     uint32_t words;
+    uint32_t order;
     uint32_t at;
     uint32_t given_out;
 };
@@ -1181,15 +1182,17 @@ static uint32_t which_copy(uint32_t where, uint32_t words) {
 
 /* Where in the room the words a title keeps at `where` were already put this
  * frame, or nought where they were not. */
-static uint32_t where_it_was_put(uint32_t where, uint32_t words, uint32_t given_out) {
+static uint32_t where_it_was_put(uint32_t where, uint32_t words, uint32_t order,
+                                 uint32_t given_out) {
     const struct a_copy_kept *same = &copies_kept[which_copy(where, words)];
     if (same->given_out == given_out && same->where == where && same->words == words
-        && same->at != 0) {
+        && same->order == order && same->at != 0) {
         return same->at;
     }
     for (uint32_t at = 0; at < XENOLITH_LARGE_COPIES_KEPT; at++) {
         const struct a_copy_kept *large = &large_copies_kept[at];
-        if (large->given_out == given_out && large->at != 0 && where >= large->where
+        if (large->given_out == given_out && large->at != 0 && large->order == order
+            && where >= large->where
             && (where - large->where) / 4u + words <= large->words
             && (where - large->where) % 4u == 0) {
             return large->at + (where - large->where) / 4u;
@@ -1198,9 +1201,9 @@ static uint32_t where_it_was_put(uint32_t where, uint32_t words, uint32_t given_
     return 0;
 }
 
-static void say_where_it_was_put(uint32_t where, uint32_t words, uint32_t given_out,
-                                 uint32_t at) {
-    struct a_copy_kept kept = {where, words, at, given_out};
+static void say_where_it_was_put(uint32_t where, uint32_t words, uint32_t order,
+                                 uint32_t given_out, uint32_t at) {
+    struct a_copy_kept kept = {where, words, order, at, given_out};
     copies_kept[which_copy(where, words)] = kept;
     if (words >= XENOLITH_A_LARGE_COPY) {
         large_copies_kept[large_copies_made++ % XENOLITH_LARGE_COPIES_KEPT] = kept;
@@ -1300,17 +1303,19 @@ static uint32_t hand_over_the_vertices(const uint8_t *base, uint32_t vertices, u
             continue;
         }
 
-        uint32_t put = where_it_was_put(where, words, given_out);
+        uint32_t order = high & 3u;
+        uint32_t put = where_it_was_put(where, words, order, given_out);
         if (put != 0) {
             starts[slot] = put - skipped;
             continue;
         }
-        say_where_it_was_put(where, words, given_out, begins + filled);
+        say_where_it_was_put(where, words, order, given_out, begins + filled);
 
         starts[slot] = begins + filled - skipped;
         window[slot] = filled - skipped;
         for (uint32_t step = 0; step < words; step++) {
-            window[filled + step] = xenolith_load32(base, where + step * 4u);
+            window[filled + step] =
+                xenolith_as_a_fetch_reads(xenolith_load32(base, where + step * 4u), order);
         }
         say_where_a_shape_reads_from(slot, where, words, window + filled, shape);
         drawn_reads_from = where;

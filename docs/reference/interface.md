@@ -535,6 +535,13 @@ the colour register says.
 
 How a draw's vertex data reaches the translated vertex shader.
 
+### `xenolith_as_a_fetch_reads`
+
+A word of a title's vertices as a fetch reads it, from the word as the processor
+reads it and the byte order the fetch constant names: not turned, turned within
+each half, turned whole (the processor's own order), or the halves turned about
+each other.
+
 ### `xenolith_room_for_vertices`
 
 Somewhere to put the vertices a shader goes and gets, and how many words of it

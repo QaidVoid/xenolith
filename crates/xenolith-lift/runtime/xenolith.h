@@ -996,6 +996,28 @@ int xenolith_begin_a_frame(void);
  * solid than the test, exactly as solid, and more solid. */
 #define XENOLITH_DRAWN_HOWEVER_SOLID 7u
 
+/* A word of a title's vertices as a fetch reads it, from the word as the
+ * processor reads it and the order the fetch says its bytes are in.
+ *
+ * The processor reads a word with its first byte highest. A fetch says how the
+ * graphics hardware turns the bytes it reads: not at all (nought), within each
+ * half (one), whole (two, which is the processor's own order), or the halves
+ * about each other (three). A title keeping pairs of halfwords turns within
+ * each half, and read the processor's way the two halves of every pair change
+ * places. */
+static inline uint32_t xenolith_as_a_fetch_reads(uint32_t word, uint32_t order) {
+    switch (order & 3u) {
+    case 0:
+        return __builtin_bswap32(word);
+    case 1:
+        return (word << 16) | (word >> 16);
+    case 3:
+        return ((word & 0x00ff00ffu) << 8) | ((word >> 8) & 0x00ff00ffu);
+    default:
+        return word;
+    }
+}
+
 /* The mode a title draws in when only how far away things are is kept. */
 #define XENOLITH_ONLY_HOW_FAR 5u
 

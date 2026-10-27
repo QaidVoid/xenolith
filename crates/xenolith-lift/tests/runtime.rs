@@ -7123,6 +7123,42 @@ fn a_constant_read_without_its_sign_is_positive() {
     );
 }
 
+/// A fetch reads its vertices in the byte order its constant names.
+///
+/// A title keeps pairs of halfwords with the bytes turned within each half,
+/// and read the way the processor reads a word the two halves of every pair
+/// change places: the ground it builds out of them is laid in the wrong
+/// places. Each of the four orders is checked against one word.
+#[test]
+fn a_fetch_reads_its_vertices_in_the_order_it_names() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const uint32_t word = 0x11223344u;
+    const uint32_t wanted[4] = {0x44332211u, 0x33441122u, 0x11223344u, 0x22114433u};
+    for (uint32_t order = 0; order < 4; order++) {
+        uint32_t read = xenolith_as_a_fetch_reads(word, order);
+        if (read != wanted[order]) {
+            fprintf(stderr, "order %u read %08x rather than %08x\n", order, read,
+                    wanted[order]);
+            return 1;
+        }
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("fetch_order", program) {
+        panic!("a fetch did not read its vertices in the order it names:\n{complaint}");
+    }
+}
+
 /// A draw keeping only how far away things are is given no test.
 ///
 /// The console runs no pixel shader for such a draw, so nothing a shader puts
