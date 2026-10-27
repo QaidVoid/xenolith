@@ -2380,8 +2380,15 @@ int xenolith_look_at_a_picture(uint32_t slot, const uint8_t *from, uint32_t wher
                 put[3] = took[0];
                 continue;
             }
-            memcpy(put, took, square_bytes);
-            turn_the_bytes(put, square_bytes, order);
+            /* Turned before it is put, because what it is put in is memory
+             * the device reads, which the processor writes quickly and reads
+             * back slowly. Turned in place, the pictures that come this way
+             * went a hundred times slower than the rest, and a scene that
+             * loaded its pictures showed white for seconds. */
+            uint8_t square[XENOLITH_SQUARE_BYTES];
+            memcpy(square, took, square_bytes);
+            turn_the_bytes(square, square_bytes, order);
+            memcpy(put, square, square_bytes);
         }
     }
     keep_what_a_picture_came_to(where, wide * square_across, tall * square_across,
