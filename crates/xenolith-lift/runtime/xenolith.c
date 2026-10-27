@@ -96,6 +96,7 @@ static const struct {
 };
 
 static void initialize_sound_contexts(uint8_t *base);
+static void say_what_the_display_is(uint8_t *base);
 static void say_what_was_read_in_total(void);
 static void say_what_was_read_and_stop(int which);
 static void say_a_report(const char *format, ...);
@@ -174,6 +175,7 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
         return NULL;
     }
     initialize_sound_contexts(base);
+    say_what_the_display_is(base);
     return (uint8_t *)base;
 }
 
@@ -2468,6 +2470,24 @@ static void raise_the_graphics_interrupt(uint8_t *base, uint32_t source,
  */
 #define XENOLITH_REGISTERS 0x7fc80000u
 #define XENOLITH_REGISTER_COUNT 0x8000u
+
+/* What the display hardware says about itself, which a title reads straight out
+ * of its registers and never writes: how big the picture it scans out is, the
+ * width over the height, and which line of it the scan has reached.
+ *
+ * The display is the one taken to be there everywhere else, and the scan is
+ * said to be at its last line, which is what a title waiting for the picture to
+ * be scanned out wants to see. Left as nought, one title worked out how far
+ * down the scan was by dividing by the height and stopped on the trap it keeps
+ * for dividing by nought. */
+#define XENOLITH_SCANNED_OUT_SIZE 0x1961u
+#define XENOLITH_SCANNED_OUT_LINE 0x194cu
+
+static void say_what_the_display_is(uint8_t *base) {
+    xenolith_store32(base, XENOLITH_REGISTERS + XENOLITH_SCANNED_OUT_SIZE * 4u,
+                     (1280u << 16) | 720u);
+    xenolith_store32(base, XENOLITH_REGISTERS + XENOLITH_SCANNED_OUT_LINE * 4u, 720u);
+}
 
 /* Where a title's shader constants begin among the registers. */
 #define XENOLITH_CONSTANT_REGISTER 0x4000u

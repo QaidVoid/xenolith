@@ -1746,6 +1746,44 @@ int main(void) {
     }
 }
 
+/// The display's size and the line its scan has reached read as the display
+/// taken to be there, before a title has written anything.
+///
+/// One title works out how far down the scan is by dividing by the height it
+/// reads, and stopped on its trap for dividing by nought.
+#[test]
+fn the_display_says_how_big_it_is() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    uint32_t size = xenolith_load32(base, 0x7fc80000u + 0x1961u * 4u);
+    uint32_t line = xenolith_load32(base, 0x7fc80000u + 0x194cu * 4u);
+    if (size != ((1280u << 16) | 720u) || line != 720u) {
+        fprintf(stderr, "the display said %#x and line %u\n", size, line);
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("display_size", program) {
+        panic!("the display did not say how big it is:\n{complaint}");
+    }
+}
+
 /// A thread that lets a lock go and waits is waiting before anyone can take the
 /// lock.
 ///
