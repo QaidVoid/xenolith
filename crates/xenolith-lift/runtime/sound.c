@@ -330,6 +330,16 @@ static void take_a_frame_out(float *into, int *quiet) {
     pthread_mutex_unlock(&output.handing);
 }
 
+/* Whether the device has room for another frame, or there is no device and a
+ * frame handed over goes nowhere anyway. */
+static int the_device_has_room(void) {
+    pthread_mutex_lock(&output.handing);
+    int room = (output.device == NULL && output.server == NULL)
+               || output.writing - output.reading < XENOLITH_QUEUED_FRAMES;
+    pthread_mutex_unlock(&output.handing);
+    return room;
+}
+
 /* How far playback has got, in samples the device has taken.
  *
  * A title reads this to pace what it shows against what is heard, and the

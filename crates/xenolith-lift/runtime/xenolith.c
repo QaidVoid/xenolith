@@ -2139,6 +2139,8 @@ static uint32_t sound_client_callback;
 #define XENOLITH_SOUND_DRIVER 0x41550000u
 #define XENOLITH_NANOSECONDS_A_FRAME_OF_SOUND 5333333L
 
+static int the_device_has_room(void);
+
 /* Asks the title for a frame of sound as often as the console would.
  *
  * The console's sound hardware calls the client a title registered each time
@@ -2165,6 +2167,14 @@ static void *ask_for_sound(void *given) {
         }
         uint32_t callback = __atomic_load_n(&sound_client_callback, __ATOMIC_ACQUIRE);
         if (callback == 0) {
+            continue;
+        }
+        /* Not asked while the device has fallen behind. The console's hardware
+         * asks for a frame when it has room for one, and asking on the clock
+         * regardless filled the queue whenever the device paused, the frames
+         * that did not fit were thrown away, and the sound ran ahead of the
+         * picture by as much for the rest of the scene. */
+        if (!the_device_has_room()) {
             continue;
         }
         xenolith_function body = xenolith_lookup(callback);
