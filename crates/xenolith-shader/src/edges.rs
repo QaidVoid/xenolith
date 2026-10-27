@@ -310,6 +310,7 @@ pub(crate) fn what_a_shader_says(
     kind: Kind,
     model: u32,
     names: &[crate::spirv::Name; 5],
+    says_how_far: bool,
 ) -> Said {
     let [to_size, to_out, to_carried, out, entry] = *names;
     /* How big a point is, which a shader has to say whenever what is being
@@ -349,6 +350,18 @@ pub(crate) fn what_a_shader_says(
         one
     });
 
+    /* How far away the pixel being drawn is, where a pixel shader says so
+     * itself rather than leaving it to the shape. Only a shader that says it is
+     * given it, because a host that has to wait for the shader to know how far
+     * away a pixel is can no longer throw away the pixels behind what is
+     * already drawn before running it. */
+    let how_far = (matches!(kind, Kind::Pixel) && says_how_far).then(|| {
+        let one = module.name();
+        module.add(opcodes::VARIABLE, &[to_size.number(), one.number(), 3]);
+        module.annotate(71, &[one.number(), 11, 22]);
+        one
+    });
+
     let carried = the_outputs(
         module,
         kind,
@@ -360,17 +373,26 @@ pub(crate) fn what_a_shader_says(
         out,
         entry,
         model,
-        &[which_vertex.map(|(one, _)| one), how_big, where_it_is]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>(),
+        &[
+            which_vertex.map(|(one, _)| one),
+            how_big,
+            where_it_is,
+            how_far,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>(),
     );
+    if how_far.is_some() {
+        module.add_early(16, &[entry.number(), 12]);
+    }
 
     Said {
         carried,
         how_big,
         which_vertex,
         where_it_is,
+        how_far,
     }
 }
 
@@ -380,6 +402,7 @@ pub(crate) struct Said {
     pub(crate) how_big: Option<crate::spirv::Name>,
     pub(crate) which_vertex: Option<(crate::spirv::Name, crate::spirv::Name)>,
     pub(crate) where_it_is: Option<crate::spirv::Name>,
+    pub(crate) how_far: Option<crate::spirv::Name>,
 }
 
 /// Puts where the pixel being drawn is into the register a title asked for it

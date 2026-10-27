@@ -7,7 +7,7 @@
 //! are two ways of calling it.
 
 use crate::arithmetic::arithmetic;
-use crate::constants::{THE_COUNTS, THE_TRUTHS};
+use crate::constants::{HOW_FAR, THE_COUNTS, THE_TRUTHS};
 use crate::export::what_it_puts_out;
 use crate::fetching::go_and_fetch;
 use crate::layout::{Asking, Step, Stretch, WhereNext, stretches, stretches_that_jump};
@@ -27,6 +27,20 @@ struct Carrying {
     predicate: u32,
     exported: Option<u32>,
     carried_over: Option<(u32, u32)>,
+}
+
+/// Whether a pixel shader says how far away its pixel is, which is an export
+/// to the place the console keeps for it.
+fn says_how_far(kind: Kind, words: &[u32], steps: &[Step]) -> bool {
+    matches!(kind, Kind::Pixel)
+        && steps.iter().any(|step| {
+            !step.fetches
+                && step
+                    .at
+                    .checked_mul(ALU_WORDS)
+                    .and_then(|at| Alu::at(words, at))
+                    .is_some_and(|alu| alu.exports() && alu.vector_destination() == HOW_FAR)
+        })
 }
 
 /// Writes out one instruction of a shader.
@@ -569,7 +583,8 @@ pub fn translate(kind: Kind, words: &[u32]) -> Result<Translated, Refused> {
         } = what_the_fetches_need(words, &running)?;
 
         let mut module = Module::new();
-        let named = preamble(&mut module, kind, &wanted, samples, 0);
+        let says_how_far = says_how_far(kind, words, &running);
+        let named = preamble(&mut module, kind, &wanted, samples, 0, says_how_far);
 
         let mut carrying = Carrying {
             previous: Some(extract(&mut module, &named, named.nothing.number(), 0)),
@@ -603,7 +618,8 @@ pub fn translate(kind: Kind, words: &[u32]) -> Result<Translated, Refused> {
     } = what_the_fetches_need(words, &flattened)?;
 
     let mut module = Module::new();
-    let named = preamble(&mut module, kind, &wanted, samples, all.len());
+    let says_how_far = says_how_far(kind, words, &flattened);
+    let named = preamble(&mut module, kind, &wanted, samples, all.len(), says_how_far);
     let exported = a_shader_that_jumps(&mut module, &named, words, &all)?;
     what_it_puts_out(&mut module, &named, exported);
 

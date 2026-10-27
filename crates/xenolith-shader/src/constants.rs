@@ -37,6 +37,10 @@ pub(crate) const DRAWN_WHATEVER_IT_IS: u32 = 7;
 /// this, which is where the vertex went.
 pub const POSITION: u8 = 62;
 
+/// Which export a pixel shader puts how far away its pixel is in, in place of
+/// how far away the shape drawn says it is.
+pub(crate) const HOW_FAR: u8 = 61;
+
 /// How many things a shader carries on to whatever runs after it.
 ///
 /// Sixteen, which is how many the console has. Fewer was tried, on the grounds

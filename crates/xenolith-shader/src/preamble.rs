@@ -66,6 +66,8 @@ pub(crate) struct Named {
     pub(crate) predicate_kept: crate::spirv::Name,
     pub(crate) previous_kept: crate::spirv::Name,
     pub(crate) exported_kept: crate::spirv::Name,
+    /// Where a pixel shader that says how far away its pixel is says it.
+    pub(crate) how_far: Option<crate::spirv::Name>,
     /// The pictures a shader was handed, named only where it reads one.
     pub(crate) looked_at: Option<Pictures>,
     /// The test a title sets on how solid a place has to be to be drawn at all,
@@ -168,6 +170,7 @@ pub(crate) fn preamble(
     wanted: &[u32],
     samples: bool,
     stretches: usize,
+    says_how_far: bool,
 ) -> Named {
     let extended = module.name();
     let void = module.name();
@@ -206,11 +209,13 @@ pub(crate) fn preamble(
         how_big,
         which_vertex,
         where_it_is,
+        how_far,
     } = what_a_shader_says(
         module,
         kind,
         model,
         &[to_size, to_out, to_carried, out, entry],
+        says_how_far,
     );
 
     let to_one = module.name();
@@ -421,6 +426,22 @@ pub(crate) fn preamble(
         );
     }
 
+    /* How far away the shape says the pixel is, which stands where the
+     * shader's own word on it runs on a predicate that does not hold. */
+    if let (Some(told), Some(here)) = (how_far, where_it_is) {
+        let read = module.name();
+        module.add(
+            opcodes::LOAD,
+            &[four.number(), read.number(), here.number()],
+        );
+        let away = module.name();
+        module.add(
+            opcodes::COMPOSITE_EXTRACT,
+            &[float.number(), away.number(), read.number(), 2],
+        );
+        module.add(opcodes::STORE, &[told.number(), away.number()]);
+    }
+
     what_a_shader_starts_with(
         module,
         &Edges {
@@ -475,5 +496,6 @@ pub(crate) fn preamble(
         predicate_kept,
         previous_kept,
         exported_kept,
+        how_far,
     }
 }

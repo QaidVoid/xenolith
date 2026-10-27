@@ -9,12 +9,13 @@
 //! here too: the hardware discards a place that fails it, and a host says the
 //! same by ending the invocation.
 
-use crate::Kind;
 use crate::constants::ALL_THE_CONSTANTS;
 use crate::opcodes;
 use crate::operands::read_a_constant;
 use crate::preamble::Named;
 use crate::spirv::Module;
+use crate::values::{extract, what_is_exported};
+use crate::{Alu, Kind, Refused};
 
 /// Writes out what a shader puts out, and the end of it.
 pub(crate) fn what_it_puts_out(module: &mut Module, named: &Named, exported: Option<u32>) {
@@ -232,4 +233,53 @@ fn held_to_a_fraction(
         ],
     );
     chosen.number()
+}
+
+/// Writes how far away a pixel is where a pixel shader says so, keeping what
+/// was there where the instruction does not run or names no lane of it.
+pub(crate) fn say_how_far(
+    module: &mut Module,
+    named: &Named,
+    alu: Alu,
+    produced: u32,
+    alone: Option<u32>,
+    running: Option<u32>,
+    told: crate::spirv::Name,
+) -> Result<(), Refused> {
+    if (alu.vector_lanes() | alu.scalar_lanes()) & 1 == 0 {
+        return Ok(());
+    }
+    let all = what_is_exported(
+        module,
+        named,
+        produced,
+        alone,
+        alu.vector_lanes(),
+        alu.scalar_lanes(),
+        None,
+    )?;
+    let away = extract(module, named, all, 0);
+    let away = if let Some(running) = running {
+        let held = module.name();
+        module.add(
+            opcodes::LOAD,
+            &[named.float.number(), held.number(), told.number()],
+        );
+        let chosen = module.name();
+        module.add(
+            opcodes::SELECT,
+            &[
+                named.float.number(),
+                chosen.number(),
+                running,
+                away,
+                held.number(),
+            ],
+        );
+        chosen.number()
+    } else {
+        away
+    };
+    module.add(opcodes::STORE, &[told.number(), away]);
+    Ok(())
 }

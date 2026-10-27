@@ -8,7 +8,8 @@
 //! comparison said so, and a module written as one straight run says that by
 //! choosing between the answer and what was already there.
 
-use crate::constants::POSITION;
+use crate::constants::{HOW_FAR, POSITION};
+use crate::export::say_how_far;
 use crate::opcodes;
 use crate::operands::read;
 use crate::preamble::Named;
@@ -535,6 +536,15 @@ pub(crate) fn put_it_where_it_goes(
          * same thing puts whichever came last where the position belongs,
          * which is how a shader that draws nothing comes about. */
         let where_to = alu.vector_destination();
+        /* How far away the pixel is goes where a host keeps that, and the
+         * colour stands as it was. Taken for the colour, it was overwritten
+         * by the colour after it, and a title that puts back how far away a
+         * scene is before drawing clouds into it had them drawn over
+         * everything. */
+        if let (Kind::Pixel, HOW_FAR, Some(told)) = (named.kind, where_to, named.how_far) {
+            say_how_far(module, named, alu, produced, alone, running, told)?;
+            return Ok(standing);
+        }
         if matches!(named.kind, Kind::Vertex) && where_to != POSITION {
             let Some(one) = named.carried.get(usize::from(where_to)) else {
                 return Err(Refused::Export(where_to));
