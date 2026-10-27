@@ -7698,6 +7698,107 @@ int main(void) {
     }
 }
 
+/// Memory a title gives back is handed out again, cleared.
+///
+/// One title takes and lets go of each screen's worth of memory as it moves
+/// between them, and with nothing taken back it ran out a few screens in and
+/// threw for want of memory. A hundred turns of taking and giving back sixteen
+/// megabytes is three times what there is, so every one of them has to find
+/// what the last gave back.
+#[test]
+fn memory_given_back_is_handed_out_again() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static uint32_t take(uint8_t *base, uint32_t size) {
+    xenolith_context ctx = {0};
+    xenolith_store32(base, 0x200, 0);
+    xenolith_store32(base, 0x204, size);
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0x204;
+    ctx.r[5] = 0x3000;
+    ctx.r[6] = 4;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 204, "NtAllocateVirtualMemory");
+    return ctx.r[3] == 0 ? xenolith_load32(base, 0x200) : 0;
+}
+
+static int give_back(uint8_t *base, uint32_t at) {
+    xenolith_context ctx = {0};
+    xenolith_store32(base, 0x210, at);
+    xenolith_store32(base, 0x214, 0);
+    ctx.r[3] = 0x210;
+    ctx.r[4] = 0x214;
+    ctx.r[5] = 0x8000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 220, "NtFreeVirtualMemory");
+    return ctx.r[3] == 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    uint32_t first = 0;
+    for (int turn = 0; turn < 100; turn++) {
+        uint32_t at = take(base, 16u << 20);
+        if (at == 0) {
+            fprintf(stderr, "turn %d found no memory\n", turn);
+            return 3;
+        }
+        if (turn == 0) {
+            first = at;
+        } else if (at != first || xenolith_load32(base, at + 4096) != 0) {
+            fprintf(stderr, "turn %d was handed %#x, holding %#x\n", turn, at,
+                    xenolith_load32(base, at + 4096));
+            return 4;
+        }
+        xenolith_store32(base, at + 4096, 0xfeedfaceu);
+        if (!give_back(base, at)) { return 5; }
+    }
+
+    /* Memory the graphics hardware reaches is given back by where it starts. */
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0;
+    ctx.r[4] = 0x40000;
+    ctx.r[5] = 4;
+    ctx.r[6] = 0;
+    ctx.r[7] = 0xffffffffu;
+    ctx.r[8] = 0x10000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 186, "MmAllocatePhysicalMemoryEx");
+    uint32_t physical = (uint32_t)ctx.r[3];
+    ctx.r[3] = 0;
+    ctx.r[4] = physical;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 189, "MmFreePhysicalMemory");
+    ctx.r[3] = 0;
+    ctx.r[4] = 0x40000;
+    ctx.r[5] = 4;
+    ctx.r[6] = 0;
+    ctx.r[7] = 0xffffffffu;
+    ctx.r[8] = 0x10000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 186, "MmAllocatePhysicalMemoryEx");
+    if (physical == 0 || (uint32_t)ctx.r[3] != physical) {
+        fprintf(stderr, "physical memory went to %#x and then %#x\n", physical,
+                (unsigned)ctx.r[3]);
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("memory_given_back", program) {
+        panic!("memory given back was not handed out again:\n{complaint}");
+    }
+}
+
 /// A controller's reading carries a new number each time what it holds
 /// changes, and the same number while it does not.
 ///

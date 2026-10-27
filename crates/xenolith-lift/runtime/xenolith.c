@@ -97,6 +97,7 @@ static const struct {
 
 static void initialize_sound_contexts(uint8_t *base);
 static void say_what_the_display_is(uint8_t *base);
+static uint8_t *arena_memory;
 static void say_what_was_read_in_total(void);
 static void say_what_was_read_and_stop(int which);
 static void say_a_report(const char *format, ...);
@@ -174,6 +175,7 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
         fprintf(stderr, "xenolith: %s held nothing\n", image);
         return NULL;
     }
+    arena_memory = base;
     initialize_sound_contexts(base);
     say_what_the_display_is(base);
     return (uint8_t *)base;
@@ -461,50 +463,140 @@ static uint32_t whole_grains(uint32_t size) {
     return (uint32_t)(grains * XENOLITH_HEAP_GRAIN);
 }
 
-/* Where guest memory is handed out from.
+/* Where guest memory is handed out from, and what of it is free.
  *
  * One arena serves both the virtual and the physical allocator. The console
- * distinguishes the two and this does not: every guest address is mapped and
- * zeroed before a title starts, and none of it is nearer the graphics hardware
- * than any other.
+ * distinguishes the two and this does not: every guest address is mapped
+ * before a title starts, and none of it is nearer the graphics hardware than
+ * any other.
  *
- * Nothing is ever given back. A title that allocated and freed in a loop would
- * exhaust this where the console would not.
- */
-static uint32_t handed_out = XENOLITH_HEAP_BASE;
+ * What a title gives back is free again, joined to any free stretch beside it,
+ * and is handed out again from the lowest address that fits. One title loads
+ * and lets go of each screen's worth of memory as it moves between them, and
+ * with nothing ever taken back it ran out a few screens in. Memory handed out
+ * again is cleared first, because the console hands out cleared memory and
+ * what was there before belongs to whatever had it. */
+#define XENOLITH_STRETCHES 16384u
+
+struct stretch {
+    uint32_t at;
+    uint32_t size;
+};
+
+static struct stretch free_stretches[XENOLITH_STRETCHES] = {
+    {XENOLITH_HEAP_BASE, XENOLITH_HEAP_END - XENOLITH_HEAP_BASE}};
+static uint32_t free_count = 1;
+static struct stretch taken_stretches[XENOLITH_STRETCHES];
+static uint32_t taken_count;
+static uint8_t *arena_memory;
 static pthread_mutex_t handing_out = PTHREAD_MUTEX_INITIALIZER;
+
+/* Where among the taken stretches one at `at` is, or would go. */
+static uint32_t where_taken(uint32_t at) {
+    uint32_t low = 0;
+    uint32_t high = taken_count;
+    while (low < high) {
+        uint32_t middle = low + (high - low) / 2u;
+        if (taken_stretches[middle].at < at) {
+            low = middle + 1u;
+        } else {
+            high = middle;
+        }
+    }
+    return low;
+}
 
 static uint32_t take_guest_memory(uint32_t size, uint32_t alignment) {
     if (alignment < XENOLITH_HEAP_GRAIN) {
         alignment = XENOLITH_HEAP_GRAIN;
     }
-
     uint32_t rounded = whole_grains(size);
+    if (rounded == 0) {
+        return 0;
+    }
 
     pthread_mutex_lock(&handing_out);
-    uint32_t at = (handed_out + alignment - 1) & ~(alignment - 1);
+    for (uint32_t one = 0; one < free_count && taken_count < XENOLITH_STRETCHES; one++) {
+        struct stretch *free = &free_stretches[one];
+        uint64_t end = (uint64_t)free->at + free->size;
+        uint64_t at = ((uint64_t)free->at + alignment - 1u) & ~(uint64_t)(alignment - 1u);
+        if (at + rounded > end) {
+            continue;
+        }
+        uint32_t before = (uint32_t)(at - free->at);
+        uint32_t after = (uint32_t)(end - (at + rounded));
+        if (before != 0 && after != 0) {
+            if (free_count >= XENOLITH_STRETCHES) {
+                break;
+            }
+            memmove(&free_stretches[one + 2u], &free_stretches[one + 1u],
+                    (free_count - one - 1u) * sizeof *free_stretches);
+            free_stretches[one + 1u] = (struct stretch){(uint32_t)at + rounded, after};
+            free->size = before;
+            free_count++;
+        } else if (before != 0) {
+            free->size = before;
+        } else if (after != 0) {
+            free->at = (uint32_t)at + rounded;
+            free->size = after;
+        } else {
+            memmove(free, free + 1, (free_count - one - 1u) * sizeof *free_stretches);
+            free_count--;
+        }
 
-    /* Where the next grain would start, and whether it fits.
-     *
-     * The fit is checked against the end rather than as a subtraction from it.
-     * Written as `rounded > XENOLITH_HEAP_END - at`, an `at` above the end
-     * makes the subtraction wrap to something enormous and the test passes,
-     * which hands out an address past the arena and past everything the runtime
-     * manages. That is not hypothetical: one title asks for nearly four
-     * gigabytes, gets an address past the end, and the fill it then writes
-     * reaches the image's own data section and overwrites a live object.
-     *
-     * Two ways of arriving above the end are both refused. `at` can be above it
-     * already, which a wrapped `handed_out + alignment - 1` produces, and
-     * `at + rounded` can be, which an ask larger than what is left produces. */
-    if (at < handed_out || at > XENOLITH_HEAP_END ||
-        rounded > XENOLITH_HEAP_END - at) {
+        uint32_t place = where_taken((uint32_t)at);
+        memmove(&taken_stretches[place + 1u], &taken_stretches[place],
+                (taken_count - place) * sizeof *taken_stretches);
+        taken_stretches[place] = (struct stretch){(uint32_t)at, rounded};
+        taken_count++;
+        pthread_mutex_unlock(&handing_out);
+        if (arena_memory != NULL) {
+            memset(arena_memory + at, 0, rounded);
+        }
+        return (uint32_t)at;
+    }
+    pthread_mutex_unlock(&handing_out);
+    return 0;
+}
+
+/* Takes back a stretch handed out at `at`, and says how big it was, or nought
+ * where nothing was handed out there. */
+static uint32_t give_back_guest_memory(uint32_t at) {
+    pthread_mutex_lock(&handing_out);
+    uint32_t place = where_taken(at);
+    if (place >= taken_count || taken_stretches[place].at != at) {
         pthread_mutex_unlock(&handing_out);
         return 0;
     }
-    handed_out = at + rounded;
+    uint32_t size = taken_stretches[place].size;
+    memmove(&taken_stretches[place], &taken_stretches[place + 1u],
+            (taken_count - place - 1u) * sizeof *taken_stretches);
+    taken_count--;
+
+    uint32_t one = 0;
+    while (one < free_count && free_stretches[one].at < at) {
+        one++;
+    }
+    int joins_before = one > 0 && free_stretches[one - 1u].at + free_stretches[one - 1u].size == at;
+    int joins_after = one < free_count && at + size == free_stretches[one].at;
+    if (joins_before && joins_after) {
+        free_stretches[one - 1u].size += size + free_stretches[one].size;
+        memmove(&free_stretches[one], &free_stretches[one + 1u],
+                (free_count - one - 1u) * sizeof *free_stretches);
+        free_count--;
+    } else if (joins_before) {
+        free_stretches[one - 1u].size += size;
+    } else if (joins_after) {
+        free_stretches[one].at = at;
+        free_stretches[one].size += size;
+    } else if (free_count < XENOLITH_STRETCHES) {
+        memmove(&free_stretches[one + 1u], &free_stretches[one],
+                (free_count - one) * sizeof *free_stretches);
+        free_stretches[one] = (struct stretch){at, size};
+        free_count++;
+    }
     pthread_mutex_unlock(&handing_out);
-    return at;
+    return size;
 }
 
 /* The contexts for the sound decoder, kept in one table as the console keeps
@@ -605,6 +697,25 @@ static void allocate_virtual_memory(xenolith_context *ctx, uint8_t *base) {
     }
     if (size_at) {
         xenolith_store32(base, size_at, rounded);
+    }
+    ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+}
+
+/* Giving back what was reserved and committed, with the same two pointers it
+ * was handed out through. Only a release gives memory back: what is only
+ * decommitted stays reserved, as on the console, and where it starts is told
+ * back with how much was given. */
+#define XENOLITH_RELEASE 0x8000u
+
+static void give_back_virtual_memory(xenolith_context *ctx, uint8_t *base) {
+    uint32_t address_at = (uint32_t)ctx->r[3];
+    uint32_t size_at = (uint32_t)ctx->r[4];
+    uint32_t at = address_at ? xenolith_load32(base, address_at) : 0;
+    if (((uint32_t)ctx->r[5] & XENOLITH_RELEASE) != 0 && at != 0) {
+        uint32_t size = give_back_guest_memory(at);
+        if (size != 0 && size_at != 0) {
+            xenolith_store32(base, size_at, size);
+        }
     }
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
@@ -4947,8 +5058,11 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
         if (into != 0) {
             uint32_t page = 0x1000u;
             uint32_t whole = (XENOLITH_HEAP_END - XENOLITH_HEAP_BASE) / page;
+            uint32_t left = 0;
             pthread_mutex_lock(&handing_out);
-            uint32_t left = (XENOLITH_HEAP_END - handed_out) / page;
+            for (uint32_t one = 0; one < free_count; one++) {
+                left += free_stretches[one].size / page;
+            }
             pthread_mutex_unlock(&handing_out);
 
             for (uint32_t at = 4; at < 104; at += 4) {
@@ -5067,11 +5181,13 @@ static int serviced_about_memory_and_time(xenolith_context *ctx, uint8_t *base, 
         return 1;
     }
     case 189:
-    case 220:
-        /* Giving memory back. Nothing here takes it back, which is written
-         * down where the memory is handed out. Reporting a failure would be a
-         * different lie and a louder one. */
+        /* Giving back memory the graphics hardware can reach, named by where
+         * it starts. */
+        give_back_guest_memory((uint32_t)ctx->r[4]);
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 220:
+        give_back_virtual_memory(ctx, base);
         return 1;
     case 196:
         /* What a page allows. Every guest page is mapped readable and writable
