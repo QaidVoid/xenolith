@@ -145,9 +145,12 @@ run continues silently.
 
 ## Input
 
-The keyboard stands in for a controller: the arrow keys are the pad, `z` and
-`x` are A and B, and enter is start. A run without a window can be given held
-buttons with `XENOLITH_HOLD`.
+The keyboard stands in for a controller: the arrow keys are the pad, `z` `x`
+`c` `v` are A B X Y, enter is start, escape is back, `q` and `e` are the
+shoulders, `1` and `3` pull the triggers all the way, `wasd` and `ijkl` push the
+left and right sticks all the way, and `f` and `h` press them. Keys are read by
+where they sit, so the letters are those of a QWERTY board. A run without a
+window can be given held buttons with `XENOLITH_HOLD`.
 
 ## Files
 

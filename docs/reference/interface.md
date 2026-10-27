@@ -686,13 +686,14 @@ Writes what was drawn where somebody can look at it.
 
 ### `xenolith_what_is_held`
 
-What is held down on the keyboard, as a controller's buttons and the two
-thumbsticks. Returns zero where there is no window to read one from.
+What is held down on the keyboard, as a controller's buttons, the two
+thumbsticks across and up, the left one first, and how far the two triggers are
+pulled. Returns zero where there is no window to read one from.
 
 ### `xenolith_pad_seen`
 
-What a controller was last read as: the buttons, the two sticks, and the number
-its last reading carried.
+What a controller was last read as: the buttons, the two sticks, the two
+triggers, and the number its last reading carried.
 
 ### `xenolith_pad_reading`
 

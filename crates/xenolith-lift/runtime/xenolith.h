@@ -983,9 +983,11 @@ int xenolith_wait_for_what_was_drawn(void);
  * asks for it. */
 int xenolith_send_what_was_drawn(void);
 
-/* What is held down on the keyboard, as a controller's buttons and the two
- * thumbsticks. Returns zero where there is no window to read one from. */
-int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs);
+/* What is held down on the keyboard, as a controller's buttons, the two
+ * thumbsticks across and up, the left one first, and how far the two triggers
+ * are pulled, the left one first. Returns zero where there is no window to
+ * read one from. */
+int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs, uint8_t *triggers);
 
 /* Starts a frame, cleared to nothing. Reports whether there was anywhere to
  * start one. */
@@ -1100,6 +1102,7 @@ static inline uint32_t xenolith_samples_owed(struct xenolith_frames_kept *kept, 
 struct xenolith_pad_seen {
     uint16_t held;
     int16_t tilted[4];
+    uint8_t pulled[2];
     uint32_t reading;
 };
 
@@ -1110,11 +1113,15 @@ struct xenolith_pad_seen {
  * no further. Always the same, one title never saw a button pressed and could
  * not be told to skip what it was showing. */
 static inline uint32_t xenolith_pad_reading(struct xenolith_pad_seen *seen, uint16_t buttons,
-                                            const int16_t thumbs[4]) {
+                                            const int16_t thumbs[4], const uint8_t triggers[2]) {
     int moved = buttons != seen->held;
     for (int at = 0; at < 4; at++) {
         moved |= thumbs[at] != seen->tilted[at];
         seen->tilted[at] = thumbs[at];
+    }
+    for (int at = 0; at < 2; at++) {
+        moved |= triggers[at] != seen->pulled[at];
+        seen->pulled[at] = triggers[at];
     }
     seen->held = buttons;
     seen->reading += (uint32_t)moved;

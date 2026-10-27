@@ -3719,7 +3719,7 @@ static uint32_t answer_a_message(uint8_t *base, uint32_t program, uint32_t messa
 
 /* What the one controller was last read as, which is what tells a reading
  * that changed from one that did not. */
-static struct xenolith_pad_seen pad_seen = {0, {0, 0, 0, 0}, 1};
+static struct xenolith_pad_seen pad_seen = {0, {0, 0, 0, 0}, {0, 0}, 1};
 static pthread_mutex_t pad_seen_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* What asking for the next key a controller pressed says when none is
@@ -4168,17 +4168,19 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             }
             uint16_t buttons = 0;
             int16_t thumbs[4] = {0, 0, 0, 0};
+            uint8_t triggers[2] = {0, 0};
             if (into != 0) {
-                xenolith_what_is_held(&buttons, thumbs);
+                xenolith_what_is_held(&buttons, thumbs, triggers);
                 pthread_mutex_lock(&pad_seen_lock);
-                uint32_t reading = xenolith_pad_reading(&pad_seen, buttons, thumbs);
+                uint32_t reading = xenolith_pad_reading(&pad_seen, buttons, thumbs, triggers);
                 pthread_mutex_unlock(&pad_seen_lock);
                 xenolith_store32(base, into, reading);
                 xenolith_store16(base, into + 4, buttons);
-                xenolith_store8(base, into + 6, (uint8_t)(thumbs[2] >> 8));
-                xenolith_store8(base, into + 7, (uint8_t)(thumbs[3] >> 8));
-                xenolith_store16(base, into + 8, (uint16_t)thumbs[0]);
-                xenolith_store16(base, into + 10, (uint16_t)thumbs[1]);
+                xenolith_store8(base, into + 6, triggers[0]);
+                xenolith_store8(base, into + 7, triggers[1]);
+                for (uint32_t at = 0; at < 4u; at++) {
+                    xenolith_store16(base, into + 8 + at * 2u, (uint16_t)thumbs[at]);
+                }
             }
             ctx->r[3] = XENOLITH_STATUS_SUCCESS;
             return 1;

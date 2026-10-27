@@ -129,9 +129,14 @@ title's data (symbolic links are fine). What the title saves goes in
 | key | button |
 |---|---|
 | arrow keys | the pad |
-| `z` | A |
-| `x` | B |
+| `z`, `x`, `c`, `v` | A, B, X, Y |
 | enter | start |
+| escape | back |
+| `q`, `e` | left and right shoulder |
+| `1`, `3` | left and right trigger |
+| `w`, `a`, `s`, `d` | left stick |
+| `i`, `j`, `k`, `l` | right stick |
+| `f`, `h` | left and right stick pressed |
 
 ### What a run prints
 

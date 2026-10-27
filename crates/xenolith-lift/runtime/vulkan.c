@@ -4300,6 +4300,7 @@ static struct {
      * and this way is only told of changes. */
     uint16_t held;
     int16_t thumbs[4];
+    uint8_t triggers[2];
 } speaking;
 
 /* The desktop hands a key over as the hardware's own number, which is the same
@@ -4323,6 +4324,8 @@ static const struct {
     {47u, 0x8000},  /* v -> y */
     {16u, 0x0100},  /* q -> left shoulder */
     {18u, 0x0200},  /* e -> right shoulder */
+    {33u, 0x0040},  /* f -> left stick pressed */
+    {35u, 0x0080},  /* h -> right stick pressed */
 };
 
 /* A key standing in for a thumbstick, which of the two it moves, and which way.
@@ -4336,6 +4339,19 @@ static const struct {
     {31u, 1, -32767},  /* s -> left stick down */
     {30u, 0, -32767},  /* a -> left stick left */
     {32u, 0, 32767},   /* d -> left stick right */
+    {23u, 3, 32767},   /* i -> right stick up */
+    {37u, 3, -32767},  /* k -> right stick down */
+    {36u, 2, -32767},  /* j -> right stick left */
+    {38u, 2, 32767},   /* l -> right stick right */
+};
+
+/* A key standing in for a trigger, which of the two, pulled all the way. */
+static const struct {
+    uint32_t code;
+    unsigned int which;
+} desktop_keys_to_triggers[] = {
+    {2u, 0}, /* 1 -> left trigger */
+    {4u, 1}, /* 3 -> right trigger */
 };
 
 /* The desktop asking whether this program is still answering. Saying so is the
@@ -4403,6 +4419,12 @@ static void a_key_moved(void *held, struct wl_keyboard *keyboard, uint32_t said,
                 down ? desktop_keys_to_thumbs[at].towards : 0;
         }
     }
+    for (unsigned int at = 0;
+         at < sizeof desktop_keys_to_triggers / sizeof *desktop_keys_to_triggers; at++) {
+        if (desktop_keys_to_triggers[at].code == code) {
+            speaking.triggers[desktop_keys_to_triggers[at].which] = down ? 255u : 0u;
+        }
+    }
 }
 
 /* The keymap the desktop hands over, which says what letters the keys carry.
@@ -4432,6 +4454,8 @@ static void the_keyboard_left(void *held, struct wl_keyboard *keyboard, uint32_t
     for (unsigned int at = 0; at < 4u; at++) {
         speaking.thumbs[at] = 0;
     }
+    speaking.triggers[0] = 0;
+    speaking.triggers[1] = 0;
 }
 
 static void the_keyboard_came(void *held, struct wl_keyboard *keyboard, uint32_t said,
@@ -5203,6 +5227,8 @@ static const struct {
     {XK_v, 0x8000},         /* y */
     {XK_q, 0x0100},         /* left shoulder */
     {XK_e, 0x0200},         /* right shoulder */
+    {XK_f, 0x0040},         /* left stick pressed */
+    {XK_h, 0x0080},         /* right stick pressed */
 };
 
 /* How far a thumbstick goes when a key stands in for it. */
@@ -5215,6 +5241,17 @@ static const struct {
 } keys_to_thumbs[] = {
     {XK_w, 1, XENOLITH_ALL_THE_WAY},  {XK_s, 1, -XENOLITH_ALL_THE_WAY},
     {XK_a, 0, -XENOLITH_ALL_THE_WAY}, {XK_d, 0, XENOLITH_ALL_THE_WAY},
+    {XK_i, 3, XENOLITH_ALL_THE_WAY},  {XK_k, 3, -XENOLITH_ALL_THE_WAY},
+    {XK_j, 2, -XENOLITH_ALL_THE_WAY}, {XK_l, 2, XENOLITH_ALL_THE_WAY},
+};
+
+/* A key standing in for a trigger, which of the two, pulled all the way. */
+static const struct {
+    KeySym key;
+    unsigned int which;
+} keys_to_triggers[] = {
+    {XK_1, 0},
+    {XK_3, 1},
 };
 
 /* Whether a key is held down now. */
@@ -5302,14 +5339,16 @@ static int what_a_run_says_is_held(uint16_t *buttons) {
     return count != 0;
 }
 
-int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
-    if (buttons == NULL || thumbs == NULL) {
+int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs, uint8_t *triggers) {
+    if (buttons == NULL || thumbs == NULL || triggers == NULL) {
         return 0;
     }
     *buttons = 0;
     for (unsigned int at = 0; at < 4u; at++) {
         thumbs[at] = 0;
     }
+    triggers[0] = 0;
+    triggers[1] = 0;
     if (what_a_run_says_is_held(buttons)) {
         return 1;
     }
@@ -5322,6 +5361,8 @@ int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
         for (unsigned int at = 0; at < 4u; at++) {
             thumbs[at] = speaking.thumbs[at];
         }
+        triggers[0] = speaking.triggers[0];
+        triggers[1] = speaking.triggers[1];
         return 1;
     }
 #endif
@@ -5354,6 +5395,11 @@ int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
             thumbs[keys_to_thumbs[at].which] = keys_to_thumbs[at].towards;
         }
     }
+    for (unsigned int at = 0; at < sizeof keys_to_triggers / sizeof *keys_to_triggers; at++) {
+        if (held(keyboard, keys_to_triggers[at].key)) {
+            triggers[keys_to_triggers[at].which] = 255u;
+        }
+    }
     return 1;
 #else
     /* A window the desktop made its own way reports the keys it saw, which are
@@ -5365,9 +5411,10 @@ int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
 
 #else
 
-int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
+int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs, uint8_t *triggers) {
     (void)buttons;
     (void)thumbs;
+    (void)triggers;
     return 0;
 }
 
@@ -7177,9 +7224,10 @@ int xenolith_keep_a_frame(const char *where) {
     return 0;
 }
 
-int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs) {
+int xenolith_what_is_held(uint16_t *buttons, int16_t *thumbs, uint8_t *triggers) {
     (void)buttons;
     (void)thumbs;
+    (void)triggers;
     return 0;
 }
 

@@ -6445,7 +6445,8 @@ int main(void) {
      * failure: a port that answers with nothing pressed. */
     uint16_t buttons = 0xffff;
     int16_t thumbs[4] = {9, 9, 9, 9};
-    if (!xenolith_what_is_held(&buttons, thumbs)) {
+    uint8_t triggers[2] = {9, 9};
+    if (!xenolith_what_is_held(&buttons, thumbs, triggers)) {
         fprintf(stderr, "a controller that is there was said not to be\n");
         return 3;
     }
@@ -6562,14 +6563,15 @@ int main(void) {
 
     uint16_t buttons = 0;
     int16_t thumbs[4];
-    xenolith_what_is_held(&buttons, thumbs);
+    uint8_t triggers[2];
+    xenolith_what_is_held(&buttons, thumbs, triggers);
     if (buttons != 0x0010u) {
         fprintf(stderr, "at the start %#x was held\n", buttons);
         return 3;
     }
     struct timespec pause = {0, 400000000L};
     nanosleep(&pause, NULL);
-    xenolith_what_is_held(&buttons, thumbs);
+    xenolith_what_is_held(&buttons, thumbs, triggers);
     if (buttons != 0x1000u) {
         fprintf(stderr, "later %#x was held\n", buttons);
         return 4;
@@ -6577,7 +6579,7 @@ int main(void) {
 
     /* And a span counted in frames shown, held once two have been. */
     for (unsigned shown = 0; shown < 4; shown++) {
-        xenolith_what_is_held(&buttons, thumbs);
+        xenolith_what_is_held(&buttons, thumbs, triggers);
         uint16_t wanted = shown == 2 ? 0x3000u : 0x1000u;
         if (buttons != wanted) {
             fprintf(stderr, "after %u frames %#x was held\n", shown, buttons);
@@ -7885,6 +7887,54 @@ int main(void) {
     }
 }
 
+/// Every part of a controller's reading is written: the buttons, both
+/// triggers and both sticks.
+///
+/// The right stick was never written and the triggers were read out of where
+/// it should have been, so a title saw whatever its own memory held there.
+#[test]
+fn a_controllers_whole_reading_is_written() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    for (uint32_t at = 0; at < 16; at++) {
+        xenolith_store8(base, 0x300 + at, 0xaa);
+    }
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0;
+    ctx.r[4] = 0;
+    ctx.r[5] = 0x300;
+    xenolith_import(&ctx, base, "xam.xex", 401, "XamInputGetState");
+    for (uint32_t at = 4; at < 16; at++) {
+        if (xenolith_load8(base, 0x300 + at) != 0) {
+            fprintf(stderr, "byte %u of the reading holds %#x\n", at,
+                    xenolith_load8(base, 0x300 + at));
+            return 3;
+        }
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("whole_reading", program) {
+        panic!("a controller's reading was not written whole:\n{complaint}");
+    }
+}
+
 /// A controller's reading carries a new number each time what it holds
 /// changes, and the same number while it does not.
 ///
@@ -7903,19 +7953,22 @@ xenolith_function xenolith_lookup(uint32_t address) {
 }
 
 int main(void) {
-    struct xenolith_pad_seen seen = {0, {0, 0, 0, 0}, 1};
+    struct xenolith_pad_seen seen = {0, {0, 0, 0, 0}, {0, 0}, 1};
     const int16_t still[4] = {0, 0, 0, 0};
     const int16_t tilted[4] = {0, 0, 1200, 0};
-    uint32_t first = xenolith_pad_reading(&seen, 0, still);
-    uint32_t again = xenolith_pad_reading(&seen, 0, still);
-    uint32_t pressed = xenolith_pad_reading(&seen, 0x10, still);
-    uint32_t held = xenolith_pad_reading(&seen, 0x10, still);
-    uint32_t let_go = xenolith_pad_reading(&seen, 0, still);
-    uint32_t leaned = xenolith_pad_reading(&seen, 0, tilted);
+    const uint8_t loose[2] = {0, 0};
+    const uint8_t pulled[2] = {0, 255};
+    uint32_t first = xenolith_pad_reading(&seen, 0, still, loose);
+    uint32_t again = xenolith_pad_reading(&seen, 0, still, loose);
+    uint32_t pressed = xenolith_pad_reading(&seen, 0x10, still, loose);
+    uint32_t held = xenolith_pad_reading(&seen, 0x10, still, loose);
+    uint32_t let_go = xenolith_pad_reading(&seen, 0, still, loose);
+    uint32_t leaned = xenolith_pad_reading(&seen, 0, tilted, loose);
+    uint32_t squeezed = xenolith_pad_reading(&seen, 0, tilted, pulled);
     if (again != first || pressed == again || held != pressed || let_go == held
-        || leaned == let_go) {
-        fprintf(stderr, "readings %u %u %u %u %u %u\n", first, again, pressed, held, let_go,
-                leaned);
+        || leaned == let_go || squeezed == leaned) {
+        fprintf(stderr, "readings %u %u %u %u %u %u %u\n", first, again, pressed, held, let_go,
+                leaned, squeezed);
         return 1;
     }
     return 0;

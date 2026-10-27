@@ -50,8 +50,9 @@ it, since the game reads its data from there. Saves go in `content/`.
 The key is read from `--key-file`, then `XENOLITH_XEX_KEY`, then
 `~/.config/xenolith/xex.key`. No key and no game data is in this repository.
 
-Controls: arrow keys for the pad, `z` and `x` for the face buttons, enter for
-start.
+Controls: arrow keys for the pad, `z` `x` `c` `v` for A B X Y, enter for start,
+escape for back, `q` and `e` for the shoulders, `1` and `3` for the triggers,
+`wasd` and `ijkl` for the two sticks, `f` and `h` to press them.
 
 ## How it works
 
