@@ -1606,6 +1606,127 @@ int main(void) {
     }
 }
 
+/// A thread that lets a lock go and waits is waiting before anyone can take the
+/// lock.
+///
+/// Two threads hand a turn back and forth: each takes the lock, waits on the
+/// event while the turn is not its own, letting the lock go as it does, and on
+/// its turn hands the turn over, sets the event and lets the lock go. One title
+/// keeps two threads in step this way. Let go before waiting, the other thread
+/// took the lock, set the event for the first, went round, and waiting on the
+/// event itself took the set it had made, and both threads waited for ever.
+#[test]
+fn a_thread_letting_a_lock_go_is_waiting_before_it_is_taken() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static uint8_t *base;
+
+/* Several pairs hand turns over at once, each with a lock, an event and a turn
+ * of its own, because a turn taken away happens about once in a few thousand
+ * and more pairs find it sooner. */
+#define PAIRS 8
+#define TURNS 250000
+
+static uint32_t lock[PAIRS];
+static uint32_t event[PAIRS];
+static volatile int turn[PAIRS];
+
+static void *hand_turns_over(void *given) {
+    int pair = (int)(intptr_t)given / 2;
+    int mine = (int)(intptr_t)given % 2;
+    uint32_t length_at = 0x300u + (uint32_t)(intptr_t)given * 8u;
+    xenolith_store64(base, length_at, (uint64_t)(int64_t)-20000000);
+    xenolith_context ctx = {0};
+    for (int round = 0; round < TURNS; round++) {
+        ctx.r[3] = lock[pair];
+        ctx.r[4] = 1;
+        ctx.r[5] = 0;
+        ctx.r[6] = 0;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
+        while (turn[pair] != mine) {
+            /* Two seconds is for ever to a thread whose turn it is. */
+            ctx.r[3] = lock[pair];
+            ctx.r[4] = event[pair];
+            ctx.r[5] = 1;
+            ctx.r[6] = 0;
+            ctx.r[7] = length_at;
+            xenolith_import(&ctx, base, "xboxkrnl.exe", 251,
+                            "NtSignalAndWaitForSingleObjectEx");
+            if (ctx.r[3] != 0) {
+                fprintf(stderr, "a thread waited for its turn and nobody gave it, round %d\n",
+                        round);
+                _exit(3);
+            }
+            ctx.r[3] = lock[pair];
+            ctx.r[4] = 1;
+            ctx.r[5] = 0;
+            ctx.r[6] = 0;
+            xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
+        }
+        turn[pair] = 1 - mine;
+        ctx.r[3] = event[pair];
+        ctx.r[4] = 0;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 246, "NtSetEvent");
+        ctx.r[3] = lock[pair];
+        ctx.r[4] = 0;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 242, "NtReleaseMutant");
+    }
+    return NULL;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    alarm(120);
+
+    xenolith_context ctx = {0};
+    for (int pair = 0; pair < PAIRS; pair++) {
+        ctx.r[3] = 0x200;
+        ctx.r[4] = 0;
+        ctx.r[5] = 0;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 212, "NtCreateMutant");
+        lock[pair] = xenolith_load32(base, 0x200);
+        ctx.r[3] = 0x200;
+        ctx.r[4] = 0;
+        ctx.r[5] = 1;
+        ctx.r[6] = 0;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+        event[pair] = xenolith_load32(base, 0x200);
+    }
+
+    pthread_t threads[PAIRS * 2];
+    for (int at = 0; at < PAIRS * 2; at++) {
+        if (pthread_create(&threads[at], NULL, hand_turns_over, (void *)(intptr_t)at) != 0) {
+            return 4;
+        }
+    }
+    for (int at = 0; at < PAIRS * 2; at++) {
+        pthread_join(threads[at], NULL);
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("handing_turns", program) {
+        panic!("a thread letting a lock go was not waiting before it was taken:\n{complaint}");
+    }
+}
+
 /// Every wait takes its length from the argument that holds it.
 ///
 /// The waits differ in how many arguments come before the length: the mode and

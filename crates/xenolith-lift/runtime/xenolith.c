@@ -972,18 +972,18 @@ static void say_something_changed(void) {
     pthread_mutex_unlock(&anything_lock);
 }
 
-/* Waits until an object is signalled, taking it if taking is what waiting on
- * that kind means.
- *
- * `until` is the point on the host's clock to give up at, or nothing to wait for
- * as long as it takes. A wait that gives up looks once more before it does: a
- * set that lands at the moment a waiter gives up counted that waiter when it
- * decided to let one more through, and walking away leaves it spent on nobody
- * and waiting for whoever asks next.
- */
-static uint32_t wait_until(struct object *waited, const struct timespec *until) {
-    uint32_t status = XENOLITH_STATUS_SUCCESS;
+/* A thread's place among those waiting on an object, or that it already holds
+ * the object and has no place to wait in. */
+struct a_turn {
+    int held_already;
+    unsigned long long mine;
+};
 
+/* Takes a place among those waiting on an object, which from then on is
+ * counted as waiting: a set that lands now is the next waiter's, and this one
+ * is next where nobody joined before it. */
+static struct a_turn join_the_waiting(struct object *waited) {
+    struct a_turn turn = {0, 0};
     pthread_mutex_lock(&waited->lock);
 
     /* One a thread already holds is taken again on the spot, without joining the
@@ -992,12 +992,33 @@ static uint32_t wait_until(struct object *waited, const struct timespec *until) 
     if (waited->kind == OBJECT_MUTANT && waited->held > 0 &&
         pthread_equal(waited->holder, pthread_self())) {
         waited->held++;
-        pthread_mutex_unlock(&waited->lock);
-        return XENOLITH_STATUS_SUCCESS;
+        turn.held_already = 1;
+    } else {
+        waited->blocked++;
+        turn.mine = waited->taking++;
     }
+    pthread_mutex_unlock(&waited->lock);
+    return turn;
+}
 
-    waited->blocked++;
-    unsigned long long mine = waited->taking++;
+/* Waits in a place taken among those waiting on an object until it is
+ * signalled, taking it if taking is what waiting on that kind means.
+ *
+ * `until` is the point on the host's clock to give up at, or nothing to wait for
+ * as long as it takes. A wait that gives up looks once more before it does: a
+ * set that lands at the moment a waiter gives up counted that waiter when it
+ * decided to let one more through, and walking away leaves it spent on nobody
+ * and waiting for whoever asks next.
+ */
+static uint32_t wait_in_turn(struct object *waited, struct a_turn turn,
+                             const struct timespec *until) {
+    uint32_t status = XENOLITH_STATUS_SUCCESS;
+    if (turn.held_already) {
+        return status;
+    }
+    unsigned long long mine = turn.mine;
+
+    pthread_mutex_lock(&waited->lock);
     for (;;) {
         step_over_the_ones_that_left(waited);
         /* A semaphore is got through by spending one of its count, however many
@@ -1044,6 +1065,12 @@ static uint32_t wait_until(struct object *waited, const struct timespec *until) 
     }
     pthread_mutex_unlock(&waited->lock);
     return status;
+}
+
+/* Waits until an object is signalled, taking it if taking is what waiting on
+ * that kind means. */
+static uint32_t wait_until(struct object *waited, const struct timespec *until) {
+    return wait_in_turn(waited, join_the_waiting(waited), until);
 }
 
 /* How many seconds the console's clock counts from before a host's does. The
@@ -4337,11 +4364,17 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
     case 251: {
         /* Releasing one object and waiting on another, which a title uses to
          * hand work to a thread and wait for the answer without missing the
-         * reply. The console does the two with nothing in between. Here they
-         * are two steps, which differs only for a title that depends on no
-         * other thread being let go between them. */
+         * reply. The console does the two with nothing in between, so the
+         * place among the waiters is taken before anything is released.
+         * Released first, another thread took the lock, set the event for
+         * this one, and waiting on it itself took the set away, and both
+         * waited for ever. */
         struct object *released = object_of((uint32_t)ctx->r[3]);
         struct object *waited = object_of((uint32_t)ctx->r[4]);
+        struct a_turn turn = {0, 0};
+        if (waited != NULL) {
+            turn = join_the_waiting(waited);
+        }
         if (released != NULL && released->kind == OBJECT_MUTANT) {
             release_lock(released);
         } else if (released != NULL && released->kind == OBJECT_SEMAPHORE) {
@@ -4362,7 +4395,7 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * sends the title round its loop as fast as a host can carry it. */
         struct timespec until;
         int limited = give_up_at(base, (uint32_t)ctx->r[7], &until);
-        ctx->r[3] = wait_until(waited, limited ? &until : NULL);
+        ctx->r[3] = wait_in_turn(waited, turn, limited ? &until : NULL);
         return 1;
     }
     case 116: {
