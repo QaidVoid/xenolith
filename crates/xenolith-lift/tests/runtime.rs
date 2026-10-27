@@ -7698,6 +7698,47 @@ int main(void) {
     }
 }
 
+/// A controller's reading carries a new number each time what it holds
+/// changes, and the same number while it does not.
+///
+/// One title looks at a reading only when its number moves, and handed the
+/// same number every time it never saw a button and could not be told to skip
+/// what it was showing.
+#[test]
+fn a_controllers_reading_is_numbered_by_change() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    struct xenolith_pad_seen seen = {0, {0, 0, 0, 0}, 1};
+    const int16_t still[4] = {0, 0, 0, 0};
+    const int16_t tilted[4] = {0, 0, 1200, 0};
+    uint32_t first = xenolith_pad_reading(&seen, 0, still);
+    uint32_t again = xenolith_pad_reading(&seen, 0, still);
+    uint32_t pressed = xenolith_pad_reading(&seen, 0x10, still);
+    uint32_t held = xenolith_pad_reading(&seen, 0x10, still);
+    uint32_t let_go = xenolith_pad_reading(&seen, 0, still);
+    uint32_t leaned = xenolith_pad_reading(&seen, 0, tilted);
+    if (again != first || pressed == again || held != pressed || let_go == held
+        || leaned == let_go) {
+        fprintf(stderr, "readings %u %u %u %u %u %u\n", first, again, pressed, held, let_go,
+                leaned);
+        return 1;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("pad_reading", program) {
+        panic!("a controller's reading was not numbered by change:\n{complaint}");
+    }
+}
+
 /// Frames a decoder throws away are made up in silence, and only those.
 ///
 /// A sound of six channels is three streams decoded apart, and the host's

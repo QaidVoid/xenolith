@@ -1096,6 +1096,31 @@ static inline uint32_t xenolith_samples_owed(struct xenolith_frames_kept *kept, 
     return owed;
 }
 
+/* What a controller was last read as. */
+struct xenolith_pad_seen {
+    uint16_t held;
+    int16_t tilted[4];
+    uint32_t reading;
+};
+
+/* The number a controller's reading carries, which moves on each time what it
+ * holds changes.
+ *
+ * A title handed the same number twice takes it that nothing changed and looks
+ * no further. Always the same, one title never saw a button pressed and could
+ * not be told to skip what it was showing. */
+static inline uint32_t xenolith_pad_reading(struct xenolith_pad_seen *seen, uint16_t buttons,
+                                            const int16_t thumbs[4]) {
+    int moved = buttons != seen->held;
+    for (int at = 0; at < 4; at++) {
+        moved |= thumbs[at] != seen->tilted[at];
+        seen->tilted[at] = thumbs[at];
+    }
+    seen->held = buttons;
+    seen->reading += (uint32_t)moved;
+    return seen->reading;
+}
+
 #define XENOLITH_STACK_TOP 0x70000000u
 
 #endif /* XENOLITH_H */

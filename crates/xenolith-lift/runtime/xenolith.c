@@ -3555,6 +3555,11 @@ static uint32_t answer_a_message(uint8_t *base, uint32_t program, uint32_t messa
     stop_the_run(3);
 }
 
+/* What the one controller was last read as, which is what tells a reading
+ * that changed from one that did not. */
+static struct xenolith_pad_seen pad_seen = {0, {0, 0, 0, 0}, 1};
+static pthread_mutex_t pad_seen_lock = PTHREAD_MUTEX_INITIALIZER;
+
 /* What asking for the next key a controller pressed says when none is
  * waiting. */
 #define XENOLITH_ERROR_EMPTY 0x10D2u
@@ -4003,7 +4008,10 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             int16_t thumbs[4] = {0, 0, 0, 0};
             if (into != 0) {
                 xenolith_what_is_held(&buttons, thumbs);
-                xenolith_store32(base, into, 1);
+                pthread_mutex_lock(&pad_seen_lock);
+                uint32_t reading = xenolith_pad_reading(&pad_seen, buttons, thumbs);
+                pthread_mutex_unlock(&pad_seen_lock);
+                xenolith_store32(base, into, reading);
                 xenolith_store16(base, into + 4, buttons);
                 xenolith_store8(base, into + 6, (uint8_t)(thumbs[2] >> 8));
                 xenolith_store8(base, into + 7, (uint8_t)(thumbs[3] >> 8));

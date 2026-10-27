@@ -689,6 +689,17 @@ Writes what was drawn where somebody can look at it.
 What is held down on the keyboard, as a controller's buttons and the two
 thumbsticks. Returns zero where there is no window to read one from.
 
+### `xenolith_pad_seen`
+
+What a controller was last read as: the buttons, the two sticks, and the number
+its last reading carried.
+
+### `xenolith_pad_reading`
+
+The number a controller's reading carries, moved on each time what it holds
+changes from what was last seen. A title handed the same number twice takes it
+that nothing changed.
+
 ## Sound
 
 ### `xenolith_frames_kept`
