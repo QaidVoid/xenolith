@@ -688,3 +688,17 @@ Writes what was drawn where somebody can look at it.
 
 What is held down on the keyboard, as a controller's buttons and the two
 thumbsticks. Returns zero where there is no window to read one from.
+
+## Sound
+
+### `xenolith_frames_kept`
+
+How far a decoder of compressed sound is behind the frames it was handed, kept
+for each sound between one packet and the next.
+
+### `xenolith_samples_owed`
+
+Counts the frames a packet finished against the samples the decoder gave for
+them, and says how many samples of silence make up for frames the decoder threw
+away. The console's decoder gives back every frame, and the streams of one
+sound have to stay in step for its channels to line up.

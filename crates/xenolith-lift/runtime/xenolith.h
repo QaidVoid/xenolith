@@ -1060,6 +1060,42 @@ int xenolith_can_draw_with(uint32_t vertex_sum, const uint32_t *vertex, uint32_t
 /* Writes what was drawn where somebody can look at it. */
 int xenolith_keep_a_frame(const char *where);
 
+/* How far a decoder of compressed sound is behind the frames it was handed. */
+struct xenolith_frames_kept {
+    int64_t behind;
+    int64_t settled;
+    int mending;
+};
+
+/* Counts the frames a packet finished against the samples the decoder gave for
+ * it, and says how many samples of silence make up for frames it threw away.
+ *
+ * A decoder holds the same samples back for as long as it decodes well, so how
+ * far it is behind stays put. One that throws a broken frame away, and the rest
+ * of its packet with it, falls behind by just what was lost, and may give some
+ * of that late. So what is owed is said only once it gives sound again from a
+ * packet that was not broken. */
+static inline uint32_t xenolith_samples_owed(struct xenolith_frames_kept *kept, uint32_t frames,
+                                             uint32_t samples_a_frame, uint32_t given,
+                                             int broken) {
+    kept->behind += (int64_t)frames * samples_a_frame - given;
+    if (broken) {
+        kept->mending = 1;
+        return 0;
+    }
+    if (given == 0) {
+        return 0;
+    }
+    uint32_t owed = 0;
+    if (kept->mending && kept->behind > kept->settled) {
+        owed = (uint32_t)(kept->behind - kept->settled);
+        kept->behind = kept->settled;
+    }
+    kept->mending = 0;
+    kept->settled = kept->behind;
+    return owed;
+}
+
 #define XENOLITH_STACK_TOP 0x70000000u
 
 #endif /* XENOLITH_H */

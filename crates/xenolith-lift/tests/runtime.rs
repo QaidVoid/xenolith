@@ -7199,6 +7199,57 @@ int main(void) {
     }
 }
 
+/// Frames a decoder throws away are made up in silence, and only those.
+///
+/// A sound of six channels is three streams decoded apart, and the host's
+/// decoder throws away a broken frame and the rest of its packet. Not made up,
+/// one stream fell behind the others and a voice in it was heard twice. Made up
+/// for a decoder still filling what it holds back, sound that was never lost
+/// would be pushed late. The packets here are those a recorded stream went
+/// through: one broken, one given nothing, and one giving some of it late.
+#[test]
+fn frames_a_decoder_throws_away_are_made_up_in_silence() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    struct xenolith_frames_kept kept = {0};
+    /* Starting out, the decoder gives less than it was handed while it fills
+     * what it holds back, and nothing of that is owed. */
+    if (xenolith_samples_owed(&kept, 6u, 512u, 0u, 0) != 0u
+        || xenolith_samples_owed(&kept, 14u, 512u, 5568u, 0) != 0u
+        || xenolith_samples_owed(&kept, 9u, 512u, 4608u, 0) != 0u) {
+        fprintf(stderr, "a decoder starting out was owed silence\n");
+        return 1;
+    }
+    if (xenolith_samples_owed(&kept, 10u, 512u, 0u, 1) != 0u
+        || xenolith_samples_owed(&kept, 9u, 512u, 0u, 0) != 0u) {
+        fprintf(stderr, "silence was made up before the decoder gave sound again\n");
+        return 2;
+    }
+    uint32_t owed = xenolith_samples_owed(&kept, 10u, 512u, 9728u, 0);
+    if (owed != 5120u) {
+        fprintf(stderr, "ten frames were lost and %u samples were made up\n", owed);
+        return 3;
+    }
+    if (xenolith_samples_owed(&kept, 10u, 512u, 5120u, 0) != 0u) {
+        fprintf(stderr, "a decoder back in step was owed silence again\n");
+        return 4;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("frames_made_up", program) {
+        panic!("frames a decoder threw away were not made up:\n{complaint}");
+    }
+}
+
 /// A rectangle is drawn whole: the three corners a title gives and the fourth
 /// the hardware works out across from the right angle.
 ///

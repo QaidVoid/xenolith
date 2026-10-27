@@ -487,8 +487,15 @@ typedef void (*xenolith_av_flush)(void *);
 /* What the ring is counted in: blocks of two hundred and fifty six bytes. */
 #define XENOLITH_BLOCK_BYTES 256u
 
-/* Decoded sound waiting for room in a ring: a few packets' worth. */
-#define XENOLITH_WAITING_BYTES 65536u
+/* Decoded sound waiting for room in a ring: the most two packets come to.
+ *
+ * A packet starts at most sixty three frames, its count being six bits, and
+ * finishes one begun before it, each frame two bytes for every channel of every
+ * sample. Going round a loop decodes a second packet on top of what the first
+ * left. A stream that compresses well carries that many in a packet, and what
+ * did not fit was dropped: one of a sound's three streams lost a third of
+ * itself, ran ahead of the others, and its voices were heard twice. */
+#define XENOLITH_WAITING_BYTES (2u * 64u * XENOLITH_FRAME_SAMPLES_OUT * 2u * 2u)
 
 static struct {
     void *library;
@@ -520,6 +527,7 @@ struct compressed_sound {
     uint32_t rate;
     uint8_t waiting[XENOLITH_WAITING_BYTES];
     uint32_t waiting_bytes;
+    struct xenolith_frames_kept kept;
 };
 
 static struct compressed_sound *compressed_sounds[XENOLITH_SOUND_CONTEXTS];
@@ -641,6 +649,7 @@ static void forget_a_compressed_sound(uint32_t context) {
             }
             sound->unopenable = 0;
             sound->waiting_bytes = 0;
+            memset(&sound->kept, 0, sizeof sound->kept);
         }
     }
     pthread_mutex_unlock(&compressed_sounds_lock);
@@ -663,18 +672,43 @@ static int16_t a_sixteen_bit_sample(float given) {
     return (int16_t)(in_range * 32767.0f);
 }
 
+/* What the decoder answers when it wants another packet before it gives more,
+ * and when it has nothing more to give. */
+#define XENOLITH_AV_AGAIN (-EAGAIN)
+#define XENOLITH_AV_ENDED (-0x20464f45)
+
+/* How many broken frames one packet may answer with before it is given up on. */
+#define XENOLITH_BROKEN_AT_MOST 64
+
 /* Decodes one packet, putting what comes out after what is already waiting as
- * sixteen bit samples, the channels taken in turn, in the title's byte order. */
-static void decode_a_packet(struct compressed_sound *sound, const uint8_t *packet) {
+ * sixteen bit samples, the channels taken in turn, in the title's byte order.
+ * Says whether any of it was broken. */
+static int decode_a_packet(struct compressed_sound *sound, const uint8_t *packet) {
     uint8_t padded[XENOLITH_PACKET_BYTES + XENOLITH_PACKET_ROOM] = {0};
     memcpy(padded, packet, XENOLITH_PACKET_BYTES);
     uint8_t *data = padded;
     memcpy((uint8_t *)decoding.packet + XENOLITH_PACKET_DATA, &data, sizeof data);
     put_an_int(decoding.packet, XENOLITH_PACKET_SIZE, (int)XENOLITH_PACKET_BYTES);
-    if (decoding.send(sound->decoder, decoding.packet) < 0) {
-        return;
-    }
-    while (decoding.receive(sound->decoder, decoding.frame) >= 0) {
+    /* An error from sending is a broken frame of a packet that was taken, with
+     * the rest of it still held. Giving up there left the rest unread, the next
+     * packet was refused for it, and one stream of a sound lost a tenth of a
+     * second the others kept. */
+    int sent = decoding.send(sound->decoder, decoding.packet);
+    int broken = sent < 0 && sent != XENOLITH_AV_AGAIN;
+    while (broken < XENOLITH_BROKEN_AT_MOST) {
+        int got = decoding.receive(sound->decoder, decoding.frame);
+        if (got == XENOLITH_AV_AGAIN && sent == XENOLITH_AV_AGAIN) {
+            sent = decoding.send(sound->decoder, decoding.packet);
+            broken++;
+            continue;
+        }
+        if (got == XENOLITH_AV_AGAIN || got == XENOLITH_AV_ENDED) {
+            return broken;
+        }
+        if (got < 0) {
+            broken++;
+            continue;
+        }
         int samples = 0;
         int format = 0;
         memcpy(&samples, (uint8_t *)decoding.frame + XENOLITH_FRAME_SAMPLES, sizeof samples);
@@ -688,7 +722,7 @@ static void decode_a_packet(struct compressed_sound *sound, const uint8_t *packe
         for (int at = 0; at < samples; at++) {
             for (uint32_t channel = 0; channel < sound->channels; channel++) {
                 if (sound->waiting_bytes + 2u > XENOLITH_WAITING_BYTES) {
-                    return;
+                    return broken;
                 }
                 uint16_t sample = (uint16_t)a_sixteen_bit_sample(planes[channel][at]);
                 sound->waiting[sound->waiting_bytes++] = (uint8_t)(sample >> 8);
@@ -696,6 +730,7 @@ static void decode_a_packet(struct compressed_sound *sound, const uint8_t *packe
             }
         }
     }
+    return broken;
 }
 
 /* Reads so many bits of a packet, the first of them the highest, from so many
@@ -738,6 +773,33 @@ static void frames_ending_in_a_packet(const uint8_t *packet, uint32_t place, uin
         }
         at += length;
     }
+}
+
+/* Keeps a stream as long as the frames it was handed, making up in silence
+ * what the decoder threw away.
+ *
+ * The console's decoder gives back every frame, and a sound of several streams
+ * counts on each staying in step with the others. Without this one stream of a
+ * sound fell a third of a second behind the others and its voices were heard
+ * twice. */
+static void keep_up_with_the_frames(struct compressed_sound *sound, const uint8_t *packet,
+                                    uint32_t before, int broken) {
+    uint32_t ended = 0;
+    uint32_t after = 0;
+    frames_ending_in_a_packet(packet, UINT32_MAX, &ended, &after);
+    uint32_t first = bits_of_a_packet(packet, 6u, 15u);
+    if (first != 0 && first != 0x7fffu) {
+        ended++;
+    }
+    uint32_t sample_bytes = 2u * sound->channels;
+    uint32_t given = (sound->waiting_bytes - before) / sample_bytes;
+    uint64_t owed = (uint64_t)xenolith_samples_owed(&sound->kept, ended,
+                                                    XENOLITH_FRAME_SAMPLES_OUT, given, broken)
+                    * sample_bytes;
+    uint32_t room = (XENOLITH_WAITING_BYTES - sound->waiting_bytes) / sample_bytes * sample_bytes;
+    uint32_t made_up = owed < room ? (uint32_t)owed : room;
+    memset(sound->waiting + sound->waiting_bytes, 0, made_up);
+    sound->waiting_bytes += made_up;
 }
 
 /* Where the decoder has reached in a context's input, and how far it may go. */
@@ -811,6 +873,7 @@ static uint32_t go_round_a_loop(uint8_t *base, uint32_t context, struct compress
     uint32_t start = begins / packet_bits;
     const uint8_t *beginning = base + buffer + start * XENOLITH_PACKET_BYTES;
     decoding.flush(sound->decoder);
+    memset(&sound->kept, 0, sizeof sound->kept);
     uint32_t from = sound->waiting_bytes;
     decode_a_packet(sound, beginning);
     uint32_t ahead = 0;
@@ -856,6 +919,7 @@ static void decode_a_context(uint8_t *base, uint32_t context, struct compressed_
         sound->channels = channels;
         sound->rate = rate;
         sound->waiting_bytes = 0;
+        memset(&sound->kept, 0, sizeof sound->kept);
     }
     if (sound->decoder == NULL) {
         if (sound->unopenable) {
@@ -922,7 +986,8 @@ static void decode_a_context(uint8_t *base, uint32_t context, struct compressed_
         }
         uint32_t at = (input.buffer & (XENOLITH_PHYSICAL - 1u)) + packet * XENOLITH_PACKET_BYTES;
         uint32_t before = sound->waiting_bytes;
-        decode_a_packet(sound, base + at);
+        int broken = decode_a_packet(sound, base + at);
+        keep_up_with_the_frames(sound, base + at, before, broken);
         /* A sound of more than two channels is several streams whose packets
          * take turns in one buffer, a context reading one of them, and each
          * packet ends by saying how many after it belong to the others. */
