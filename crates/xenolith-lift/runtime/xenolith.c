@@ -349,6 +349,10 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 /* What a wait reports when the length of time it was given ran out. */
 #define XENOLITH_STATUS_TIMEOUT 0x00000102u
 
+/* What a wait that let a routine in reports, where it ran one rather than
+ * waiting the whole length. */
+#define XENOLITH_STATUS_USER_APC 0x000000C0u
+
 /* What opening a file that is not there reports. */
 #define XENOLITH_STATUS_NO_SUCH_FILE 0xC0000034u
 
@@ -1858,12 +1862,117 @@ static void create_waitable(xenolith_context *ctx, uint8_t *base, enum object_ki
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
 
-/* One setting of a timer, counting down on a thread of its own. */
+/* Routines waiting to be run on a thread the next time it waits in a way that
+ * lets them in, which is how a timer's routine reaches the thread that set it.
+ *
+ * Kept for as long as the run lasts, because a timer still counting down holds
+ * on to the record of the thread that set it, and that thread may be gone by
+ * the time it falls due. */
+#define XENOLITH_ROUTINES_WAITING 16u
+
+struct routine_waiting {
+    uint32_t routine;
+    uint32_t context;
+    uint32_t low;
+    uint32_t high;
+};
+
+struct routines_for_a_thread {
+    pthread_mutex_t lock;
+    pthread_cond_t came;
+    struct routine_waiting waiting[XENOLITH_ROUTINES_WAITING];
+    unsigned taken;
+    unsigned put;
+};
+
+static __thread struct routines_for_a_thread *routines_of_mine;
+
+static struct routines_for_a_thread *routines_for_this_thread(void) {
+    if (routines_of_mine == NULL) {
+        struct routines_for_a_thread *made = calloc(1, sizeof *made);
+        if (made == NULL) {
+            return NULL;
+        }
+        pthread_mutex_init(&made->lock, NULL);
+        pthread_cond_init(&made->came, NULL);
+        routines_of_mine = made;
+    }
+    return routines_of_mine;
+}
+
+/* Puts a routine in line for a thread and wakes it if it is waiting for one.
+ * One already in line is not put in again: a timer that falls due again before
+ * its routine has run runs it once, as the console does. */
+static void put_a_routine_in_line(struct routines_for_a_thread *line,
+                                  struct routine_waiting one) {
+    pthread_mutex_lock(&line->lock);
+    int already = 0;
+    for (unsigned at = line->taken; at != line->put; at++) {
+        const struct routine_waiting *there = &line->waiting[at % XENOLITH_ROUTINES_WAITING];
+        if (there->routine == one.routine && there->context == one.context) {
+            already = 1;
+        }
+    }
+    if (!already && line->put - line->taken < XENOLITH_ROUTINES_WAITING) {
+        line->waiting[line->put++ % XENOLITH_ROUTINES_WAITING] = one;
+        pthread_cond_broadcast(&line->came);
+    }
+    pthread_mutex_unlock(&line->lock);
+}
+
+/* Waits until a routine is in line for this thread or `until` passes, where
+ * there is an `until`, and says whether one is. */
+static int wait_for_a_routine(struct routines_for_a_thread *line, const struct timespec *until) {
+    pthread_mutex_lock(&line->lock);
+    while (line->taken == line->put && until != NULL) {
+        if (pthread_cond_timedwait(&line->came, &line->lock, until) == ETIMEDOUT) {
+            break;
+        }
+    }
+    int any = line->taken != line->put;
+    pthread_mutex_unlock(&line->lock);
+    return any;
+}
+
+/* Runs every routine in line for this thread, on this thread, below the frame
+ * of the call that let them in. */
+static void run_the_routines_in_line(const xenolith_context *ctx, uint8_t *base,
+                                     struct routines_for_a_thread *line) {
+    for (;;) {
+        pthread_mutex_lock(&line->lock);
+        if (line->taken == line->put) {
+            pthread_mutex_unlock(&line->lock);
+            return;
+        }
+        struct routine_waiting one = line->waiting[line->taken++ % XENOLITH_ROUTINES_WAITING];
+        pthread_mutex_unlock(&line->lock);
+
+        xenolith_function body = xenolith_lookup(one.routine);
+        if (body == NULL) {
+            wanted_but_not_lifted(one.routine, 0, "named as a timer's routine");
+            continue;
+        }
+        /* Below what the caller may keep under its own frame without asking,
+         * which the console's calling convention allows it. */
+        xenolith_context state = *ctx;
+        state.r[1] = (ctx->r[1] - 512u) & ~(uint64_t)15u;
+        state.r[3] = one.context;
+        state.r[4] = one.low;
+        state.r[5] = one.high;
+        body(&state, base);
+    }
+}
+
+/* One setting of a timer, counting down on a thread of its own, with the
+ * routine to run on the thread that set it where one was named. */
 struct timer_setting {
     struct object *timer;
     unsigned long round;
     struct timespec due;
     long period;
+    struct routines_for_a_thread *line;
+    uint32_t routine;
+    uint32_t context;
 };
 
 /* Signals a timer when it falls due, and again every period after that, until
@@ -1882,6 +1991,16 @@ static void *count_a_timer_down(void *given) {
             return NULL;
         }
         signal_object(setting.timer, 1);
+        if (setting.line != NULL) {
+            /* The routine is told when the timer fell due, on the console's
+             * clock: hundreds of nanoseconds since the start of 1601. */
+            uint64_t now = ((uint64_t)setting.due.tv_sec + XENOLITH_TO_THE_CONSOLE_EPOCH)
+                               * 10000000u
+                           + (uint64_t)setting.due.tv_nsec / 100u;
+            struct routine_waiting one = {setting.routine, setting.context, (uint32_t)now,
+                                          (uint32_t)(now >> 32)};
+            put_a_routine_in_line(setting.line, one);
+        }
         if (setting.period <= 0) {
             return NULL;
         }
@@ -1898,23 +2017,16 @@ static void *count_a_timer_down(void *given) {
  * so many milliseconds if a period is given.
  *
  * Setting one takes back whatever it was set to before and leaves it not
- * signalled until it falls due. A routine a title names to be run when it does
- * is not run: running one means stopping a thread of the title's in a wait that
- * may be cut short, which nothing here does. That is said once rather than left
- * to look like a timer that never went. */
+ * signalled until it falls due. A routine a title names is put in line for the
+ * thread setting it each time the timer falls due, and runs when that thread
+ * next sleeps in a way that lets it in. One title keeps two threads asleep
+ * that way and does its work in the routine, and with it never run they slept
+ * for ever and the title never drew a frame. */
 static void set_timer(xenolith_context *ctx, uint8_t *base) {
     struct object *timer = object_of((uint32_t)ctx->r[3]);
     if (timer == NULL) {
         ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
         return;
-    }
-    if ((uint32_t)ctx->r[5] != 0) {
-        static int said;
-        if (!said) {
-            said = 1;
-            say_a_report("a timer's routine at %#x is not run when the timer falls due",
-                         (unsigned)ctx->r[5]);
-        }
     }
 
     struct timer_setting *setting = malloc(sizeof *setting);
@@ -1927,6 +2039,9 @@ static void set_timer(xenolith_context *ctx, uint8_t *base) {
     }
     setting->timer = timer;
     setting->period = (long)(int32_t)ctx->r[9];
+    setting->routine = (uint32_t)ctx->r[5];
+    setting->context = (uint32_t)ctx->r[7];
+    setting->line = setting->routine != 0 ? routines_for_this_thread() : NULL;
 
     pthread_mutex_lock(&timer->lock);
     setting->round = ++timer->timer_round;
@@ -4460,6 +4575,17 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * meant to be one. A title pacing itself then spun as fast as the host
          * allows, and one that polls a worker through this spun with it. */
         int limited = give_up_at(base, (uint32_t)ctx->r[5], &until);
+        /* A sleep the title lets routines into ends early to run any put in
+         * line for this thread, and says it did. Waits on objects do not let
+         * them in yet. */
+        if ((uint32_t)ctx->r[4] != 0) {
+            struct routines_for_a_thread *line = routines_for_this_thread();
+            if (line != NULL && wait_for_a_routine(line, limited ? &until : NULL)) {
+                run_the_routines_in_line(ctx, base, line);
+                ctx->r[3] = XENOLITH_STATUS_USER_APC;
+                return 1;
+            }
+        }
         if (!limited) {
             ctx->r[3] = XENOLITH_STATUS_SUCCESS;
             return 1;

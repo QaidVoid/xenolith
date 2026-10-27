@@ -1606,6 +1606,92 @@ int main(void) {
     }
 }
 
+/// A timer's routine runs on the thread that set it when that thread sleeps in
+/// a way that lets it in, and the sleep says so.
+///
+/// One title sets a timer with a routine on each of two threads and keeps them
+/// asleep that way, doing its work in the routine. With the routine never run
+/// the threads slept for ever. The routine here counts its runs and keeps the
+/// context it was handed.
+#[test]
+fn a_timers_routine_runs_on_the_thread_that_set_it() {
+    let program = r#"
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+
+static volatile int ran;
+static volatile uint32_t handed;
+static pthread_t setter;
+static volatile int elsewhere;
+
+static void routine(xenolith_context *ctx, uint8_t *base) {
+    (void)base;
+    ran++;
+    handed = (uint32_t)ctx->r[3];
+    if (!pthread_equal(pthread_self(), setter)) {
+        elsewhere = 1;
+    }
+}
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    return address == 0x1000u ? routine : 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    setter = pthread_self();
+
+    xenolith_context ctx = {0};
+    ctx.r[1] = 0x6ff00000u;
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0;
+    ctx.r[5] = 1;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 215, "NtCreateTimer");
+    uint32_t timer = xenolith_load32(base, 0x200);
+
+    /* Due at once, then every five milliseconds, with its routine. */
+    xenolith_store64(base, 0x300, 0);
+    ctx.r[3] = timer;
+    ctx.r[4] = 0x300;
+    ctx.r[5] = 0x1000;
+    ctx.r[6] = 1;
+    ctx.r[7] = 0x1234;
+    ctx.r[8] = 0;
+    ctx.r[9] = 5;
+    ctx.r[10] = 0;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 250, "NtSetTimerEx");
+    if (ctx.r[3] != 0) { return 3; }
+
+    /* A sleep of half a second that lets routines in. */
+    xenolith_store64(base, 0x310, (uint64_t)(int64_t)-5000000);
+    ctx.r[3] = 1;
+    ctx.r[4] = 1;
+    ctx.r[5] = 0x310;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 90, "KeDelayExecutionThread");
+    uint32_t said = (uint32_t)ctx.r[3];
+    if (said != 0xc0u || ran == 0) {
+        fprintf(stderr, "the sleep said %#x and the routine ran %d times\n", said, ran);
+        return 4;
+    }
+    if (handed != 0x1234u || elsewhere) {
+        fprintf(stderr, "the routine was handed %#x, elsewhere %d\n", handed, elsewhere);
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("timer_routine", program) {
+        panic!("a timer's routine did not run on the thread that set it:\n{complaint}");
+    }
+}
+
 /// Asking for the next key a controller pressed says that none is waiting, and
 /// writes nothing anywhere else.
 ///
