@@ -3407,6 +3407,10 @@ static uint32_t answer_a_message(uint32_t program, uint32_t message) {
     stop_the_run(3);
 }
 
+/* What asking for the next key a controller pressed says when none is
+ * waiting. */
+#define XENOLITH_ERROR_EMPTY 0x10D2u
+
 /* The number of the one device a title can save to, and what asking about
  * any other says. */
 #define XENOLITH_THE_ONE_DEVICE 1u
@@ -3868,28 +3872,19 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
             ctx->r[3] = (uint32_t)ctx->r[3] > 3u ? XENOLITH_STATUS_NOT_FOUND : 0;
             return 1;
         case 408: {
-            /* The next thing a controller did, if anything did.
+            /* The next key a controller pressed or let go, where one did.
              *
-             * A title that polls this in a loop is asking for events, and what
-             * it is told when there are none is that there are none rather than
-             * that it failed. Reporting nothing as an error sends a title down
-             * its error path on every frame it is idle, which is most of them.
-             *
-             * The event structure is the console's: the packet number, the
-             * buttons, the kind, and the repeats. Nothing here raises an event,
-             * so the count of them is nought. */
-            uint32_t into = (uint32_t)ctx->r[4];
-            uint32_t count_at = (uint32_t)ctx->r[3];
-            if (into != 0) {
-                xenolith_store32(base, into, 1);
-                xenolith_store32(base, into + 4, 0);
-                xenolith_store32(base, into + 8, 0);
-                xenolith_store32(base, into + 12, 0);
-            }
-            if (count_at != 0) {
-                xenolith_store32(base, count_at, 0);
-            }
-            ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+             * The arguments are where the controller's number is kept, which a
+             * title may ask about any of, a set of flags, and where to put the
+             * key. Nothing here raises a key, so there is never one, and what
+             * the console says then is that none is waiting. A title takes
+             * keys until it is told that, and told it had one with nothing in
+             * it, one went round taking keys for ever and never drew a frame.
+             * Read the other way round, the flags were taken for where to put
+             * the key, and a word of nothing was written at the start of
+             * memory. */
+            ctx->r[3] = (uint32_t)ctx->r[5] == 0 ? XENOLITH_ERROR_INVALID_PARAMETER
+                                                 : XENOLITH_ERROR_EMPTY;
             return 1;
         }
         case 651: {

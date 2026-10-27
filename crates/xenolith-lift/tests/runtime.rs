@@ -1606,6 +1606,60 @@ int main(void) {
     }
 }
 
+/// Asking for the next key a controller pressed says that none is waiting, and
+/// writes nothing anywhere else.
+///
+/// The arguments are where the controller's number is kept, flags, and where
+/// to put the key. One title takes keys until it is told none is waiting, and
+/// told it had one it went round for ever. Read the other way round, the flags
+/// were taken for where to put the key and the start of memory was written.
+#[test]
+fn asking_for_a_key_when_none_was_pressed_says_none_is_waiting() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    for (uint32_t at = 0; at < 16; at += 4) {
+        xenolith_store32(base, at, 0xa5a5a5a5u);
+    }
+    xenolith_store32(base, 0x200, 0xffu);
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 2;
+    ctx.r[5] = 0x300;
+    xenolith_import(&ctx, base, "xam.xex", 408, "XamInputGetKeystrokeEx");
+    if (ctx.r[3] != 0x10d2u) {
+        fprintf(stderr, "asking for a key said %#x\n", (unsigned)ctx.r[3]);
+        return 3;
+    }
+    for (uint32_t at = 0; at < 16; at += 4) {
+        if (xenolith_load32(base, at) != 0xa5a5a5a5u) {
+            fprintf(stderr, "the word at %u was written\n", at);
+            return 4;
+        }
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("no_key_waiting", program) {
+        panic!("asking for a key with none pressed was answered wrongly:\n{complaint}");
+    }
+}
+
 /// A thread that lets a lock go and waits is waiting before anyone can take the
 /// lock.
 ///
