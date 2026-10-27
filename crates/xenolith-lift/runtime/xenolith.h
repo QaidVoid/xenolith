@@ -996,6 +996,27 @@ int xenolith_begin_a_frame(void);
  * solid than the test, exactly as solid, and more solid. */
 #define XENOLITH_DRAWN_HOWEVER_SOLID 7u
 
+/* The mode a title draws in when only how far away things are is kept. */
+#define XENOLITH_ONLY_HOW_FAR 5u
+
+/* The bit of what a title lays a colour down with that says a place is to be
+ * thrown away where how solid it is does not answer the test beside it. */
+#define XENOLITH_A_TEST_IS_SET 8u
+
+/* The test a draw is given, from how a title says colours are laid down and the
+ * mode it draws in.
+ *
+ * A draw that keeps only how far away things are runs no pixel shader on the
+ * console, so nothing it would have put out is tested. A title wipes its
+ * shadows that way with a shader putting out nothing solid and the test left
+ * on from the pass before, and tested here the wipe was thrown away whole. */
+static inline uint32_t xenolith_test_a_draw_is_given(uint32_t colour_control, uint32_t mode) {
+    if (mode == XENOLITH_ONLY_HOW_FAR || (colour_control & XENOLITH_A_TEST_IS_SET) == 0) {
+        return XENOLITH_DRAWN_HOWEVER_SOLID;
+    }
+    return colour_control & 7u;
+}
+
 /* Draws what a title asked to draw, with the shaders it last handed over.
  *
  * A place is thrown away before it is drawn where how solid it is does not

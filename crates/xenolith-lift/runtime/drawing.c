@@ -350,10 +350,6 @@ static uint32_t samples_down = 1;
  * way round the two are compared. */
 #define XENOLITH_HOW_FAR_IS_READ 0x2200u
 
-/* The bit of what a title lays a colour down with that says a place is to be
- * thrown away where how solid it is does not answer the test beside it. */
-#define XENOLITH_A_TEST_IS_SET 8u
-
 /* Counts what a title draws and says so now and again.
  *
  * What is on screen follows from what was asked for, so the shapes, how many
@@ -482,9 +478,7 @@ static void say_how_a_position_moves(const uint8_t *base) {
     /* How solid a place has to be to be drawn at all. A title that asks for no
      * test is the same as one asking for the test that draws everything, so the
      * two are not told apart past here. */
-    drawn_cut_off = (drawn_colour_control & XENOLITH_A_TEST_IS_SET) != 0
-                        ? drawn_colour_control & 7u
-                        : XENOLITH_DRAWN_HOWEVER_SOLID;
+    drawn_cut_off = xenolith_test_a_draw_is_given(drawn_colour_control, drawn_in_mode);
     drawn_cut_off_at = xenolith_load32(base, XENOLITH_REGISTERS + 0x210eu * 4u);
 
     /* Whether a title wants how far away a thing is looked at before it is
@@ -493,8 +487,10 @@ static void say_how_a_position_moves(const uint8_t *base) {
 
     /* Which parts of a colour reach the surface. A title turns them all off for
      * a pass whose work is not to be seen. */
-    drawn_written = xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WHAT_IS_WRITTEN * 4u)
-                    & 0xfu;
+    drawn_written = drawn_in_mode == XENOLITH_ONLY_HOW_FAR
+                        ? 0u
+                        : xenolith_load32(base, XENOLITH_REGISTERS + XENOLITH_WHAT_IS_WRITTEN * 4u)
+                              & 0xfu;
     {
         uint32_t held = xenolith_load32(base, XENOLITH_REGISTERS + 0x2113u * 4u);
         memcpy(&moved_depth_by, &held, sizeof moved_depth_by);

@@ -7123,6 +7123,46 @@ fn a_constant_read_without_its_sign_is_positive() {
     );
 }
 
+/// A draw keeping only how far away things are is given no test.
+///
+/// The console runs no pixel shader for such a draw, so nothing a shader puts
+/// out is tested. A title wipes its shadows that way with the test left on and
+/// a shader putting out nothing solid, and tested, the wipe never landed.
+#[test]
+fn a_draw_keeping_only_how_far_is_given_no_test() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    /* The test on, keeping what is more solid than nothing. */
+    const uint32_t tested = 0x8700000cu;
+    if (xenolith_test_a_draw_is_given(tested, XENOLITH_ONLY_HOW_FAR)
+        != XENOLITH_DRAWN_HOWEVER_SOLID) {
+        fprintf(stderr, "a draw keeping only how far away things are was tested\n");
+        return 1;
+    }
+    if (xenolith_test_a_draw_is_given(tested, 4u) != 4u) {
+        fprintf(stderr, "a draw keeping colours lost the test it asked for\n");
+        return 2;
+    }
+    if (xenolith_test_a_draw_is_given(0x87000004u, 4u) != XENOLITH_DRAWN_HOWEVER_SOLID) {
+        fprintf(stderr, "a draw asking for no test was tested\n");
+        return 3;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("only_how_far", program) {
+        panic!("a draw keeping only how far away things are was tested:\n{complaint}");
+    }
+}
+
 /// A rectangle is drawn whole: the three corners a title gives and the fourth
 /// the hardware works out across from the right angle.
 ///

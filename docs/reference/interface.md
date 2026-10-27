@@ -524,6 +524,13 @@ A place is thrown away before it is drawn where how solid it is does not
 answer `cut_off`, the console's own three bits, against `cut_off_at`, which
 carries the bits of the number they are measured against.
 
+### `xenolith_test_a_draw_is_given`
+
+The test a draw is given, from how a title says colours are laid down and the
+mode it draws in. A draw that keeps only how far away things are runs no pixel
+shader on the console, so it is given the test that draws everything, whatever
+the colour register says.
+
 ## Vertices
 
 How a draw's vertex data reaches the translated vertex shader.
