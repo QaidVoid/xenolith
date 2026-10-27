@@ -981,6 +981,7 @@ struct object {
     long long at;
     pthread_t thread;
     int running;
+    /* How many times a thread has been suspended and not yet resumed. */
     int suspended;
     /* Which setting of a timer is the current one. Every set and every cancel
      * moves it on, so a countdown from an earlier setting finds it moved and
@@ -1925,15 +1926,65 @@ static void create_thread(xenolith_context *ctx, uint8_t *base) {
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
 }
 
-/* Letting a suspended thread go. */
-static void resume_thread(xenolith_context *ctx) {
-    struct object *found = object_of((uint32_t)ctx->r[3]);
-    if (found != NULL && found->kind == OBJECT_THREAD && !found->running) {
+/* Letting a suspended thread go, once for each time it was suspended, and
+ * saying how many times it had been, or less than nought where `handle` names
+ * no thread. A thread made suspended starts when the last of them is taken
+ * back. */
+static int resume_thread(uint32_t handle) {
+    struct object *found = object_of(handle);
+    if (found == NULL || found->kind != OBJECT_THREAD) {
+        return -1;
+    }
+    pthread_mutex_lock(&found->lock);
+    int was = found->suspended;
+    if (found->suspended > 0) {
+        found->suspended--;
+    }
+    int starts = found->suspended == 0 && !found->running;
+    if (starts) {
         found->running = 1;
-        found->suspended = 0;
+    }
+    pthread_cond_broadcast(&found->changed);
+    pthread_mutex_unlock(&found->lock);
+    if (starts) {
         pthread_create(&found->thread, NULL, run_guest_thread, found);
     }
+    return was;
+}
+
+/* Waits for as long as this thread is suspended. */
+static void stay_while_suspended(struct object *self) {
+    pthread_mutex_lock(&self->lock);
+    while (self->suspended > 0) {
+        pthread_cond_wait(&self->changed, &self->lock);
+    }
+    pthread_mutex_unlock(&self->lock);
+}
+
+/* Suspending a thread, and saying how many times it had been before.
+ *
+ * A thread suspending itself stops here until it is resumed, which is exactly
+ * what the console does. Another thread stops the next time it calls into the
+ * kernel rather than where it is, because a thread of this runtime's cannot be
+ * stopped from outside without a signal it looks at. One title has a worker
+ * suspend itself until it is wanted, and told it could not, the worker went
+ * round without it and the title never finished loading. */
+static void suspend_thread(xenolith_context *ctx, uint8_t *base) {
+    struct object *found = object_of((uint32_t)ctx->r[3]);
+    if (found == NULL || found->kind != OBJECT_THREAD) {
+        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        return;
+    }
+    pthread_mutex_lock(&found->lock);
+    int was = found->suspended++;
+    pthread_mutex_unlock(&found->lock);
+    if ((uint32_t)ctx->r[4] != 0) {
+        xenolith_store32(base, (uint32_t)ctx->r[4], (uint32_t)was);
+    }
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+    if (found == this_thread) {
+        stay_while_suspended(found);
+    }
 }
 
 /* Making something to wait on. The kind decides what waiting takes. */
@@ -4615,9 +4666,14 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     }
-    case 245:
-        resume_thread(ctx);
+    case 245: {
+        int was = resume_thread((uint32_t)ctx->r[3]);
+        if (was >= 0 && (uint32_t)ctx->r[4] != 0) {
+            xenolith_store32(base, (uint32_t)ctx->r[4], (uint32_t)was);
+        }
+        ctx->r[3] = was >= 0 ? XENOLITH_STATUS_SUCCESS : XENOLITH_STATUS_NOT_FOUND;
         return 1;
+    }
     case 25:
         /* A thread ending itself. It does not come back from this, so the
          * host thread ends here too, after saying it has finished. On the
@@ -4697,21 +4753,12 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * it is let go, and a title that lets it go this way rather than by
          * handle is as much waiting on it: its sound engine makes the thread
          * that mixes suspended and starts it here, and never started, nothing
-         * mixes and a film keeping to its soundtrack stands on its first frame. */
-        resume_thread(ctx);
+         * mixes and a film keeping to its soundtrack stands on its first frame.
+         * What comes back is how many times it had been suspended. */
+        ctx->r[3] = (uint32_t)resume_thread((uint32_t)ctx->r[3]);
         return 1;
     case 252:
-        /* Suspending a thread.
-         *
-         * Answering without stopping anything is a lie a title believes: it
-         * suspends a worker and carries on expecting that worker not to run,
-         * and two threads doing the same work is a fault that looks like a
-         * data race. There is no way to stop a thread this runtime made without
-         * a signal for it to look at, and adding one is a change to how threads
-         * are run rather than to this switch. So this says it cannot, which
-         * stops the run where the title wanted it rather than letting it go on
-         * with a worker it thinks is stopped. */
-        ctx->r[3] = XENOLITH_STATUS_NOT_FOUND;
+        suspend_thread(ctx, base);
         return 1;
     case 90: {
         /* Waiting for a stretch of time, or until an object is signalled.
@@ -5825,6 +5872,12 @@ void xenolith_import(xenolith_context *ctx, uint8_t *base, const char *library,
                      uint32_t ordinal, const char *name) {
     static int tracing = -1;
     static unsigned long reached = 0;
+
+    /* A thread another suspended stops here, the first time it calls into the
+     * kernel after being told to. */
+    if (this_thread != NULL && __atomic_load_n(&this_thread->suspended, __ATOMIC_ACQUIRE) > 0) {
+        stay_while_suspended(this_thread);
+    }
 
     if (serviced(ctx, base, library, ordinal)) {
         return;

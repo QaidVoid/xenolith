@@ -7698,6 +7698,92 @@ int main(void) {
     }
 }
 
+/// A thread that suspends itself stays where it is until it is resumed.
+///
+/// One title keeps workers that suspend themselves until they are wanted, and
+/// told it could not suspend one, the worker went round without it and the
+/// title never finished loading. Here a thread suspends itself and marks when
+/// it runs on, and it has to stay put until the first thread resumes it, with
+/// each call saying how many times it had been suspended before.
+#[test]
+fn a_thread_suspending_itself_waits_to_be_resumed() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <time.h>
+
+static uint32_t handle;
+static volatile int ran_on;
+static volatile uint32_t was_before;
+
+static void worker(xenolith_context *ctx, uint8_t *base) {
+    ctx->r[3] = handle;
+    ctx->r[4] = 0x400;
+    xenolith_import(ctx, base, "xboxkrnl.exe", 252, "NtSuspendThread");
+    was_before = xenolith_load32(base, 0x400);
+    ran_on = 1;
+}
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    return address == 0x1000u ? worker : 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    /* Made suspended, so its handle is known before it runs. */
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[4] = 0x10000;
+    ctx.r[5] = 0x204;
+    ctx.r[6] = 0;
+    ctx.r[7] = 0x1000;
+    ctx.r[8] = 0;
+    ctx.r[9] = 1;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 13, "ExCreateThread");
+    handle = xenolith_load32(base, 0x200);
+    ctx.r[3] = handle;
+    ctx.r[4] = 0x300;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 245, "NtResumeThread");
+    if (xenolith_load32(base, 0x300) != 1u) { return 3; }
+
+    struct timespec a_while = {0, 100000000L};
+    nanosleep(&a_while, NULL);
+    if (ran_on) {
+        fprintf(stderr, "the thread ran on without being resumed\n");
+        return 4;
+    }
+    ctx.r[3] = handle;
+    ctx.r[4] = 0x300;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 245, "NtResumeThread");
+    if (xenolith_load32(base, 0x300) != 1u) {
+        fprintf(stderr, "resuming said %u\n", xenolith_load32(base, 0x300));
+        return 5;
+    }
+    for (int tries = 0; tries < 100 && !ran_on; tries++) {
+        struct timespec a_little = {0, 10000000L};
+        nanosleep(&a_little, NULL);
+    }
+    if (!ran_on || was_before != 0u) {
+        fprintf(stderr, "ran on %d, suspending said %u\n", ran_on, was_before);
+        return 6;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("suspending_itself", program) {
+        panic!("a thread suspending itself did not wait to be resumed:\n{complaint}");
+    }
+}
+
 /// Memory a title gives back is handed out again, cleared.
 ///
 /// One title takes and lets go of each screen's worth of memory as it moves
