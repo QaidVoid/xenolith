@@ -4856,7 +4856,14 @@ static int finish_opening_a_window(void) {
      *
      * So a way that drops a frame rather than holding one back is asked for
      * first, and waiting for the display is only what is left when a device
-     * offers nothing else. What is lost is frames nobody would have seen. */
+     * offers nothing else. What is lost is frames nobody would have seen.
+     *
+     * Showing each frame the moment it is handed over comes second. It can
+     * tear on a screen drawn to directly, but a window a desktop puts together
+     * is not drawn to directly, and the title already keeps the console's own
+     * pace. A device showing through another desktop's windows may offer only
+     * that and waiting, and waiting there stood the title still for as long as
+     * its window was hidden or out of focus, while its sound played on. */
     VkPresentModeKHR without_waiting = VK_PRESENT_MODE_FIFO_KHR;
     uint32_t how_many_ways = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(drawing.adapter, screen.surface, &how_many_ways, NULL);
@@ -4873,11 +4880,9 @@ static int finish_opening_a_window(void) {
                     without_waiting = VK_PRESENT_MODE_MAILBOX_KHR;
                     break;
                 }
-                /* Not the one that shows a frame the moment it is handed over.
-                 * That tears, and it asks whatever draws the screen to take
-                 * frames as fast as a title can make them, with no bound at
-                 * all. Waiting for the display is the courteous thing to fall
-                 * back to; only the middle way is worth asking for. */
+                if (ways[at] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+                    without_waiting = VK_PRESENT_MODE_IMMEDIATE_KHR;
+                }
             }
         }
     }
@@ -5027,8 +5032,14 @@ static void show_what_was_drawn_inside(VkImage what) {
         (void)0;
 #endif
 
+    /* Not waited for. A desktop hands an image back when it is ready for
+     * another, and one whose window is hidden or out of focus may not hand one
+     * back for a long while. Waiting held the title's frame in hand all that
+     * time: the picture stood still while the sound, which keeps its own time,
+     * played on, and the two never met again. A frame no image is free for is
+     * one nobody would have seen. */
     uint32_t which = 0;
-    VkResult got = vkAcquireNextImageKHR(drawing.device, screen.chain, 1000000000ull, screen.taken,
+    VkResult got = vkAcquireNextImageKHR(drawing.device, screen.chain, 0, screen.taken,
                                          VK_NULL_HANDLE, &which);
     if (got == VK_ERROR_OUT_OF_DATE_KHR) {
         /* The window is no longer the size the chain was made for. Make it
