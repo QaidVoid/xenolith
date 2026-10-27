@@ -7327,6 +7327,68 @@ fn a_remainder_worked_out_with_a_reciprocal_is_not_short() {
     );
 }
 
+/// What an instruction asks to keep between nought and one is kept there.
+///
+/// One title packs whatever is brighter than one into the top of a byte, and
+/// asks for each colour kept to one first. Left as it was, a sunlit ground
+/// filled the byte, was read back as the brightest thing there could be, and
+/// the picture made from it was black with the ground yellow. The shader below
+/// keeps two lanes of a constant to one in its four lane half and two to the
+/// third in its single lane half, and puts out half of each, so what is drawn
+/// has to be half red, no green and half blue.
+/// Needs a device to draw on, and returns where there is none.
+#[test]
+fn what_is_kept_to_one_is_kept_there() {
+    let run = (2u64 << 44) | (2u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    let keeps = 50u32 << 26;
+    let every_lane = 0xfu32 << 16;
+    let exports = 1u32 << 15;
+    let vector_kept = 1u32 << 24;
+    let scalar_kept = 1u32 << 25;
+    let exponent = 14u32 << 26;
+    let sources = |first: u32, second: u32, third: u32| (first << 16) | (second << 8) | third;
+
+    /* The larger of the first constant and itself into the first two lanes of
+     * the first register, and two to the third constant's fourth lane into its
+     * third lane, each kept to one. */
+    words.extend([
+        exponent | scalar_kept | (0x4 << 20) | vector_kept | (0x3 << 16),
+        0,
+        (2u32 << 24) | sources(0, 0, 2),
+    ]);
+    /* Half of that into the colour. */
+    words.extend([
+        keeps | exports | every_lane,
+        0,
+        (1u32 << 24) | sources(0, 1, 0) | (1 << 31),
+    ]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    let program = a_triangle_drawn_by(
+        "{2.0f, -1.0f, 0.0f, 0.0f}, {0.5f, 0.5f, 0.5f, 0.5f}, {3.0f, 3.0f, 3.0f, 3.0f}",
+        "",
+    );
+    let ran = draw_with("kept_to_one", &pixel.words, &program).expect("the draw ran");
+    if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+        return;
+    }
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("kept_to_one");
+    let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+    let pixel = a_pixel_of(&picture, 640, 360).expect("the frame is too short");
+    let half = 127..=128;
+    assert!(
+        half.contains(&pixel[0]) && pixel[1] == 0 && half.contains(&pixel[2]),
+        "what was asked to be kept to one was not: the middle of the frame is {pixel:?}"
+    );
+}
+
 /// A fetch reads its vertices in the byte order its constant names.
 ///
 /// A title keeps pairs of halfwords with the bytes turned within each half,

@@ -147,6 +147,32 @@ pub(crate) fn extract(module: &mut Module, named: &Named, from: u32, lane: u32) 
     one.number()
 }
 
+/// Returns a value of the kind named kept between nought and one, a lane at a
+/// time, with a lane that is not a number taken as nought.
+pub(crate) fn kept_to_one(
+    module: &mut Module,
+    named: &Named,
+    kind: u32,
+    value: u32,
+    nought: u32,
+    one: u32,
+) -> u32 {
+    let made = module.name();
+    module.add(
+        opcodes::EXT_INST,
+        &[
+            kind,
+            made.number(),
+            named.extended.number(),
+            81,
+            value,
+            nought,
+            one,
+        ],
+    );
+    made.number()
+}
+
 /// One number worked out from two, as the operation a host names for it.
 pub(crate) fn worked_out(
     module: &mut Module,

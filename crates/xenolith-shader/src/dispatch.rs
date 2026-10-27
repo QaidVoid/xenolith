@@ -18,7 +18,7 @@ use crate::plan::{Fetches, what_the_fetches_need};
 use crate::preamble::{Named, preamble};
 use crate::single_lane::{put_it_where_it_goes, single_lane, whether_it_runs};
 use crate::spirv::Module;
-use crate::values::extract;
+use crate::values::{extract, kept_to_one};
 use crate::{ALU_WORDS, Alu, Kind, Refused, Translated};
 
 /// What carries from one instruction to the next while a shader is written out.
@@ -86,6 +86,22 @@ fn one_instruction(
     else {
         return Ok(());
     };
+    /* A title asks for a colour kept to one before it packs what is brighter
+     * into the top of a byte, and one that ran over filled the byte: the
+     * picture after it took a sunlit ground for the brightest thing there
+     * could be, darkened everything else to black and left the ground yellow. */
+    let produced = if alu.vector_is_kept_to_one() {
+        kept_to_one(
+            module,
+            named,
+            named.four.number(),
+            produced,
+            named.nothing.number(),
+            named.all_ones.number(),
+        )
+    } else {
+        produced
+    };
 
     /* What the single lane half worked out, which the next instruction may ask
      * for by name as well as this one writing it somewhere. */
@@ -96,6 +112,13 @@ fn one_instruction(
         carrying.previous,
         &mut carrying.predicate,
     ) {
+        Ok(alone) if alu.scalar_is_kept_to_one() => {
+            let nought = extract(module, named, named.nothing.number(), 0);
+            let one = extract(module, named, named.all_ones.number(), 0);
+            let alone = kept_to_one(module, named, named.float.number(), alone, nought, one);
+            carrying.previous = Some(alone);
+            Some(alone)
+        }
         Ok(alone) => {
             carrying.previous = Some(alone);
             Some(alone)

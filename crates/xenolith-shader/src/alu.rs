@@ -347,6 +347,20 @@ impl Alu {
         (self.first >> 15) & 1 == 1
     }
 
+    /// Whether what the four lane half works out is kept between nought and
+    /// one before it is written.
+    #[must_use]
+    pub fn vector_is_kept_to_one(self) -> bool {
+        (self.first >> 24) & 1 == 1
+    }
+
+    /// Whether what the single lane half works out is kept between nought and
+    /// one before it is written.
+    #[must_use]
+    pub fn scalar_is_kept_to_one(self) -> bool {
+        (self.first >> 25) & 1 == 1
+    }
+
     /// Whether this runs only where the predicate holds.
     #[must_use]
     pub fn is_predicated(self) -> bool {
