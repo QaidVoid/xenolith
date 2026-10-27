@@ -13,7 +13,7 @@ use crate::opcodes;
 use crate::operands::read;
 use crate::preamble::Named;
 use crate::spirv::Module;
-use crate::values::{chosen, extract, lane_by_lane, what_is_exported};
+use crate::values::{chosen, extract, lane_by_lane, never_short, what_is_exported};
 use crate::{Alu, Kind, Refused, ScalarOperation};
 
 /// Returns what one of the operations that set the predicate works out, and
@@ -387,12 +387,12 @@ pub(crate) fn on_its_own(
                     0,
                 ],
             );
-            let made = module.name();
+            let nearest = module.name();
             module.add(
                 opcodes::FLOAT_DIVIDE,
-                &[named.float.number(), made.number(), one.number(), left],
+                &[named.float.number(), nearest.number(), one.number(), left],
             );
-            made.number()
+            never_short(module, named, nearest.number())
         }
         _ => return None,
     })

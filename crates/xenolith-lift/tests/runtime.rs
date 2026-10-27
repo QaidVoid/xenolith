@@ -7244,6 +7244,89 @@ fn a_constant_read_without_its_sign_is_positive() {
     );
 }
 
+/// The remainder of a whole number over another, worked out the way a title's
+/// compiler works it out, is not short of a whole number.
+///
+/// The compiler takes the fraction of the first number times the reciprocal of
+/// the second, times the second. One title finds the corner a vertex stands for
+/// as the remainder of its number over forty, and with the nearest reciprocal a
+/// fifth of them came out just under a whole number, took the corner before, and
+/// left holes all over its ground. The shader below puts out the fraction of
+/// such a remainder for three numbers, one in each of red, green and blue, so
+/// each has to be nought or very nearly. Needs a device to draw on, and returns
+/// where there is none.
+#[test]
+fn a_remainder_worked_out_with_a_reciprocal_is_not_short() {
+    let run = (2u64 << 44) | (5u64 << 12) | 1;
+    let mut words = vec![
+        u32::try_from(run & 0xffff_ffff).unwrap_or_default(),
+        u32::try_from((run >> 32) & 0xffff).unwrap_or_default(),
+        0,
+    ];
+    let keeps = 50u32 << 26;
+    let every_lane = 0xfu32 << 16;
+    let exports = 1u32 << 15;
+    let reads_registers = |first: bool, second: bool, third: bool| {
+        (u32::from(first) << 31) | (u32::from(second) << 30) | (u32::from(third) << 29)
+    };
+    let sources = |first: u32, second: u32, third: u32| (first << 16) | (second << 8) | third;
+    let multiply = 1u32 << 24;
+    let fraction = 8u32 << 24;
+    let every_lane_the_first = 0x6cu32;
+
+    /* The reciprocal of the third constant into the first lane of the first
+     * register, the four lane half writing nothing. */
+    words.extend([
+        (19u32 << 26) | (1 << 20),
+        0,
+        (2u32 << 24) | sources(2, 2, 2),
+    ]);
+    /* The first constant times that, into the second register. */
+    words.extend([
+        keeps | every_lane | 1,
+        every_lane_the_first << 8,
+        multiply | sources(0, 0, 0) | reads_registers(false, true, false),
+    ]);
+    /* The fraction of that, times the third constant. */
+    words.extend([
+        keeps | every_lane | 1,
+        0,
+        fraction | sources(1, 1, 1) | reads_registers(true, true, true),
+    ]);
+    words.extend([
+        keeps | every_lane | 1,
+        0,
+        multiply | sources(1, 2, 0) | reads_registers(true, false, false),
+    ]);
+    /* And the fraction of the remainder into the colour. */
+    words.extend([
+        keeps | exports | every_lane,
+        0,
+        fraction | sources(1, 1, 1) | reads_registers(true, true, true),
+    ]);
+    let pixel = xenolith_shader::translate(xenolith_shader::Kind::Pixel, &words)
+        .expect("the words are a shader");
+
+    /* Each of the three numbers is a little over a whole number of forties,
+     * and the nearest reciprocal leaves each remainder just short. */
+    let program = a_triangle_drawn_by(
+        "{41.0f, 19961.0f, 82.0f, 1.0f}, {0.0f}, {40.0f, 40.0f, 40.0f, 40.0f}",
+        "",
+    );
+    let ran = draw_with("a_remainder", &pixel.words, &program).expect("the draw ran");
+    if String::from_utf8_lossy(&ran.stdout).contains("no device") {
+        return;
+    }
+
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("a_remainder");
+    let picture = std::fs::read(directory.join("frame.ppm")).expect("the frame was not written");
+    let pixel = a_pixel_of(&picture, 640, 360).expect("the frame is too short");
+    assert!(
+        pixel.iter().all(|&part| part < 8),
+        "a remainder came out short of a whole number: the middle of the frame is {pixel:?}"
+    );
+}
+
 /// A fetch reads its vertices in the byte order its constant names.
 ///
 /// A title keeps pairs of halfwords with the bytes turned within each half,

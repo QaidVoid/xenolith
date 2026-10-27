@@ -245,3 +245,71 @@ pub(crate) fn chosen(
     );
     made.number()
 }
+
+/// Returns a reciprocal moved the least step further from nought, unless it is
+/// exactly what it stands for.
+///
+/// A title's compiler works out the remainder of one number over another as the
+/// fraction of the first times the reciprocal of the second, and the console's
+/// reciprocal is never short of the true one, so a remainder that should be a
+/// whole number comes out on or just over it. The nearest reciprocal is short
+/// as often as not. One title finds the corner a vertex stands for as the
+/// remainder of its number over forty, and with the nearest reciprocal a fifth
+/// of them came out just under and took the corner before: the ground was drawn
+/// full of holes. A reciprocal that is a power of two is exact and stays as it
+/// is, and so do nought, one past counting and a number that is not one.
+#[allow(clippy::indexing_slicing)]
+pub(crate) fn never_short(module: &mut Module, named: &Named, nearest: u32) -> u32 {
+    let integer = |module: &mut Module, operation: u16, operands: &[u32]| {
+        let made = module.name();
+        let mut all = vec![named.whole.number(), made.number()];
+        all.extend_from_slice(operands);
+        module.add(operation, &all);
+        made.number()
+    };
+    let holds = |module: &mut Module, left: u32, right: u32| {
+        let made = module.name();
+        module.add(
+            opcodes::INTEGER_NOT_EQUAL,
+            &[named.boolean.number(), made.number(), left, right],
+        );
+        made.number()
+    };
+    let nought = named.whole_numbers[0].number();
+
+    let bits = integer(module, opcodes::BITCAST, &[nearest]);
+    let fraction = integer(
+        module,
+        opcodes::SHIFT_LEFT_LOGICAL,
+        &[bits, named.whole_numbers[9].number()],
+    );
+    let inexact = holds(module, fraction, nought);
+    let shifted = integer(
+        module,
+        opcodes::SHIFT_RIGHT_LOGICAL,
+        &[bits, named.whole_numbers[23].number()],
+    );
+    let power = integer(
+        module,
+        opcodes::BITWISE_AND,
+        &[shifted, named.a_byte.number()],
+    );
+    let counted = holds(module, power, named.a_byte.number());
+    let moving = module.name();
+    module.add(
+        opcodes::LOGICAL_AND,
+        &[named.boolean.number(), moving.number(), inexact, counted],
+    );
+    let further = integer(
+        module,
+        opcodes::INTEGER_ADD,
+        &[bits, named.whole_numbers[1].number()],
+    );
+    let chosen = integer(module, opcodes::SELECT, &[moving.number(), further, bits]);
+    let made = module.name();
+    module.add(
+        opcodes::BITCAST,
+        &[named.float.number(), made.number(), chosen],
+    );
+    made.number()
+}

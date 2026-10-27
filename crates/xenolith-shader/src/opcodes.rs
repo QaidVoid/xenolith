@@ -184,6 +184,9 @@ pub const FLOAT_ORDERED_GREATER_THAN_EQUAL: u16 = 190;
 /// `OpShiftRightLogical`.
 pub const SHIFT_RIGHT_LOGICAL: u16 = 194;
 
+/// `OpShiftLeftLogical`.
+pub const SHIFT_LEFT_LOGICAL: u16 = 196;
+
 /// `OpBitwiseAnd`.
 pub const BITWISE_AND: u16 = 199;
 
