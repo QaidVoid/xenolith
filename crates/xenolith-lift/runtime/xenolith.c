@@ -3504,8 +3504,10 @@ static void say_who_is_signed_in(xenolith_context *ctx, uint8_t *base, uint32_t 
     ctx->r[3] = 0;
 }
 
-/* The system's music player, and asking it who controls what plays. */
+/* The system's music player, asking it whether it is playing anything, and
+ * asking it who controls what plays. */
 #define XENOLITH_MUSIC_PLAYER 0xfau
+#define XENOLITH_GET_STATUS 0x00070009u
 #define XENOLITH_SET_PLAYBACK_CONTROLLER 0x0007001au
 
 /* The system's program for what a player is doing, and telling it a context
@@ -3522,7 +3524,18 @@ static void say_who_is_signed_in(xenolith_context *ctx, uint8_t *base, uint32_t 
  * Any other stops the run naming both numbers, as an entry point nothing
  * answers does: answering a message with success when nothing was done is a
  * lie a title believes. */
-static uint32_t answer_a_message(uint32_t program, uint32_t message) {
+static uint32_t answer_a_message(uint8_t *base, uint32_t program, uint32_t message,
+                                 uint32_t block) {
+    if (program == XENOLITH_MUSIC_PLAYER && message == XENOLITH_GET_STATUS) {
+        /* Whether the player is playing the person's own music, written where
+         * the second word of the block points. Nothing here plays any, so it
+         * is idle, which is nought, and the title plays its own. */
+        uint32_t state_at = block != 0 ? xenolith_load32(base, block + 4) : 0;
+        if (state_at != 0) {
+            xenolith_store32(base, state_at, 0);
+        }
+        return XENOLITH_STATUS_SUCCESS;
+    }
     if (program == XENOLITH_MUSIC_PLAYER && message == XENOLITH_SET_PLAYBACK_CONTROLLER) {
         /* Who decides what music plays: the title or the person holding the
          * controller. Nothing here plays the person's own music, so the title
@@ -4253,7 +4266,8 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
         }
         case 500:
             /* A message answered before the call returns. */
-            ctx->r[3] = answer_a_message((uint32_t)ctx->r[3], (uint32_t)ctx->r[4]);
+            ctx->r[3] = answer_a_message(base, (uint32_t)ctx->r[3], (uint32_t)ctx->r[4],
+                                         (uint32_t)ctx->r[5]);
             return 1;
         case 503:
         case 508: {
@@ -4263,7 +4277,8 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
              * request is under way, and where there is none the status is the
              * answer. */
             uint32_t block = (uint32_t)ctx->r[5];
-            uint32_t status = answer_a_message((uint32_t)ctx->r[3], (uint32_t)ctx->r[4]);
+            uint32_t status = answer_a_message(base, (uint32_t)ctx->r[3], (uint32_t)ctx->r[4],
+                                               (uint32_t)ctx->r[6]);
             ctx->r[3] = block != 0 ? finish_at_once(base, block, status, 0) : status;
             return 1;
         }
@@ -4697,6 +4712,15 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * the slot would hand it to something else while that is true. What it
          * costs is that handles are only ever handed out, which has not run out
          * and is written down rather than found later. */
+        ctx->r[3] = XENOLITH_STATUS_SUCCESS;
+        return 1;
+    case 259:
+    case 260:
+        /* Making and taking back another name for a device. A path is read
+         * here with its device dropped and found in the directory the image
+         * came from, so a name for a device changes nothing about where a
+         * file is, and a title that takes one back before making it again is
+         * told both went through. */
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
     case 272: {

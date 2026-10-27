@@ -1784,6 +1784,61 @@ int main(void) {
     }
 }
 
+/// The system's music player says it is idle when asked, where the title
+/// points, and making and taking back a name for a device both go through.
+///
+/// One title asks the player before it starts its own music, and both of
+/// these stopped the run as unanswered.
+#[test]
+fn the_music_player_is_idle_and_device_names_go_through() {
+    let program = r#"
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x400;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 260, "ObDeleteSymbolicLink");
+    if (ctx.r[3] != 0) { return 3; }
+    ctx.r[3] = 0x400;
+    ctx.r[4] = 0x500;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 259, "ObCreateSymbolicLink");
+    if (ctx.r[3] != 0) { return 4; }
+
+    xenolith_store32(base, 0x200, 2);
+    xenolith_store32(base, 0x204, 0x300);
+    xenolith_store32(base, 0x300, 0xffffffffu);
+    ctx.r[3] = 0xfa;
+    ctx.r[4] = 0x00070009u;
+    ctx.r[5] = 0x200;
+    ctx.r[6] = 8;
+    xenolith_import(&ctx, base, "xam.xex", 500, "XMsgInProcessCall");
+    if (ctx.r[3] != 0 || xenolith_load32(base, 0x300) != 0) {
+        fprintf(stderr, "the player said %#x and its state is %#x\n", (unsigned)ctx.r[3],
+                xenolith_load32(base, 0x300));
+        return 5;
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("music_player_idle", program) {
+        panic!("the music player or a device name was not answered:\n{complaint}");
+    }
+}
+
 /// A thread that lets a lock go and waits is waiting before anyone can take the
 /// lock.
 ///
