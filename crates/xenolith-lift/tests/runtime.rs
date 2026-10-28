@@ -9222,3 +9222,36 @@ int main(void) {
         panic!("the game was not looked for where it is said to be:\n{complaint}");
     }
 }
+
+/// Ending the run ends the process there and then, as a success.
+///
+/// The window closing ends a run this way. It used to give the window back and
+/// carry on, so a game whose window a player had closed went on playing its
+/// sound with no way left to stop it but killing it.
+#[test]
+fn ending_the_run_ends_the_process_as_a_success() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    if (xenolith_boot(path, 0) == NULL) { return 2; }
+    xenolith_end_the_run(0);
+}
+"#;
+    if let Err(complaint) = runs("end_the_run", program) {
+        panic!("ending the run did not end the process as a success:\n{complaint}");
+    }
+}

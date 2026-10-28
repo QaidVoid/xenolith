@@ -411,6 +411,12 @@ cannot be written.
 Reading the executable takes the library a lift copies beside the program,
 and a program built without it says so and boots nothing.
 
+### `xenolith_end_the_run`
+
+Ends the run at once with `code`, after saying what it read, as every end of
+a run does. The window closing ends it this way: the process is the game,
+and a game whose window is gone has nobody playing it.
+
 ### `xenolith_name_the_title`
 
 Names the program to the host: what its window is titled, and the id a

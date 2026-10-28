@@ -5015,9 +5015,7 @@ static void show_what_was_drawn_inside(VkImage what) {
         }
         wl_display_dispatch_pending(speaking.desktop);
         if (speaking.closed) {
-            give_the_window_back();
-            screen.refused = 1;
-            return;
+            xenolith_end_the_run(0);
         }
     } else
 #endif
@@ -5029,8 +5027,9 @@ static void show_what_was_drawn_inside(VkImage what) {
      * desktop then has to decide what to do about it. The answer is the same
      * message sent back to the root window, which is all it is waiting for.
      *
-     * A request to close is honoured by giving the window back and drawing on
-     * without it, which is what a run nobody is watching does anyway. */
+     * A request to close ends the run. The window was the only way to play,
+     * and a game left running without it is one nobody can stop but by
+     * killing it, while its sound plays on. */
     while (screen.server != NULL && XPending(screen.server) > 0) {
         XEvent said;
         XNextEvent(screen.server, &said);
@@ -5058,9 +5057,7 @@ static void show_what_was_drawn_inside(VkImage what) {
             XSendEvent(screen.server, said.xclient.window, False,
                        SubstructureNotifyMask | SubstructureRedirectMask, &said);
         } else if ((Atom)said.xclient.data.l[0] == screen.closing) {
-            give_the_window_back();
-            screen.refused = 1;
-            return;
+            xenolith_end_the_run(0);
         }
     }
 #else

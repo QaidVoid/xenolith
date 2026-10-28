@@ -187,7 +187,8 @@ time. The result is the program named by the id, here
 The program finds the game itself, so it can be started from anywhere. It reads
 `default.xex` from your copy with your key, checks it is the version the
 program was built from, and opens a window with the game in it. Your copy is
-only ever read: what the game saves goes elsewhere (step 8).
+only ever read: what the game saves goes elsewhere (step 8). Closing the window
+ends the game.
 
 ### Controls
 

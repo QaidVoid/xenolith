@@ -844,6 +844,11 @@ void xenolith_built_against(uint32_t build);
  * and a program built without it says so and boots nothing. */
 uint8_t *xenolith_boot_the_game(uint32_t load_address, uint64_t fingerprint);
 
+/* Ends the run at once with `code`, after saying what it read, as every end of
+ * a run does. The window closing ends it this way: the process is the game,
+ * and a game whose window is gone has nobody playing it. */
+_Noreturn void xenolith_end_the_run(int code);
+
 /* Names the program to the host: what its window is titled, and the id a
  * desktop groups its windows by, a sound server lists it under, and its saves
  * are kept under among the user's data.

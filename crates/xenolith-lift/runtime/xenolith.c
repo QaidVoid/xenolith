@@ -117,6 +117,10 @@ static _Noreturn void stop_the_run(int code) {
     _exit(code);
 }
 
+_Noreturn void xenolith_end_the_run(int code) {
+    stop_the_run(code);
+}
+
 /* Maps the guest's address space and its physical memory, ready for an image
  * to be put in. */
 static uint8_t *map_the_guest(void) {
