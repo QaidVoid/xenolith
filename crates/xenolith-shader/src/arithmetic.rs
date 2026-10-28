@@ -222,13 +222,15 @@ pub(crate) fn dot_three(
     );
 }
 
-/// Throws the pixel away where any lane of two values is the same.
+/// Throws the pixel away where any lane of two values compares the way the
+/// operation asks: the same, greater, at least as great, or different.
 ///
-/// The one operation here that produces nothing and changes where the shader
-/// goes, so it is written on its own rather than as something to store.
+/// The operations here that produce nothing and change where the shader goes,
+/// so they are written on their own rather than as something to store.
 pub(crate) fn throw_the_pixel_away(
     module: &mut Module,
     named: &Named,
+    operation: VectorOperation,
     left: u32,
     right: u32,
 ) -> Result<(), Refused> {
@@ -236,12 +238,18 @@ pub(crate) fn throw_the_pixel_away(
      * this is a pixel shader, so being asked to say it as anything else is
      * refused rather than answered with something a driver would turn down. */
     if matches!(named.kind, Kind::Vertex) {
-        return Err(Refused::Operation(VectorOperation::KillOnEqual));
+        return Err(Refused::Operation(operation));
     }
 
+    let comparing = match operation {
+        VectorOperation::KillOnGreater => opcodes::FLOAT_ORDERED_GREATER_THAN,
+        VectorOperation::KillOnGreaterOrEqual => opcodes::FLOAT_ORDERED_GREATER_THAN_EQUAL,
+        VectorOperation::KillOnNotEqual => opcodes::FLOAT_UNORDERED_NOT_EQUAL,
+        _ => opcodes::FLOAT_ORDERED_EQUAL,
+    };
     let asked = module.name();
     module.add(
-        opcodes::FLOAT_ORDERED_EQUAL,
+        comparing,
         &[named.four_bools.number(), asked.number(), left, right],
     );
     let any = module.name();
@@ -282,8 +290,14 @@ pub(crate) fn arithmetic(
     let third_negated = alu.sources_are_negated()[2];
     let third_absolute = alu.sources_are_absolute()[2];
 
-    if matches!(alu.vector_operation(), VectorOperation::KillOnEqual) {
-        throw_the_pixel_away(module, named, left, right)?;
+    if matches!(
+        alu.vector_operation(),
+        VectorOperation::KillOnEqual
+            | VectorOperation::KillOnGreater
+            | VectorOperation::KillOnGreaterOrEqual
+            | VectorOperation::KillOnNotEqual
+    ) {
+        throw_the_pixel_away(module, named, alu.vector_operation(), left, right)?;
         return Ok(None);
     }
 
