@@ -175,6 +175,11 @@ pub(crate) mod encode {
         (31 << 26) | (rs << 21) | (9 << 16) | (467 << 1)
     }
 
+    /// Returns to the caller if a condition register bit is as asked.
+    pub(crate) const fn bclr(bo: u32, bi: u32) -> u32 {
+        (19 << 26) | (bo << 21) | (bi << 16) | (16 << 1)
+    }
+
     /// Copies one floating point register into another.
     pub(crate) const fn fmr(frt: u32, frb: u32) -> u32 {
         (63 << 26) | (frt << 21) | (frb << 11) | (72 << 1)

@@ -549,9 +549,15 @@ fn walk(image: &Image, chain: &[&Block]) -> Option<(Value, Vec<Bound>)> {
             // things, and accepting any of them would attach a bound to a
             // dispatch through a function pointer, which has none, and report a
             // table that is not there.
-            if instruction.flow(address).kind == FlowKind::Branch
-                && address.saturating_add(INSTRUCTION_SIZE) == step_block.end
-            {
+            //
+            // A conditional return guards a switch as well as a branch does,
+            // where every index out of range has nothing left to do: the table
+            // then has no default, because nothing past the bound stays in the
+            // function.
+            let flow = instruction.flow(address);
+            let guards = flow.kind == FlowKind::Branch
+                || (flow.kind == FlowKind::Return && flow.falls_through);
+            if guards && address.saturating_add(INSTRUCTION_SIZE) == step_block.end {
                 if let Some(&(root, limit)) = compared.get(&tested_field(instruction)) {
                     bounds.push(Bound {
                         root,
@@ -840,6 +846,39 @@ mod tests {
         assert_eq!(
             table.targets,
             [0x8200_0034, 0x8200_003c, 0x8200_0040, 0x8200_0044]
+        );
+    }
+
+    /// A table of byte offsets guarded by a conditional return rather than a
+    /// branch, so an index out of range leaves the function and the table has
+    /// no default.
+    #[test]
+    fn recovers_a_table_guarded_by_a_return() {
+        let image = ImageBuilder::new(0x8200_0000)
+            .entry(0x8200_0000)
+            .code(&[
+                encode::cmpli(10, 3),
+                encode::bclr(IF_TRUE, GREATER),
+                encode::addis(12, 0, 0x8200),
+                encode::addi(12, 12, 0x30),
+                encode::lbzx(0, 12, 10),
+                encode::addis(12, 0, 0x8200),
+                encode::addi(12, 12, 0x24),
+                encode::add(12, 12, 0),
+                encode::mtctr(12),
+                encode::bctr(),
+                encode::blr(),
+                encode::blr(),
+            ])
+            .code(&[0x0408_0408])
+            .build();
+
+        let table = only_table(&image).expect("the table was not recovered");
+
+        assert_eq!(table.default, None);
+        assert_eq!(
+            table.targets,
+            [0x8200_0028, 0x8200_002c, 0x8200_0028, 0x8200_002c]
         );
     }
 
