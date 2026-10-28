@@ -240,9 +240,11 @@ fn runs(name: &str, program: &str) -> Result<(), String> {
     /* Run where the program was built rather than where the tests were
      * started. Several of these write an image file of their own beside
      * themselves, and sharing one directory would have them writing over each
-     * other's. */
+     * other's. And with somewhere of its own for what it saves, rather than
+     * the home of whoever runs the tests. */
     let ran = Command::new(&program_path)
         .current_dir(&directory)
+        .env("XDG_DATA_HOME", directory.join("data"))
         .output()
         .map_err(|error| format!("running the check: {error}"))?;
     if ran.status.success() {
@@ -5542,7 +5544,9 @@ const SAVING_PROGRAM: &str = r#"
 
 #include "xenolith.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 xenolith_function xenolith_lookup(uint32_t address) {
     (void)address;
@@ -5582,12 +5586,24 @@ static uint32_t close_it(xenolith_context *ctx, uint8_t *base) {
     return (uint32_t)ctx->r[3];
 }
 
+/* Points a variable at a directory under the one the program runs in, which
+ * the user's data directory has to be named by in full. */
+static void point_at(const char *variable, const char *under) {
+    char here[4096];
+    char there[4200];
+    if (getcwd(here, sizeof here) == NULL) { return; }
+    snprintf(there, sizeof there, "%s/%s", here, under);
+    setenv(variable, there, 1);
+}
+
 int main(void) {
     const char *path = "image.bin";
     FILE *made = fopen(path, "wb");
     if (made == NULL) { return 1; }
     fputc('x', made);
     fclose(made);
+    point_at("XDG_DATA_HOME", "data");
+    xenolith_name_the_title("A Game", "a-game");
     uint8_t *base = xenolith_boot(path, 0);
     if (base == NULL) { return 2; }
 
@@ -5617,9 +5633,10 @@ int main(void) {
     ctx.r[9] = 5;
     ctx.r[10] = 0x2400;
     xenolith_import(&ctx, base, "xboxkrnl.exe", 255, "NtWriteFile");
-    FILE *kept = fopen("content/SAVE0/progress.dat", "rb");
+    FILE *kept = fopen("data/xenolith/saves/a-game/SAVE0/progress.dat", "rb");
     if (ctx.r[3] != 0u || kept == NULL) {
-        fprintf(stderr, "the file was not written inside what was saved\n");
+        fprintf(stderr, "the file was not written inside what was saved, in the game's own\n"
+                        "directory among the user's data\n");
         return 5;
     }
     fclose(kept);
@@ -5658,6 +5675,27 @@ int main(void) {
     ctx.r[5] = 0;
     xenolith_import(&ctx, base, "xam.xex", 603, "XamContentDelete");
     if (ctx.r[3] != 0u || open_it(&ctx, base, 3) != 3u) { return 13; }
+
+    /* With no data directory named, the one under home stands in for it. */
+    unsetenv("XDG_DATA_HOME");
+    point_at("HOME", "home");
+    if (open_it(&ctx, base, 1) != 0u) { return 14; }
+    close_it(&ctx, base);
+    if (access("home/.local/share/xenolith/saves/a-game/SAVE0", F_OK) != 0) {
+        fprintf(stderr, "with no data directory named, nothing was saved under home\n");
+        return 15;
+    }
+
+    /* And a directory of xenolith's own, named outright, wins over both. */
+    point_at("XDG_DATA_HOME", "data");
+    point_at("XENOLITH_DATA", "own");
+    memcpy(base + 0x6000 + 0x108, "SAVE1", 6);
+    if (open_it(&ctx, base, 1) != 0u) { return 16; }
+    close_it(&ctx, base);
+    if (access("own/saves/a-game/SAVE1", F_OK) != 0) {
+        fprintf(stderr, "a data directory named outright was not where it saved\n");
+        return 17;
+    }
     return 0;
 }
 "#;
@@ -5667,10 +5705,16 @@ int main(void) {
 /// A title opens what it saves under a name of its own and names the files
 /// inside with that name in front. What it made has to be where it looks the
 /// next time, and in the list of what was saved, or every run starts afresh.
+///
+/// It is kept in the game's own directory among the user's data, named by the
+/// program's id. Kept beside the program, a program moved or built somewhere
+/// it could not write lost its saves.
 #[test]
 fn saved_data_is_made_written_listed_and_deleted() {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("saving");
-    let _ = std::fs::remove_dir_all(directory.join("content"));
+    let _ = std::fs::remove_dir_all(directory.join("data"));
+    let _ = std::fs::remove_dir_all(directory.join("home"));
+    let _ = std::fs::remove_dir_all(directory.join("own"));
     if let Err(complaint) = runs("saving", SAVING_PROGRAM) {
         panic!("saving did not work:\n{complaint}");
     }

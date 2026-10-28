@@ -38,13 +38,12 @@ sources. They go beside the runtime because that is where it looks for them.
 Where the shader library is not there, the lift says so once and names the path
 it looked at.
 
-Three more things end up in the directory once a game is lifted, built and run.
+Two more things end up in the directory once a game is lifted and built.
 
 | what | where it comes from |
 |---|---|
 | the game's files | links to everything beside the executable, made by the lift. A name the directory already holds is left alone, and a bare image given with `--raw` gets none |
 | the program | built by `make`, and named by the id the lift settled on |
-| `content/` | made by the game the first time it saves, and kept when the game is lifted again into the same directory |
 
 ## The units
 
@@ -105,7 +104,10 @@ an address it enters there instead, which runs one function on its own:
 ```
 
 The game reads its own files from the directory the image is in, which is why
-the lift links them there, and what it saves goes in `content/` beside them.
+the lift links them there. What it saves goes in the program's own directory
+among the user's data, `~/.local/share/xenolith/saves/<id>/` (see
+[Environment](/reference/environment) for what moves it), and beside the image
+only where no home can be found.
 
 The link is a check in its own right: compiling a unit says it is well formed
 alone, and only the link says the units agree about what exists and that

@@ -3875,9 +3875,24 @@ static uint32_t make_a_list(uint8_t *base, uint8_t *items, uint32_t item_count,
 /* What kind of device the one a title saves to is. */
 #define XENOLITH_A_HARD_DRIVE 1u
 
-/* Where saved things are kept, beside the image. */
+/* Where saved things are kept: a directory named by the program's id among
+ * the user's data, so that a program moved, or built somewhere it cannot
+ * write, still finds what it saved. A directory named by anything but a whole
+ * path is not one, and with no home either they go beside the image. */
 static int where_content_is_kept(char *out, size_t room) {
-    int written = snprintf(out, room, "%s/content", title_directory);
+    const char *own = getenv("XENOLITH_DATA");
+    const char *data = getenv("XDG_DATA_HOME");
+    const char *home = getenv("HOME");
+    int written;
+    if (own != NULL && own[0] == '/') {
+        written = snprintf(out, room, "%s/saves/%s", own, title_id);
+    } else if (data != NULL && data[0] == '/') {
+        written = snprintf(out, room, "%s/xenolith/saves/%s", data, title_id);
+    } else if (home != NULL && home[0] != '\0') {
+        written = snprintf(out, room, "%s/.local/share/xenolith/saves/%s", home, title_id);
+    } else {
+        written = snprintf(out, room, "%s/content", title_directory);
+    }
     return written > 0 && (size_t)written < room;
 }
 
@@ -3902,7 +3917,11 @@ static int where_this_content_is(uint8_t *base, uint32_t data, const char *suffi
     if (length == 0 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
         return 0;
     }
-    int written = snprintf(out, room, "%s/content/%s%s", title_directory, name, suffix);
+    char kept[4096];
+    if (!where_content_is_kept(kept, sizeof kept)) {
+        return 0;
+    }
+    int written = snprintf(out, room, "%s/%s%s", kept, name, suffix);
     return written > 0 && (size_t)written < room;
 }
 
@@ -4426,7 +4445,12 @@ static int serviced(xenolith_context *ctx, uint8_t *base, const char *library,
                 struct statvfs disk;
                 uint64_t total = 0;
                 uint64_t free_bytes = 0;
-                if (statvfs(title_directory, &disk) == 0) {
+                char kept[4096];
+                const char *measured = where_content_is_kept(kept, sizeof kept)
+                                           && access(kept, F_OK) == 0
+                                           ? kept
+                                           : title_directory;
+                if (statvfs(measured, &disk) == 0) {
                     total = (uint64_t)disk.f_blocks * disk.f_frsize;
                     free_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
                 }

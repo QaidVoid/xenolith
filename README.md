@@ -39,7 +39,7 @@ cd ~/games/example-build && ./example-game
 image, and links the game's other files in beside them. The program is named
 after the game, read out of its executable (`--name` and `--id` choose
 otherwise), and the lift ends by printing the commands to build and run it.
-Saves go in `content/` inside the build directory.
+Saves go in `~/.local/share/xenolith/saves/<id>/`, apart from the build.
 
 The key is read from `--key-file`, then `XENOLITH_XEX_KEY`, then
 `~/.config/xenolith/xex.key`. No key and no game data is in this repository.

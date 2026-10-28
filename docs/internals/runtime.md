@@ -155,7 +155,11 @@ window can be given held buttons with `XENOLITH_HOLD`.
 ## Files
 
 A title's files are read from the directory the program runs in, through the
-host's file calls. Saves go under `content/`.
+host's file calls. Saves go in the program's own directory among the user's
+data, named by its id: `saves/<id>/` in xenolith's directory, which is
+`$XENOLITH_DATA`, or `$XDG_DATA_HOME/xenolith`, or `~/.local/share/xenolith`,
+the first of those that is set. Only with none of them do they go under
+`content/` beside the image.
 
 ## Reporting
 

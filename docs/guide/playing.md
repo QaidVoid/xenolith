@@ -207,14 +207,24 @@ not provide. None of those is an error. The lines worth reading are:
 
 ## 8. Where saves go
 
-Everything the game saves goes in `content/` inside the build directory, here
-`~/games/example-build/content/`. Each save the game makes is a folder there named
-the way the game named it.
+Everything the game saves goes in a directory of its own among your data, named
+by the program's id:
 
-- To back saves up, copy `content/`.
-- To start fresh, move `content/` away. The game makes a new one.
-- Lifting again into the same directory keeps `content/`. Deleting the build
-  directory deletes the saves with it, so copy them out first.
+```
+~/.local/share/xenolith/saves/example-game/
+```
+
+Where `XDG_DATA_HOME` is set, xenolith's directory is under it instead of under
+`~/.local/share`, and `XENOLITH_DATA` names xenolith's directory outright, so
+that saves go in `$XENOLITH_DATA/saves/example-game/`. Each save the game makes is a folder there named the way the
+game named it.
+
+Saves are kept apart from the build, so lifting again, deleting the build or
+moving the program elsewhere leaves them where they are. Two builds with the
+same id share their saves.
+
+- To back saves up, copy the game's directory.
+- To start fresh, move it away. The game makes a new one.
 
 ## 9. After updating xenolith
 
@@ -229,7 +239,7 @@ make -C ~/games/example-build -j"$(nproc)"
 ```
 
 The lift replaces the translated code, the runtime and the shader library, and
-keeps the links and the saves. Lift again rather than only running `make`:
+keeps the links. The saves are not in the build, so nothing touches them. Lift again rather than only running `make`:
 `make` alone rebuilds the old translation.
 
 ## When it goes wrong

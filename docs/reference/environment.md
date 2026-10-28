@@ -31,6 +31,8 @@ assigns the key variable. It reports the path and line, never the value.
 | `XENOLITH_NO_WINDOW` | open no window and draw off screen |
 | `XENOLITH_HOLD` | buttons to report as held, for a run without a window: `0x10@40-41` holds `0x10` from second 40 to 41, `0x10@9000f-9010f` from shown frame 9000 to 9010, and several are separated by commas |
 | `XENOLITH_SCALING` | `nearest` scales frames to the window without filtering; the default is linear |
+| `XENOLITH_DATA` | xenolith's own directory of the user's data, a whole path. Saves go in `saves/<id>/` under it |
+| `XDG_DATA_HOME` | where the user's data is kept, used where `XENOLITH_DATA` is not set. xenolith's directory is `xenolith/` under it, or `~/.local/share/xenolith` where neither is set |
 
 A host without a window, a sound device or libavcodec prints one line saying
 so, beginning `no frame will be shown, because`, `no sound will be heard:` or

@@ -398,7 +398,8 @@ word with the bit clear: nothing here invents a privilege.
 ### `xenolith_name_the_title`
 
 Names the program to the host: what its window is titled, and the id a
-desktop groups its windows by and a sound server lists it under.
+desktop groups its windows by, a sound server lists it under, and its saves
+are kept under among the user's data.
 
 The boot program calls this before the runtime boots, with the names the
 lift settled on. Both are kept rather than copied, so they have to outlive
