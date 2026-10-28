@@ -965,7 +965,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "xenolith"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "miette",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "xenolith-analysis"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proptest",
  "xenolith-ppc",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "xenolith-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "xenolith-shader",
  "xenolith-xex",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "xenolith-lift"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proptest",
  "xenolith-analysis",
@@ -1006,18 +1006,18 @@ dependencies = [
 
 [[package]]
 name = "xenolith-ppc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "xenolith-shader"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "xenolith-xex"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes",
  "cbc",
