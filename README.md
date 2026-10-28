@@ -17,9 +17,9 @@ reach the renderer and draw with their own translated shaders.
 
 | | title A | title B |
 |---|---|---|
-| functions discovered | 22,006 | 36,737 |
-| executable words claimed | 868,194 (98.130%) | 2,678,143 (99.067%) |
-| functions lifted to C | 22,006 (100%) | 36,737 (100%) |
+| functions discovered | 22,006 | 36,533 |
+| executable words claimed | 868,194 (98.130%) | 2,678,828 (99.092%) |
+| functions lifted to C | 22,006 (100%) | 36,533 (100%) |
 | of those, import thunks | 241 | 189 |
 | helper entries emitted beside them | 57 | 47 |
 | emitted C compiles | yes | yes |
