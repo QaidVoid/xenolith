@@ -395,6 +395,19 @@ before it draws anything.
 Nought means the container did not say, which is answered the same way as a
 word with the bit clear: nothing here invents a privilege.
 
+### `xenolith_name_the_title`
+
+Names the program to the host: what its window is titled, and the id a
+desktop groups its windows by and a sound server lists it under.
+
+The boot program calls this before the runtime boots, with the names the
+lift settled on. Both are kept rather than copied, so they have to outlive
+the program, as the string constants the boot program passes do. A program
+that never calls it, or passes nothing for one, is named xenolith.
+
+`xenolith_title_name` and `xenolith_title_id` give the two back, for the parts
+of the runtime that open a window, a drawing device or a sound stream.
+
 ### `xenolith_import_variable`
 
 Gives a variable the kernel exports a home in guest memory, and puts its

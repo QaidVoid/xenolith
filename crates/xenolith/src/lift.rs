@@ -20,6 +20,7 @@ use xenolith_lift::{
     RUNTIME_SOURCE, SOUND_SOURCE, Unlifted, declaration_of, lift, name_of,
 };
 
+use crate::game::{Naming, c_string, link_the_data, naming};
 use crate::input::{Source, number};
 
 /// Bytes of C a translation unit holds before the next function starts a new
@@ -74,6 +75,16 @@ pub(crate) struct Args {
     /// one run's worth of evidence is used at once.
     #[arg(long = "roots-from", value_name = "PATH")]
     pub(crate) roots_from: Option<PathBuf>,
+
+    /// What the program's window is titled, in place of the name the game
+    /// gives itself.
+    #[arg(long, value_name = "TEXT")]
+    pub(crate) name: Option<String>,
+
+    /// What the program file is called and what a desktop and a sound server
+    /// know it by, in place of the one made from the name.
+    #[arg(long, value_name = "ID")]
+    pub(crate) id: Option<String>,
 }
 
 /// Returns a percentage with three decimal places, avoiding a division by zero.
@@ -217,11 +228,7 @@ fn write_bytes_into(directory: &Path, name: &str, bytes: &[u8]) -> Result<()> {
 /// It takes an address so that a caller can enter anywhere rather than only at
 /// the entry point, which is what running one function of a title against
 /// emulated hardware needs.
-const BOOT_PROGRAM: &str = r#"/* Emitted by xenolith: boot the runtime and enter the guest.
- *
- * This links and it does not play a game. The first import the guest reaches
- * ends it, which is an accurate account of how far the translation has got.
- */
+const BOOT_PROGRAM: &str = r#"/* Emitted by xenolith: boot the runtime and enter the guest. */
 
 #include "lifted.h"
 
@@ -238,6 +245,10 @@ int main(int count, char **arguments) {
         fprintf(stderr, "xenolith: no entry point was recorded, name one\n");
         return 1;
     }
+
+    /* What the window says and what the host knows the program by, settled
+     * before anything is opened under either. */
+    xenolith_name_the_title(TITLE_NAME, TITLE_ID);
 
     uint8_t *base = xenolith_boot(image, LOAD_ADDRESS);
     if (base == 0) {
@@ -290,6 +301,7 @@ fn main_program(
     built_against: u32,
     privileges: Option<u32>,
     variables: &Imports,
+    naming: &Naming,
 ) -> String {
     let mut filled = String::new();
     for (slot, variable) in variables {
@@ -301,6 +313,8 @@ fn main_program(
     }
     BOOT_PROGRAM
         .replace("VARIABLES\n", &filled)
+        .replace("TITLE_NAME", &c_string(&naming.name))
+        .replace("TITLE_ID", &c_string(&naming.id))
         .replace(
             "ENTRY_POINT",
             &entry.map_or_else(|| "0".to_owned(), |address| format!("{address:#010x}u")),
@@ -313,7 +327,7 @@ fn main_program(
         )
 }
 
-/// Writes everything the build needs besides the units themselves.
+/// Writes everything the build needs besides the units and the boot program.
 ///
 /// The traps, the table, and the image are all specific to one title, so they
 /// are written here rather than shipped, and the runtime that reads them is
@@ -323,9 +337,6 @@ fn write_support(
     image: &xenolith_xex::Image,
     referenced: &BTreeSet<u32>,
     emitted: &BTreeSet<u32>,
-    built_against: u32,
-    privileges: Option<u32>,
-    variables: &Imports,
 ) -> Result<()> {
     // Everything the emitted code names but did not get a body becomes a trap,
     // so the program links and says where it went rather than walking past the
@@ -367,20 +378,7 @@ fn write_support(
     // The runtime loads the image rather than having it compiled in, since a
     // title is tens of megabytes and a C array of it would be neither quick to
     // build nor readable.
-    write_bytes_into(out, "image.bin", image.bytes())?;
-    write_into(
-        out,
-        "main.c",
-        &main_program(
-            image.base_address(),
-            image.entry_point(),
-            built_against,
-            privileges,
-            variables,
-        ),
-    )?;
-
-    Ok(())
+    write_bytes_into(out, "image.bin", image.bytes())
 }
 
 /// The makefile that builds what was emitted.
@@ -389,11 +387,9 @@ fn write_support(
 /// well formed on its own; only a link says the units agree with each other
 /// about what exists and that nothing is defined twice.
 const BUILD_FILE: &str = r"# Emitted by xenolith. Run with -j to build the units in parallel.
-#
-# This links into a program. That program will not play a game: nothing here
-# services an import, so the first one the guest reaches ends it. What linking
-# proves is that the emitted code is complete, which compiling a unit at a time
-# does not.
+
+# What the program is called, which is the id the lift settled on.
+PROGRAM := PROGRAM_NAME
 
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-infinite-recursion
@@ -440,9 +436,9 @@ SOURCES += xdg-shell-protocol.c
 endif
 OBJECTS := $(SOURCES:.c=.o)
 
-all: lifted
+all: $(PROGRAM)
 
-lifted: $(OBJECTS)
+$(PROGRAM): $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
 # Saying a shader while a title runs, for the ones it loads from the data beside
@@ -472,7 +468,7 @@ xdg-shell-protocol.c:
 xenolith.o: drawing.c command_stream.c sound.c
 
 clean:
-	rm -f $(OBJECTS) $(MADE) lifted
+	rm -f $(OBJECTS) $(MADE) $(PROGRAM)
 
 .PHONY: all clean
 ";
@@ -567,6 +563,11 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     }
 
     let loaded = args.source.load()?;
+    let called = naming(
+        args.name.as_deref(),
+        args.id.as_deref(),
+        loaded.name.as_deref(),
+    )?;
     let built_against = loaded.built_against;
     let image = loaded.image;
     let imports = loaded.imports?;
@@ -621,6 +622,38 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 
     let sizes = units.finish()?;
 
+    write_declarations(&args.out, &referenced)?;
+    write_support(&args.out, &image, &referenced, &emitted)?;
+    let linked = make_it_a_program(
+        args,
+        &image,
+        built_against.unwrap_or(0),
+        loaded.privileges,
+        &loaded.variables,
+        &called,
+    )?;
+
+    report(
+        args,
+        &Outcome {
+            lifted,
+            entries,
+            thunks,
+            refused,
+            blocking,
+            declarations: referenced.len(),
+            sizes,
+        },
+        built_against,
+        &called,
+        linked,
+    );
+
+    Ok(())
+}
+
+/// Writes the header declaring everything the emitted code names.
+fn write_declarations(out: &Path, referenced: &BTreeSet<u32>) -> Result<()> {
     // Everything the emitted code names is declared, which is more than the
     // discovered functions: a call into a register save helper lands partway
     // through one, and discovery does not claim those. Which of them are named
@@ -640,43 +673,54 @@ pub(crate) fn run(args: &Args) -> Result<()> {
          #define XENOLITH_LIFTED_H\n\n\
          #include \"xenolith.h\"\n\n",
     );
-    for address in &referenced {
+    for address in referenced {
         header.push_str(&declaration_of(*address));
     }
     header.push_str("\n#endif\n");
 
-    let path = args.out.join(DECLARATIONS);
+    let path = out.join(DECLARATIONS);
     std::fs::write(&path, &header)
         .into_diagnostic()
         .wrap_err_with(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
 
-    write_support(
+/// Writes what makes the units a program of this game: the boot program, the
+/// shader library and the makefile. Then links the game's files in beside
+/// them, returning how many were linked.
+fn make_it_a_program(
+    args: &Args,
+    image: &xenolith_xex::Image,
+    built_against: u32,
+    privileges: Option<u32>,
+    variables: &Imports,
+    called: &Naming,
+) -> Result<usize> {
+    write_into(
         &args.out,
-        &image,
-        &referenced,
-        &emitted,
-        built_against.unwrap_or(0),
-        loaded.privileges,
-        &loaded.variables,
+        "main.c",
+        &main_program(
+            image.base_address(),
+            image.entry_point(),
+            built_against,
+            privileges,
+            variables,
+            called,
+        ),
     )?;
     write_the_shader_library(&args.out);
-    write_into(&args.out, "Makefile", BUILD_FILE)?;
-
-    report(
-        args,
-        &Outcome {
-            lifted,
-            entries,
-            thunks,
-            refused,
-            blocking,
-            declarations: referenced.len(),
-            sizes,
-        },
-        built_against,
-    );
-
-    Ok(())
+    write_into(
+        &args.out,
+        "Makefile",
+        &BUILD_FILE.replace("PROGRAM_NAME", &called.id),
+    )?;
+    /* A bare image is not where a game keeps its files, so only a container's
+     * neighbours are linked. */
+    if args.source.raw {
+        Ok(0)
+    } else {
+        link_the_data(&args.source.file, &args.out)
+    }
 }
 
 /// Emits a body for every helper entry the output names, returning how many.
@@ -772,7 +816,13 @@ struct Outcome<'a> {
 }
 
 /// Prints what lifting produced.
-fn report(args: &Args, outcome: &Outcome<'_>, built_against: Option<u32>) {
+fn report(
+    args: &Args,
+    outcome: &Outcome<'_>,
+    built_against: Option<u32>,
+    called: &Naming,
+    linked: usize,
+) {
     let total = outcome.lifted + outcome.refused.len() as u64;
     println!("functions          {total:>10}");
     println!(
@@ -794,10 +844,14 @@ fn report(args: &Args, outcome: &Outcome<'_>, built_against: Option<u32>) {
         None => println!("kernel build      unknown, the container did not say"),
     }
 
-    println!("\nwritten to {}", args.out.display());
-    println!("build it with make -j8, which links into a program");
-    println!("give -j a number: a job for each unit is more than a machine has");
-    println!("run it with the image beside it to start at the recorded entry point");
+    println!("name               {}", called.name);
+    println!("id                 {}", called.id);
+    println!("game files linked  {linked:>10}");
+
+    let out = args.out.display();
+    println!("\nwritten to {out}");
+    println!("build it:  make -C {out} -j\"$(nproc)\"");
+    println!("run it:    cd {out} && ./{}", called.id);
 
     if args.blockers {
         // The instruction that appears most is not the one to model next. The

@@ -21,6 +21,7 @@ mod image;
 mod imports;
 mod reader;
 mod security;
+mod title;
 
 pub use container::{Container, Format, OptionalHeader, OptionalHeaderKey, OptionalHeaderValue};
 pub use crypto::KeyMaterial;
@@ -33,3 +34,4 @@ pub use headers::{
 pub use image::{Image, Permissions, Section};
 pub use imports::{Import, ImportKind, imports};
 pub use security::{PageDescriptor, PageKind, SecurityInfo};
+pub use title::title_name;

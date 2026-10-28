@@ -121,7 +121,7 @@ static int make_the_sound_server(void) {
     struct xenolith_pulse_buffering buffering = {0xffffffffu, a_frame * 8u, 0xffffffffu,
                                                  0xffffffffu, 0xffffffffu};
     int why = 0;
-    output.server = output.server_new(NULL, "xenolith", playback, NULL, "title", &format, NULL,
+    output.server = output.server_new(NULL, xenolith_title_name(), playback, NULL, "title", &format, NULL,
                                       &buffering, &why);
     return output.server != NULL;
 }

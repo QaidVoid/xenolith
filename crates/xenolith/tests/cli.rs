@@ -526,7 +526,7 @@ fn what_was_emitted_links_into_a_program() {
         String::from_utf8_lossy(&built.stderr)
     );
     assert!(
-        out.join("lifted").is_file(),
+        out.join("xenolith").is_file(),
         "the link should have produced a program"
     );
 
@@ -553,12 +553,12 @@ fn what_was_emitted_links_into_a_program() {
         String::from_utf8_lossy(&without.stderr)
     );
     assert!(
-        out.join("lifted").is_file(),
+        out.join("xenolith").is_file(),
         "a build with no graphics should still produce a program"
     );
 
     // Entering the one function it holds runs translated code and comes back.
-    let ran = Command::new(out.join("lifted"))
+    let ran = Command::new(out.join("xenolith"))
         .arg(out.join("image.bin"))
         .arg("0x82000000")
         .output()
@@ -807,6 +807,72 @@ fn the_boot_program_carries_the_kernel_build() {
     assert!(
         stdout.contains("kernel build") && stdout.contains("unknown"),
         "the lift did not report what it knew about the kernel build: {stdout}"
+    );
+}
+
+/// The program is named as asked, in its window and as a file.
+///
+/// Every program used to be called the same thing, so two games built side by
+/// side shared a window title and a desktop's grouping, and each was a file
+/// called lifted.
+#[test]
+fn the_program_is_named_as_asked() {
+    // mflr r12; stwu r1, -96(r1); li r3, 7; addi r1, r1, 96; blr
+    const WORDS: [u32; 5] = [
+        0x7d88_02a6,
+        0x9421_ffa0,
+        0x3860_0007,
+        0x3821_0060,
+        0x4e80_0020,
+    ];
+
+    let source = std::env::temp_dir().join("xenolith-lift-named.bin");
+    let out = std::env::temp_dir().join("xenolith-lift-named-out");
+    let _ = std::fs::remove_dir_all(&out);
+    let bytes: Vec<u8> = WORDS.iter().flat_map(|word| word.to_be_bytes()).collect();
+    std::fs::write(&source, &bytes).unwrap();
+
+    let (ok, stdout, stderr) = run!(
+        "lift",
+        "--raw",
+        "--name",
+        "A \"Quoted\" Game",
+        "--id",
+        "a-game",
+        "--out",
+        out.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(ok, "lifting a named image should succeed: {stderr}");
+
+    let main = std::fs::read_to_string(out.join("main.c")).expect("reading main.c");
+    assert!(
+        main.contains(r#"xenolith_name_the_title("A \042Quoted\042 Game", "a\055game");"#),
+        "the boot program does not name the title as asked:\n{main}"
+    );
+    let makefile = std::fs::read_to_string(out.join("Makefile")).expect("reading the makefile");
+    assert!(
+        makefile.contains("PROGRAM := a-game\n"),
+        "the makefile does not build a program called a-game"
+    );
+    assert!(
+        stdout.contains("./a-game"),
+        "the report does not say how to run the program: {stdout}"
+    );
+
+    let (ok, _, stderr) = run!(
+        "lift",
+        "--raw",
+        "--id",
+        "Not An Id",
+        "--out",
+        out.to_str().unwrap(),
+        source.to_str().unwrap()
+    );
+    assert!(!ok, "an id that will not do as a file name was taken");
+    assert!(
+        stderr.contains("Not An Id"),
+        "the refusal does not name the id: {stderr}"
     );
 }
 

@@ -809,6 +809,26 @@ static void current_process_type(xenolith_context *ctx) {
  *
  * A number past the width of the word names no bit, and is answered the same
  * way as a clear one. */
+static const char *title_name = "xenolith";
+static const char *title_id = "xenolith";
+
+void xenolith_name_the_title(const char *name, const char *id) {
+    if (name != NULL && name[0] != '\0') {
+        title_name = name;
+    }
+    if (id != NULL && id[0] != '\0') {
+        title_id = id;
+    }
+}
+
+const char *xenolith_title_name(void) {
+    return title_name;
+}
+
+const char *xenolith_title_id(void) {
+    return title_id;
+}
+
 static uint32_t declared_privileges;
 
 void xenolith_privileges(uint32_t flags) {

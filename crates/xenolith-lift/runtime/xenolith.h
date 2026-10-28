@@ -829,6 +829,21 @@ void xenolith_wipe_the_colours_after_a_copy(int wipe, uint32_t to);
  * watches them decides the hardware has stopped. */
 void xenolith_built_against(uint32_t build);
 
+/* Names the program to the host: what its window is titled, and the id a
+ * desktop groups its windows by and a sound server lists it under.
+ *
+ * The boot program calls this before the runtime boots, with the names the
+ * lift settled on. Both are kept rather than copied, so they have to outlive
+ * the program, as the string constants the boot program passes do. A program
+ * that never calls it, or passes nothing for one, is named xenolith. */
+void xenolith_name_the_title(const char *name, const char *id);
+
+/* What the program's window is titled. */
+const char *xenolith_title_name(void);
+
+/* What the host knows the program by. */
+const char *xenolith_title_id(void);
+
 /* Says what a title's own container declares it is allowed to do.
  *
  * A title asks whether it holds a numbered privilege, and the answer is a bit

@@ -2,6 +2,7 @@
 
 mod analyze;
 mod disasm;
+mod game;
 mod input;
 mod inspect;
 mod keys;

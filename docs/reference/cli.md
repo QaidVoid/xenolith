@@ -99,18 +99,29 @@ xenolith analyze default.xex --tables
 | `--root ADDRESS` | treat an address as a function, for one a built program reached and discovery did not |
 | `--blockers` | list the instructions that stopped functions, most blocking first |
 | `--unlifted` | list every function that was not lifted, with what stopped it |
+| `--name <TEXT>` | what the program's window is titled, in place of the name the game gives itself |
+| `--id <ID>` | what the program file is called and what a desktop and a sound server know it by, in place of the one made from the name |
 
-Writes numbered translation units, a header of declarations, the runtime
-interface header, and a makefile. Units a previous run wrote into the same
-directory are removed first, since two units defining the same function will not
-build.
+Writes numbered translation units, a header of declarations, the runtime, the
+decoded image, a boot program and a makefile. Units a previous run wrote into
+the same directory are removed first, since two units defining the same function
+will not build.
+
+The program is named for the game. Without `--name` the window takes the name
+the game's executable carries, and without `--id` the program file takes an id
+made from that name, such as `example-game`. An id is lower case
+letters, digits, dots, dashes and underscores, and any other is refused.
+
+Every file beside the executable is linked into the output, since the program
+reads the game's files from the directory it runs in. A name the output already
+holds is left alone. Nothing is linked for a bare image given with `--raw`.
 
 Functions that could not be lifted are the expected outcome rather than a
 failure. The subcommand reports them and succeeds.
 
 ```sh
-xenolith lift default.xex --out ./lifted --blockers
-make -C ./lifted -j8
+xenolith lift default.xex --out ./build --blockers
+make -C ./build -j"$(nproc)"
 ```
 
 See [Lifting a title](/guide/lifting) for what the output holds and how to read

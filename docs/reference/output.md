@@ -38,6 +38,14 @@ sources. They go beside the runtime because that is where it looks for them.
 Where the shader library is not there, the lift says so once and names the path
 it looked at.
 
+Three more things end up in the directory once a game is lifted, built and run.
+
+| what | where it comes from |
+|---|---|
+| the game's files | links to everything beside the executable, made by the lift. A name the directory already holds is left alone, and a bare image given with `--raw` gets none |
+| the program | built by `make`, and named by the id the lift settled on |
+| `content/` | made by the game the first time it saves, and kept when the game is lifted again into the same directory |
+
 ## The units
 
 A retail title emits hundreds of megabytes of C. As one file no compiler builds
@@ -55,10 +63,11 @@ including `0x820a54d4`.
 
 ## The makefile
 
-Four variables, all of which can be overridden on the command line.
+Five variables, all of which can be overridden on the command line.
 
 | variable | what it holds |
 |---|---|
+| `PROGRAM` | the program to link, named by the id the lift settled on |
 | `CC` | the compiler, `cc` by default |
 | `CFLAGS` | `-O2 -Wall -Wextra -Wno-infinite-recursion` by default, plus a switch for each capability found |
 | `LDLIBS` | `-lm -lpthread` by default, plus a library for each capability found |
@@ -77,7 +86,7 @@ is there, because a title that only ever draws does not care which. Turning the
 three off by hand gives a build with no graphics at all:
 
 ```sh
-make -C ./lifted DRAWING=no SHOWING=no TALKING=no
+make -C ./build DRAWING=no SHOWING=no TALKING=no
 ```
 
 `SAYING` is the one capability decided apart from those, because it is about a
@@ -86,13 +95,17 @@ libxenolith_shader.a)`.
 
 ## What the program does
 
-`lifted` boots the runtime, loads `image.bin` from the directory it runs in, and
-enters the title at its recorded entry point. Given an image and an address it
-enters there instead, which runs one function on its own:
+The program is named by the id the lift settled on, which is also the
+makefile's `PROGRAM`. It boots the runtime, loads `image.bin` from the directory
+it runs in, and enters the title at its recorded entry point. Given an image and
+an address it enters there instead, which runs one function on its own:
 
 ```sh
-./lifted image.bin 0x82090000
+./example-game image.bin 0x82090000
 ```
+
+The game reads its own files from the directory the image is in, which is why
+the lift links them there, and what it saves goes in `content/` beside them.
 
 The link is a check in its own right: compiling a unit says it is well formed
 alone, and only the link says the units agree about what exists and that

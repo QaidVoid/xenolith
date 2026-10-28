@@ -53,6 +53,9 @@ pub(crate) struct Loaded {
     /// Empty where the records would not decode, which lifting reports through
     /// the thunks.
     pub(crate) variables: Imports,
+    /// The name the title gives itself, or nothing where its container carries
+    /// none.
+    pub(crate) name: Option<String>,
 }
 
 /// Where a subcommand reads its image from.
@@ -127,6 +130,7 @@ impl Source {
                 built_against: None,
                 privileges: None,
                 variables: Imports::new(),
+                name: None,
             });
         }
 
@@ -197,12 +201,15 @@ impl Source {
             .optional_header(OptionalHeaderKey(0x0003_0000))
             .and_then(OptionalHeaderValue::inline);
 
+        let name = xenolith_xex::title_name(&container, &image);
+
         Ok(Loaded {
             image,
             imports: thunks,
             built_against,
             privileges,
             variables,
+            name,
         })
     }
 }

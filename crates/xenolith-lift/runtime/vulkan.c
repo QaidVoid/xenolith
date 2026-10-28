@@ -164,7 +164,7 @@ static int open_something_to_draw_with(void) {
 
     VkApplicationInfo about = {0};
     about.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    about.pApplicationName = "xenolith";
+    about.pApplicationName = xenolith_title_name();
     about.apiVersion = VK_API_VERSION_1_1;
 
     VkInstanceCreateInfo wanted = {0};
@@ -4607,8 +4607,8 @@ static int talk_to_the_desktop(void) {
     xdg_surface_add_listener(speaking.placed, &placing_it, NULL);
     speaking.window = xdg_surface_get_toplevel(speaking.placed);
     xdg_toplevel_add_listener(speaking.window, &being_a_window, NULL);
-    xdg_toplevel_set_title(speaking.window, "xenolith");
-    xdg_toplevel_set_app_id(speaking.window, "xenolith");
+    xdg_toplevel_set_title(speaking.window, xenolith_title_name());
+    xdg_toplevel_set_app_id(speaking.window, xenolith_title_id());
     wl_surface_commit(speaking.surface);
 
     /* The desktop says where the window goes before anything may be shown in
@@ -4803,7 +4803,13 @@ static int open_a_window(void) {
                                         XENOLITH_ACROSS, XENOLITH_DOWN, 0,
                                         BlackPixel(screen.server, which),
                                         BlackPixel(screen.server, which));
-    XStoreName(screen.server, screen.window, "xenolith");
+    XStoreName(screen.server, screen.window, xenolith_title_name());
+    /* The name as a desktop reads it today, which takes any letter rather than
+     * the few the older property holds. */
+    const char *name = xenolith_title_name();
+    XChangeProperty(screen.server, screen.window, XInternAtom(screen.server, "_NET_WM_NAME", False),
+                    XInternAtom(screen.server, "UTF8_STRING", False), 8, PropModeReplace,
+                    (const unsigned char *)name, (int)strlen(name));
 
     /* Saying what this window answers to, so that the rest of the desktop can
      * ask it to close rather than killing it, and can ask whether it is still
@@ -4817,8 +4823,8 @@ static int open_a_window(void) {
     /* Which program this is and which process, both of which whatever draws the
      * screen uses to group windows and to know who to ask. */
     XClassHint kind;
-    kind.res_name = (char *)"xenolith";
-    kind.res_class = (char *)"Xenolith";
+    kind.res_name = (char *)xenolith_title_id();
+    kind.res_class = (char *)xenolith_title_id();
     XSetClassHint(screen.server, screen.window, &kind);
     Atom whose = XInternAtom(screen.server, "_NET_WM_PID", False);
     long who = (long)getpid();
