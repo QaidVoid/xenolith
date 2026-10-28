@@ -175,6 +175,11 @@ pub(crate) mod encode {
         (31 << 26) | (rs << 21) | (9 << 16) | (467 << 1)
     }
 
+    /// Copies one floating point register into another.
+    pub(crate) const fn fmr(frt: u32, frb: u32) -> u32 {
+        (63 << 26) | (frt << 21) | (frb << 11) | (72 << 1)
+    }
+
     /// Returns the displacement that branches `bytes` backward.
     ///
     /// Displacements are signed, and writing the two's complement value out is

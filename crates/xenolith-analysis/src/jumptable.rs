@@ -324,10 +324,38 @@ fn step(registers: &mut Registers, lineage: &mut Lineage, instruction: Instructi
         // source, so writing off the wrong field would leave a dead value in
         // place and let it be believed.
         opcode => {
-            let destination = if writes_to_ra(opcode) { ra } else { rt };
+            let destination = match writes_another_bank(instruction) {
+                Some(true) => ra,
+                Some(false) => return,
+                None if writes_to_ra(opcode) => ra,
+                None => rt,
+            };
             registers.set(destination, Value::Unknown);
             lineage.clear(destination);
         }
+    }
+}
+
+/// Returns whether an instruction's destination is a floating point or vector
+/// register rather than a general one, and if so whether it also writes the
+/// general register it addresses memory through.
+///
+/// Those banks number their registers in the same fields the general ones use,
+/// so a float written between a switch's bound and its table read as the index
+/// being overwritten, and the table was refused. Only the forms that update
+/// their address register write a general register at all.
+fn writes_another_bank(instruction: Instruction) -> Option<bool> {
+    match instruction.primary_opcode() {
+        4 | 5 | 6 | 59 | 63 => Some(false),
+        primary @ 48..=55 => Some(primary % 2 == 1),
+        31 => {
+            let mnemonic = instruction.opcode().mnemonic();
+            ["lf", "stf", "lv", "stv"]
+                .iter()
+                .any(|bank| mnemonic.starts_with(bank))
+                .then(|| mnemonic.ends_with("ux"))
+        }
+        _ => None,
     }
 }
 
@@ -771,6 +799,47 @@ mod tests {
         assert_eq!(
             table.targets,
             [0x8200_002c, 0x8200_0034, 0x8200_0038, 0x8200_003c]
+        );
+    }
+
+    /// The same table with its index normalized first and a float written
+    /// between the bound and the load, into the floating point register
+    /// numbered like the index. It writes nothing the switch reads, and taken
+    /// for the index being overwritten it parted the load from the register
+    /// the bound was checked on.
+    #[test]
+    fn a_float_written_beside_the_index_leaves_the_table_readable() {
+        let image = ImageBuilder::new(0x8200_0000)
+            .entry(0x8200_0000)
+            .code(&[
+                encode::addi(10, 3, 0xffff),
+                encode::cmpli(10, 3),
+                encode::fmr(10, 12),
+                encode::bc(IF_TRUE, GREATER, 0x2c),
+                encode::addis(12, 0, 0x8200),
+                encode::addi(12, 12, 0x48),
+                encode::lbzx(0, 12, 10),
+                encode::slwi(0, 0, 2),
+                encode::addis(12, 0, 0x8200),
+                encode::addi(12, 12, 0x28),
+                encode::add(12, 12, 0),
+                encode::mtctr(12),
+                encode::bctr(),
+                encode::blr(),
+                encode::blr(),
+                encode::blr(),
+                encode::blr(),
+                encode::blr(),
+            ])
+            .code(&[0x0305_0607])
+            .build();
+
+        let table = only_table(&image).expect("the table was not recovered");
+
+        assert_eq!(table.index_register, 3);
+        assert_eq!(
+            table.targets,
+            [0x8200_0034, 0x8200_003c, 0x8200_0040, 0x8200_0044]
         );
     }
 
