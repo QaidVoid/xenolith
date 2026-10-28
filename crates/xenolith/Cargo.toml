@@ -6,15 +6,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
 miette = { version = "7.6.0", features = ["fancy"] }
-xenolith-analysis = { version = "0.1.0", path = "../xenolith-analysis" }
-xenolith-lift = { version = "0.1.0", path = "../xenolith-lift" }
-xenolith-ppc = { version = "0.1.0", path = "../xenolith-ppc" }
-xenolith-shader = { version = "0.1.0", path = "../xenolith-shader" }
-xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
+xenolith-analysis = { path = "../xenolith-analysis" }
+xenolith-lift = { path = "../xenolith-lift" }
+xenolith-ppc = { path = "../xenolith-ppc" }
+xenolith-shader = { path = "../xenolith-shader" }
+xenolith-xex = { path = "../xenolith-xex" }
 
 [lints]
 workspace = true

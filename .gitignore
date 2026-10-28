@@ -5,3 +5,4 @@ tmpwork/
 *.xex
 *.iso
 *.bin
+/dist/

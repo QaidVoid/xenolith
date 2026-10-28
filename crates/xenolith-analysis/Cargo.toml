@@ -6,10 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
-xenolith-ppc = { version = "0.1.0", path = "../xenolith-ppc" }
-xenolith-xex = { version = "0.1.0", path = "../xenolith-xex" }
+xenolith-ppc = { path = "../xenolith-ppc" }
+xenolith-xex = { path = "../xenolith-xex" }
 
 [lints]
 workspace = true
