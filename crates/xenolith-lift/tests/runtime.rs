@@ -8904,3 +8904,121 @@ fn a_translated_vertex_shader_draws_a_triangle() {
         "the translated shader drew nothing, and a hand-written one draws:\n{said}"
     );
 }
+
+/// A handle a title closes is taken back and handed out again, and a thread
+/// keeps its own until it finishes.
+///
+/// Nothing was ever taken back, and one title opens and closes enough files
+/// and events loading a match to use every handle there is. With none left it
+/// could open nothing more and stayed on the loading screen. Here twenty
+/// thousand files and events each are opened and closed, more than there are
+/// handles, and a running thread whose handle is closed must not have its
+/// handle given to the next thing made while it still runs.
+#[test]
+fn a_closed_handle_is_handed_out_again() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+static volatile int let_it_finish;
+static volatile int finished;
+
+static void worker(xenolith_context *ctx, uint8_t *base) {
+    (void)ctx;
+    (void)base;
+    while (!let_it_finish) {
+        struct timespec a_little = {0, 1000000L};
+        nanosleep(&a_little, NULL);
+    }
+    finished = 1;
+}
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    return address == 0x1000u ? worker : 0;
+}
+
+static void name_a_file(uint8_t *base, uint32_t at, const char *name) {
+    size_t length = strlen(name);
+    xenolith_store32(base, at + 4, at + 0x40);
+    xenolith_store16(base, at + 0x40, (uint16_t)length);
+    xenolith_store32(base, at + 0x44, at + 0x80);
+    for (size_t letter = 0; letter < length; letter++) {
+        base[at + 0x80 + letter] = (uint8_t)name[letter];
+    }
+}
+
+static uint32_t make_an_event(uint8_t *base) {
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[5] = 1;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 209, "NtCreateEvent");
+    return ctx.r[3] == 0 ? xenolith_load32(base, 0x200) : 0;
+}
+
+static void close_handle(uint8_t *base, uint32_t handle) {
+    xenolith_context ctx = {0};
+    ctx.r[3] = handle;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 207, "NtClose");
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    uint8_t *base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+    FILE *data = fopen("beside.txt", "wb");
+    if (data == NULL) { return 3; }
+    fputs("abcdef", data);
+    fclose(data);
+
+    name_a_file(base, 0x1000, "game:\\beside.txt");
+    for (int turn = 0; turn < 20000; turn++) {
+        uint32_t event = make_an_event(base);
+        xenolith_context ctx = {0};
+        ctx.r[3] = 0x2000;
+        ctx.r[4] = 0x80000000u;
+        ctx.r[5] = 0x1000;
+        ctx.r[6] = 0x2100;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 223, "NtOpenFile");
+        uint32_t file = ctx.r[3] == 0 ? xenolith_load32(base, 0x2000) : 0;
+        if (event == 0 || file == 0) {
+            fprintf(stderr, "turn %d made event %#x and opened file %#x\n", turn, event, file);
+            return 4;
+        }
+        close_handle(base, file);
+        close_handle(base, event);
+    }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x300;
+    ctx.r[4] = 0x10000;
+    ctx.r[7] = 0x1000;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 13, "ExCreateThread");
+    uint32_t thread = xenolith_load32(base, 0x300);
+    if (ctx.r[3] != 0 || thread == 0) { return 5; }
+    close_handle(base, thread);
+    uint32_t after = make_an_event(base);
+    let_it_finish = 1;
+    for (int tries = 0; tries < 100 && !finished; tries++) {
+        struct timespec a_little = {0, 10000000L};
+        nanosleep(&a_little, NULL);
+    }
+    if (after == thread) {
+        fprintf(stderr, "a running thread's handle %#x was handed out again\n", thread);
+        return 6;
+    }
+    if (!finished) { return 7; }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("closed_handle", program) {
+        panic!("a closed handle was not handed out again:\n{complaint}");
+    }
+}

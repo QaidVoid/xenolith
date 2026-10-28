@@ -917,8 +917,13 @@ static void query_performance_frequency(xenolith_context *ctx) {
  * The console hands back a handle and takes it again later, so what a handle
  * means has to live here rather than in guest memory. A handle is an index into
  * this table with one added, so that nothing is ever handle zero.
+ *
+ * The console sets no number of its own, so this is room enough rather than a
+ * limit any title expects. One title makes nearly four thousand semaphores as
+ * it loads a match and keeps them all, and with room for four thousand objects
+ * in all it had none left for the events and files that followed.
  */
-#define XENOLITH_OBJECTS 4096
+#define XENOLITH_OBJECTS 32768
 
 enum object_kind {
     OBJECT_NONE = 0,
@@ -932,6 +937,12 @@ enum object_kind {
 
 struct object {
     enum object_kind kind;
+    /* How many hold this: the handle a title was given, and each of this
+     * runtime's own threads still inside it. It is taken back when the last of
+     * them lets go, and not before, because a thread waiting on an object, a
+     * thread running and a timer counting down all keep what they were handed
+     * long after a title may have closed its handle. */
+    long references;
     pthread_mutex_t lock;
     pthread_cond_t changed;
     int signalled;
@@ -1009,6 +1020,7 @@ static uint32_t take_object(enum object_kind kind) {
             struct object *made = &objects[at];
             memset(made, 0, sizeof *made);
             made->kind = kind;
+            made->references = 1;
             pthread_mutex_init(&made->lock, NULL);
             pthread_cond_init(&made->changed, NULL);
             pthread_mutex_unlock(&objects_lock);
@@ -1026,6 +1038,39 @@ static struct object *object_of(uint32_t handle) {
     }
     struct object *found = &objects[handle - 1];
     return found->kind == OBJECT_NONE ? NULL : found;
+}
+
+/* Holds an object for as long as something of this runtime's own is inside
+ * it. */
+static void hold_object(struct object *held) {
+    pthread_mutex_lock(&objects_lock);
+    held->references++;
+    pthread_mutex_unlock(&objects_lock);
+}
+
+/* Lets go of an object, and takes it back once nothing holds it: the file it
+ * stands for is closed, what it kept is given back, and its slot can be handed
+ * out again. One title opens and closes enough files and events as it loads a
+ * match to go through every slot there is, and with none taken back it could
+ * open nothing more and waited on the loading screen for ever. */
+static void let_go_of_object(struct object *held) {
+    pthread_mutex_lock(&objects_lock);
+    if (held->kind == OBJECT_NONE || --held->references > 0) {
+        pthread_mutex_unlock(&objects_lock);
+        return;
+    }
+    FILE *file = held->file;
+    char *directory = held->directory;
+    uint8_t *items = held->items;
+    pthread_mutex_destroy(&held->lock);
+    pthread_cond_destroy(&held->changed);
+    held->kind = OBJECT_NONE;
+    pthread_mutex_unlock(&objects_lock);
+    if (file != NULL) {
+        fclose(file);
+    }
+    free(directory);
+    free(items);
 }
 
 /* Puts a turn back that its waiter will not be taking.
@@ -1188,7 +1233,10 @@ static uint32_t wait_in_turn(struct object *waited, struct a_turn turn,
 /* Waits until an object is signalled, taking it if taking is what waiting on
  * that kind means. */
 static uint32_t wait_until(struct object *waited, const struct timespec *until) {
-    return wait_in_turn(waited, join_the_waiting(waited), until);
+    hold_object(waited);
+    uint32_t said = wait_in_turn(waited, join_the_waiting(waited), until);
+    let_go_of_object(waited);
+    return said;
 }
 
 /* How many seconds the console's clock counts from before a host's does. The
@@ -1294,8 +1342,8 @@ static long release_lock(struct object *lock) {
  *
  * What comes back is the place in the list of the one taken, which is what the
  * kernel answers, or the status saying the time ran out. */
-static uint32_t wait_for_any(struct object **waited, uint32_t count,
-                             const struct timespec *until) {
+static uint32_t look_until_one_is_taken(struct object **waited, uint32_t count,
+                                        const struct timespec *until) {
     for (;;) {
         pthread_mutex_lock(&anything_lock);
         unsigned long long seen = anything_count;
@@ -1322,6 +1370,23 @@ static uint32_t wait_for_any(struct object **waited, uint32_t count,
         }
         pthread_mutex_unlock(&anything_lock);
     }
+}
+
+/* The same, holding every one of them for as long as it sleeps between looks. */
+static uint32_t wait_for_any(struct object **waited, uint32_t count,
+                             const struct timespec *until) {
+    for (uint32_t at = 0; at < count; at++) {
+        if (waited[at] != NULL) {
+            hold_object(waited[at]);
+        }
+    }
+    uint32_t said = look_until_one_is_taken(waited, count, until);
+    for (uint32_t at = 0; at < count; at++) {
+        if (waited[at] != NULL) {
+            let_go_of_object(waited[at]);
+        }
+    }
+    return said;
 }
 
 /* The processor record reached through r13 names the current thread and CPU.
@@ -1622,6 +1687,7 @@ static void *run_guest_thread(void *given) {
         say_a_report("no room for another thread's stack");
         self->manual = 1;
         signal_object(self, 1);
+        let_go_of_object(self);
         return NULL;
     }
     state.r[1] = stack - 64;
@@ -1649,6 +1715,7 @@ static void *run_guest_thread(void *given) {
     }
 
     finish_thread(self);
+    let_go_of_object(self);
     return NULL;
 }
 
@@ -1921,6 +1988,7 @@ static void create_thread(xenolith_context *ctx, uint8_t *base) {
     }
     if (!made->suspended) {
         made->running = 1;
+        hold_object(made);
         pthread_create(&made->thread, NULL, run_guest_thread, made);
     }
     ctx->r[3] = XENOLITH_STATUS_SUCCESS;
@@ -1947,6 +2015,7 @@ static int resume_thread(uint32_t handle) {
     pthread_cond_broadcast(&found->changed);
     pthread_mutex_unlock(&found->lock);
     if (starts) {
+        hold_object(found);
         pthread_create(&found->thread, NULL, run_guest_thread, found);
     }
     return was;
@@ -2152,7 +2221,7 @@ static void *count_a_timer_down(void *given) {
         int current = setting.timer->timer_round == setting.round;
         pthread_mutex_unlock(&setting.timer->lock);
         if (!current) {
-            return NULL;
+            break;
         }
         signal_object(setting.timer, 1);
         if (setting.line != NULL) {
@@ -2166,7 +2235,7 @@ static void *count_a_timer_down(void *given) {
             put_a_routine_in_line(setting.line, one);
         }
         if (setting.period <= 0) {
-            return NULL;
+            break;
         }
         setting.due.tv_sec += setting.period / 1000;
         setting.due.tv_nsec += (setting.period % 1000) * 1000000L;
@@ -2175,6 +2244,8 @@ static void *count_a_timer_down(void *given) {
             setting.due.tv_nsec -= 1000000000L;
         }
     }
+    let_go_of_object(setting.timer);
+    return NULL;
 }
 
 /* Setting a timer to fall due after a stretch or at a moment, and then every
@@ -2213,8 +2284,10 @@ static void set_timer(xenolith_context *ctx, uint8_t *base) {
     timer->releases = 0;
     pthread_mutex_unlock(&timer->lock);
 
+    hold_object(timer);
     pthread_t counting;
     if (pthread_create(&counting, NULL, count_a_timer_down, setting) != 0) {
+        let_go_of_object(timer);
         free(setting);
         ctx->r[3] = XENOLITH_STATUS_NO_MEMORY;
         return;
@@ -2343,7 +2416,9 @@ static void time_to_fields(xenolith_context *ctx, uint8_t *base) {
  * and nothing after that is ever said, because nothing here changes. */
 #define XENOLITH_LISTENERS 16u
 #define XENOLITH_NOTICES_HELD 8u
-#define XENOLITH_FIRST_LISTENER 0x100u
+/* Past the last object's handle, so that closing a listener lets go of no
+ * object. */
+#define XENOLITH_FIRST_LISTENER (XENOLITH_OBJECTS + 1u)
 #define XENOLITH_HEARS_THE_SYSTEM 1u
 #define XENOLITH_SYSTEM_SCREENS 0x9u
 #define XENOLITH_SIGNED_IN_CHANGED 0xau
@@ -4682,6 +4757,9 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
          * thread that entered the title the rest of the threads carry on, as
          * they do when a console's first thread ends. */
         finish_thread(this_thread);
+        if (this_thread != NULL) {
+            let_go_of_object(this_thread);
+        }
         pthread_exit(NULL);
     case 251: {
         /* Releasing one object and waiting on another, which a title uses to
@@ -4873,15 +4951,22 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         return 1;
     }
     case 207:
-    case 261:
-        /* Letting go of a handle, and dropping a reference. Nothing here counts
-         * references or takes a handle back. A thread of this runtime's own may
-         * still be inside an object a title has finished with, and reclaiming
-         * the slot would hand it to something else while that is true. What it
-         * costs is that handles are only ever handed out, which has not run out
-         * and is written down rather than found later. */
+    case 261: {
+        /* Letting go of a handle, and dropping a reference. A timer whose
+         * handle is closed stops counting down, as it does on the console,
+         * which is also what lets go of the hold its countdown keeps. */
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        if (found != NULL) {
+            if (ordinal == 207) {
+                pthread_mutex_lock(&found->lock);
+                found->timer_round++;
+                pthread_mutex_unlock(&found->lock);
+            }
+            let_go_of_object(found);
+        }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
         return 1;
+    }
     case 259:
     case 260:
         /* Making and taking back another name for a device. A path is read
@@ -4893,7 +4978,12 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         return 1;
     case 272: {
         /* Turning a handle into something to hold. A handle is what this
-         * runtime hands out, so it is also what it hands back. */
+         * runtime hands out, so it is also what it hands back, held until the
+         * title lets go of it again. */
+        struct object *found = object_of((uint32_t)ctx->r[3]);
+        if (found != NULL) {
+            hold_object(found);
+        }
         uint32_t out = (uint32_t)ctx->r[5];
         if (out != 0) {
             xenolith_store32(base, out, (uint32_t)ctx->r[3]);
