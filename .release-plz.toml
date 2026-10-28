@@ -2,38 +2,61 @@
 # Versions come from git tags rather than a registry, and nothing is published
 # to one: a release is a GitHub release carrying the built tool.
 git_only = true
-changelog_update = true
-changelog_path = "CHANGELOG.md"
 dependencies_update = false
 pr_labels = ["release"]
 semver_check = false
+# Only the tool keeps a changelog, and it tells what changed in every crate.
+# Every crate finds its last release by the tool's tag, so what the changelog
+# gains is only what is new since then.
+changelog_update = false
+changelog_path = "CHANGELOG.md"
+git_tag_name = "v{{ version }}"
 # Published releases are immutable here, so a release stays a draft until the
 # build has attached its archive and published it.
 git_release_draft = true
-# Only the tool is released. The crates it is built from share its version
-# through the workspace, and what changed in them is told in its changelog.
-release = false
+# Only the tool is tagged and released. The crates it is built from move with
+# it in one version group, so a change to any of them releases it.
+git_tag_enable = false
+git_release_enable = false
 
 [[package]]
 name = "xenolith"
-release = true
-git_tag_name = "v{{ version }}"
+version_group = "xenolith"
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true
 changelog_include = [
   "xenolith-analysis",
+  "xenolith-host",
   "xenolith-lift",
   "xenolith-ppc",
   "xenolith-shader",
   "xenolith-xex",
 ]
-git_release_body = """
-{{ changelog }}
-{% if remote.contributors %}
-### Contributors
-{% for contributor in remote.contributors %}
-* @{{ contributor.username }}
-{% endfor %}
-{% endif %}
-"""
+
+[[package]]
+name = "xenolith-analysis"
+version_group = "xenolith"
+
+[[package]]
+name = "xenolith-host"
+version_group = "xenolith"
+
+[[package]]
+name = "xenolith-lift"
+version_group = "xenolith"
+
+[[package]]
+name = "xenolith-ppc"
+version_group = "xenolith"
+
+[[package]]
+name = "xenolith-shader"
+version_group = "xenolith"
+
+[[package]]
+name = "xenolith-xex"
+version_group = "xenolith"
 
 [changelog]
 header = """
