@@ -102,8 +102,9 @@ xenolith analyze default.xex --tables
 | `--name <TEXT>` | what the program's window is titled, in place of the name the game gives itself |
 | `--id <ID>` | what the program file is called and what a desktop and a sound server know it by, in place of the one made from the name |
 
-Writes numbered translation units, a header of declarations, the runtime, the
-decoded image, a boot program and a makefile. Units a previous run wrote into
+Writes numbered translation units, a header of declarations, the runtime, a
+boot program, the host library and a makefile, and for a bare image given with
+`--raw` the decoded image as well. Units a previous run wrote into
 the same directory are removed first, since two units defining the same function
 will not build.
 
@@ -112,9 +113,10 @@ the game's executable carries, and without `--id` the program file takes an id
 made from that name, such as `example-game`. An id is lower case
 letters, digits, dots, dashes and underscores, and any other is refused.
 
-Every file beside the executable is linked into the output, since the program
-reads the game's files from the directory it runs in. A name the output already
-holds is left alone. Nothing is linked for a bare image given with `--raw`.
+Nothing of the game's own is written for a container: the program reads the
+game from the player's copy when it runs. So the folder holding the executable
+is linked at `games/<id>` in xenolith's directory of the user's data, where the
+program looks for it, unless something is there already.
 
 Functions that could not be lifted are the expected outcome rather than a
 failure. The subcommand reports them and succeeds.

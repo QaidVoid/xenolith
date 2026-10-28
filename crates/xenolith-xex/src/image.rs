@@ -420,6 +420,22 @@ impl Image {
         self.entry_point
     }
 
+    /// Returns a number that tells this image from any other, made from its
+    /// bytes.
+    ///
+    /// A program built from one image says which it was built from with this,
+    /// so that it can refuse a player's copy that is another version or
+    /// region instead of running code that is not there. It is not a guard
+    /// against anyone, only against a mistake, so a plain hash does.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        const START: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        self.bytes.iter().fold(START, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+        })
+    }
+
     /// Returns every section, in address order.
     #[must_use]
     pub fn sections(&self) -> &[Section] {
@@ -557,6 +573,22 @@ mod address_space_tests {
             kind,
         }];
         Image::new(0x8200_0000, bytes, sections)
+    }
+
+    #[test]
+    fn the_fingerprint_tells_two_images_apart() {
+        let one = image_of(4096, PageKind::Code);
+        let mut bytes = one.bytes().to_vec();
+        if let Some(last) = bytes.last_mut() {
+            *last ^= 1;
+        }
+        let other = Image::new(0x8200_0000, bytes, one.sections().to_vec());
+
+        assert_eq!(
+            one.fingerprint(),
+            image_of(4096, PageKind::Code).fingerprint()
+        );
+        assert_ne!(one.fingerprint(), other.fingerprint());
     }
 
     #[test]

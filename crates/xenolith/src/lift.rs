@@ -20,7 +20,7 @@ use xenolith_lift::{
     RUNTIME_SOURCE, SOUND_SOURCE, Unlifted, declaration_of, lift, name_of,
 };
 
-use crate::game::{Naming, c_string, link_the_data, naming};
+use crate::game::{Naming, Placed, c_string, naming, put_the_game_in_place, where_xenolith_keeps};
 use crate::input::{Source, number};
 
 /// Bytes of C a translation unit holds before the next function starts a new
@@ -236,7 +236,6 @@ const BOOT_PROGRAM: &str = r#"/* Emitted by xenolith: boot the runtime and enter
 #include <stdlib.h>
 
 int main(int count, char **arguments) {
-    const char *image = count > 1 ? arguments[1] : "image.bin";
     uint32_t address = ENTRY_POINT;
     if (count > 2) {
         address = (uint32_t)strtoul(arguments[2], 0, 0);
@@ -250,7 +249,7 @@ int main(int count, char **arguments) {
      * before anything is opened under either. */
     xenolith_name_the_title(TITLE_NAME, TITLE_ID);
 
-    uint8_t *base = xenolith_boot(image, LOAD_ADDRESS);
+BOOTING
     if (base == 0) {
         return 1;
     }
@@ -302,7 +301,18 @@ fn main_program(
     privileges: Option<u32>,
     variables: &Imports,
     naming: &Naming,
+    fingerprint: Option<u64>,
 ) -> String {
+    let booting = match fingerprint {
+        Some(print) => format!(
+            "    /* The game's own bytes are read from the player's copy of it. An image\n     \
+             * named on the command line is read instead, to run one function. */\n    \
+             uint8_t *base = count > 1 ? xenolith_boot(arguments[1], LOAD_ADDRESS)\n    \
+             \x20                         : xenolith_boot_the_game(LOAD_ADDRESS, {print:#018x}ull);"
+        ),
+        None => "    uint8_t *base = xenolith_boot(count > 1 ? arguments[1] : \"image.bin\", LOAD_ADDRESS);"
+            .to_owned(),
+    };
     let mut filled = String::new();
     for (slot, variable) in variables {
         let _ = writeln!(
@@ -312,6 +322,7 @@ fn main_program(
         );
     }
     BOOT_PROGRAM
+        .replace("BOOTING", &booting)
         .replace("VARIABLES\n", &filled)
         .replace("TITLE_NAME", &c_string(&naming.name))
         .replace("TITLE_ID", &c_string(&naming.id))
@@ -332,12 +343,7 @@ fn main_program(
 /// The traps, the table, and the image are all specific to one title, so they
 /// are written here rather than shipped, and the runtime that reads them is
 /// shipped rather than written here.
-fn write_support(
-    out: &Path,
-    image: &xenolith_xex::Image,
-    referenced: &BTreeSet<u32>,
-    emitted: &BTreeSet<u32>,
-) -> Result<()> {
+fn write_support(out: &Path, referenced: &BTreeSet<u32>, emitted: &BTreeSet<u32>) -> Result<()> {
     // Everything the emitted code names but did not get a body becomes a trap,
     // so the program links and says where it went rather than walking past the
     // thing that is missing.
@@ -373,12 +379,7 @@ fn write_support(
     table.push_str(
         "};\n\n         xenolith_function xenolith_lookup(uint32_t address) {\n         \x20   size_t low = 0, high = sizeof entries / sizeof *entries;\n         \x20   while (low < high) {\n         \x20       size_t middle = low + (high - low) / 2;\n         \x20       if (entries[middle].address == address) { return entries[middle].function; }\n         \x20       if (entries[middle].address < address) { low = middle + 1; } else { high = middle; }\n         \x20   }\n         \x20   return 0;\n         }\n",
     );
-    write_into(out, "table.c", &table)?;
-
-    // The runtime loads the image rather than having it compiled in, since a
-    // title is tens of megabytes and a C array of it would be neither quick to
-    // build nor readable.
-    write_bytes_into(out, "image.bin", image.bytes())
+    write_into(out, "table.c", &table)
 }
 
 /// The makefile that builds what was emitted.
@@ -441,17 +442,16 @@ all: $(PROGRAM)
 $(PROGRAM): $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
-# Saying a shader while a title runs, for the ones it loads from the data beside
-# its executable rather than out of the executable itself. Reading the
-# executable cannot find one of those, so this answers for them.
+# What the program asks of xenolith while it runs: reading the game from the
+# player's copy, and saying a shader the game loads from its data rather than
+# out of its executable, which reading the executable cannot find.
 #
 # Built against what is beside the emitted code rather than required: without it
-# everything else still builds, and a title handing over a shader that was not
-# found simply says so.
-SAYING := $(wildcard libxenolith_shader.a)
-ifneq ($(SAYING),)
-CFLAGS += -DXENOLITH_CAN_SAY_A_SHADER
-LDLIBS += $(SAYING)
+# everything else still builds, and the program says what it cannot do.
+HOSTING := $(wildcard libxenolith_host.a)
+ifneq ($(HOSTING),)
+CFLAGS += -DXENOLITH_CAN_SAY_A_SHADER -DXENOLITH_CAN_READ_A_GAME
+LDLIBS += $(HOSTING) -ldl
 endif
 
 # The description turned into code, before anything that reads it is built.
@@ -495,34 +495,33 @@ fn write_the_runtime(out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Puts the shader library beside the emitted code, where the makefile looks.
+/// Puts the host library beside the emitted code, where the makefile looks.
 ///
-/// A title loads some shaders from the data beside its executable rather than
-/// out of the executable, and reading the executable cannot find one of those.
-/// The library answers for them, and it is copied rather than required: without
-/// it everything else still builds, and a title handing over one of those
-/// shaders says so instead of drawing nothing.
+/// A built program reads the game out of the player's copy with it, and says
+/// the shaders a game loads from its data while running, which reading the
+/// executable cannot find. It is copied rather than required: without it
+/// everything else still builds, and the program says what it cannot do.
 ///
 /// The path is the one the build that made this tool left it at, which is the
 /// only place it can be: nothing else knows where a target directory is.
-fn write_the_shader_library(out: &Path) {
+fn write_the_host_library(out: &Path) {
     let Some(beside) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
     else {
         return;
     };
-    let library = beside.join("libxenolith_shader.a");
+    let library = beside.join("libxenolith_host.a");
     if !library.is_file() {
         eprintln!(
-            "note: {} is not there, so a shader a title loads while it runs will not be said",
+            "note: {} is not there, so the program will not read the game or say a shader it loads while running",
             library.display()
         );
         return;
     }
-    if let Err(error) = std::fs::copy(&library, out.join("libxenolith_shader.a")) {
+    if let Err(error) = std::fs::copy(&library, out.join("libxenolith_host.a")) {
         eprintln!(
-            "note: {} could not be copied, so a shader a title loads while it runs will not be said: {error}",
+            "note: {} could not be copied, so the program will not read the game or say a shader it loads while running: {error}",
             library.display()
         );
     }
@@ -623,8 +622,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     let sizes = units.finish()?;
 
     write_declarations(&args.out, &referenced)?;
-    write_support(&args.out, &image, &referenced, &emitted)?;
-    let linked = make_it_a_program(
+    write_support(&args.out, &referenced, &emitted)?;
+    let placed = make_it_a_program(
         args,
         &image,
         built_against.unwrap_or(0),
@@ -646,7 +645,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         },
         built_against,
         &called,
-        linked,
+        placed.as_ref(),
     );
 
     Ok(())
@@ -686,8 +685,13 @@ fn write_declarations(out: &Path, referenced: &BTreeSet<u32>) -> Result<()> {
 }
 
 /// Writes what makes the units a program of this game: the boot program, the
-/// shader library and the makefile. Then links the game's files in beside
-/// them, returning how many were linked.
+/// host library and the makefile.
+///
+/// A program lifted from a container reads the game from the player's copy, so
+/// nothing of the game's own goes beside it, and the copy it was lifted from is
+/// put where the program looks. A bare image has no copy to read it from, so it
+/// goes beside the program as the image it loads. Returns where the copy was
+/// put, for a container.
 fn make_it_a_program(
     args: &Args,
     image: &xenolith_xex::Image,
@@ -695,7 +699,8 @@ fn make_it_a_program(
     privileges: Option<u32>,
     variables: &Imports,
     called: &Naming,
-) -> Result<usize> {
+) -> Result<Option<Placed>> {
+    let fingerprint = (!args.source.raw).then(|| image.fingerprint());
     write_into(
         &args.out,
         "main.c",
@@ -706,21 +711,29 @@ fn make_it_a_program(
             privileges,
             variables,
             called,
+            fingerprint,
         ),
     )?;
-    write_the_shader_library(&args.out);
+    write_the_host_library(&args.out);
     write_into(
         &args.out,
         "Makefile",
         &BUILD_FILE.replace("PROGRAM_NAME", &called.id),
     )?;
-    /* A bare image is not where a game keeps its files, so only a container's
-     * neighbours are linked. */
     if args.source.raw {
-        Ok(0)
-    } else {
-        link_the_data(&args.source.file, &args.out)
+        // The runtime loads the image rather than having it compiled in, since
+        // a title is tens of megabytes and a C array of it would be neither
+        // quick to build nor readable.
+        write_bytes_into(&args.out, "image.bin", image.bytes())?;
+        return Ok(None);
     }
+    let Some(data) = where_xenolith_keeps() else {
+        eprintln!(
+            "note: there is no home to put the game in, so name its folder with XENOLITH_GAME when running"
+        );
+        return Ok(None);
+    };
+    put_the_game_in_place(&args.source.file, &called.id, &data).map(Some)
 }
 
 /// Emits a body for every helper entry the output names, returning how many.
@@ -821,7 +834,7 @@ fn report(
     outcome: &Outcome<'_>,
     built_against: Option<u32>,
     called: &Naming,
-    linked: usize,
+    placed: Option<&Placed>,
 ) {
     let total = outcome.lifted + outcome.refused.len() as u64;
     println!("functions          {total:>10}");
@@ -846,12 +859,22 @@ fn report(
 
     println!("name               {}", called.name);
     println!("id                 {}", called.id);
-    println!("game files linked  {linked:>10}");
+    match placed {
+        Some(Placed::Linked(place)) => println!("game folder        {} (linked)", place.display()),
+        Some(Placed::There(place)) => {
+            println!("game folder        {} (already there)", place.display());
+        }
+        None => {}
+    }
 
     let out = args.out.display();
     println!("\nwritten to {out}");
     println!("build it:  make -C {out} -j\"$(nproc)\"");
-    println!("run it:    cd {out} && ./{}", called.id);
+    if args.source.raw {
+        println!("run it:    cd {out} && ./{}", called.id);
+    } else {
+        println!("run it:    {}", args.out.join(&called.id).display());
+    }
 
     if args.blockers {
         // The instruction that appears most is not the one to model next. The

@@ -28,8 +28,9 @@ cargo build --release
 ```
 
 The binary is `target/release/xenolith`. Building also leaves
-`libxenolith_shader.a` beside it, which a lift copies into its output so that a
-running title can translate shaders it loads from its data files.
+`libxenolith_host.a` beside it, which a lift copies into its output. A built
+game reads its executable from the player's copy with it, and translates the
+shaders it loads from its data files while it runs.
 
 ```sh
 cargo test
@@ -110,9 +111,9 @@ packages to install to where the saves go. In short:
 ```sh
 xenolith lift ~/games/example/default.xex --out ~/games/example-build
 make -C ~/games/example-build -j"$(nproc)"
-cd ~/games/example-build && ./example-game
+~/games/example-build/example-game
 ```
 
-The lift names the program after the game, links the game's other files into
-the build, and ends by printing the two commands that follow it.
+The lift names the program after the game, links the game's folder where the
+program looks for it, and ends by printing the two commands that follow it.
 [Lifting a title](/guide/lifting) covers the output in more detail.

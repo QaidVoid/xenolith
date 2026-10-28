@@ -947,7 +947,7 @@ fn the_output_page_lists_what_a_lift_writes() {
      * comes and goes with the machine. */
     let may_be_absent = [
         /* Comes and goes with the machine and the build that made the tool. */
-        "libxenolith_shader.a",
+        "libxenolith_host.a",
         "xdg-shell-client-protocol.h",
         "xdg-shell-protocol.c",
         /* A rule rather than a name: the page says how a unit is named and

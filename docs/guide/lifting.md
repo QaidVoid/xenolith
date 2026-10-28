@@ -23,9 +23,12 @@ The output directory holds everything needed to build the title on its own:
 | `shaders.c` | every shader found in the image, translated to SPIR-V |
 | `main.c` | boots the runtime and enters the title |
 | `xenolith.h`, `xenolith.c` and the rest | the runtime |
-| `image.bin` | the decoded image the runtime loads |
+| `libxenolith_host.a` | what the program reads the game and says shaders with, copied from beside the tool |
 | `Makefile` | builds and links everything into the program, named by the id |
-| the game's other files | links to everything beside `default.xex`, which the program reads from the directory it runs in |
+
+Nothing of the game's own is written. A lift from a bare image given with
+`--raw` writes `image.bin` as well, since there is no copy of the game for the
+program to read.
 
 [What a lift writes](/reference/output) lists every file and the build options.
 Units a previous lift left in the same directory are removed first.
@@ -54,24 +57,31 @@ An id has to do as a file name and as a desktop's id at once, so it is lower
 case letters, digits, dots, dashes and underscores, starting with a letter or a
 digit. The lift refuses any other.
 
-## The game's files
+## Where the program finds the game
 
-A game reads the files from its disc beside its executable, and the program
-reads them from the directory it runs in. So the lift links every file beside
-`default.xex` into the output. A name the output already holds is left alone,
-which keeps what the lift wrote and the links an earlier lift made, and nothing
-is linked when the output is the game's own directory. A bare image given with
-`--raw` has no game beside it, so nothing is linked for one.
+The program carries the translation and nothing of the game's own. When it runs
+it reads the game from the player's copy: the folder `games/<id>/` in
+xenolith's directory of the user's data, `~/.local/share/xenolith` unless moved
+(see [Environment](/reference/environment)), or whatever folder `XENOLITH_GAME`
+names. It decodes `default.xex` there with the player's key, and refuses a copy
+whose image is not the one it was lifted from, which is what another version or
+region of the game comes to.
+
+The lift links the folder it was given into that place, so a program runs as
+soon as it is built. Whatever is there already is left alone. The game's files
+are read from the folder and never written: a title writes only what it saves,
+as it does on a console whose disc cannot be written.
 
 ## Building and running
 
 ```sh
 make -C ./build -j"$(nproc)"
-cd ./build && ./game
+./build/game
 ```
 
-The makefile builds at `-O2` with `-Wall -Wextra` and picks up Vulkan, X11,
-Wayland and the shader library when they are present. The link matters as much
+The program finds the game itself, so it can be run from anywhere. The makefile
+builds at `-O2` with `-Wall -Wextra` and picks up Vulkan, X11, Wayland and the
+host library when they are present. The link matters as much
 as the compile: only the link shows that tens of thousands of functions agree
 about what exists and that nothing is defined twice.
 
@@ -127,7 +137,7 @@ units                      39
 kernel build      0x2017f400
 name               EXAMPLE GAME
 id                 example-game
-game files linked          12
+game folder        /home/you/.local/share/xenolith/games/example-game (linked)
 ```
 
 | line | meaning |
@@ -140,7 +150,7 @@ game files linked          12
 | declarations | every name the C refers to, which is more than the functions because of the helper entries |
 | kernel build | which kit the game was built against, from its container |
 | name, id | what the program is called, see [Naming the program](#naming-the-program) |
-| game files linked | how many files from the game's directory this lift linked into the output |
+| game folder | where the program looks for the game, and whether this lift linked it there or found something there already |
 
 ## When something is not lifted
 

@@ -395,6 +395,22 @@ before it draws anything.
 Nought means the container did not say, which is answered the same way as a
 word with the bit clear: nothing here invents a privilege.
 
+### `xenolith_boot_the_game`
+
+Maps the guest's memory, puts the player's copy of the game in it and
+returns its base, or null where it could not.
+
+The game is the folder `XENOLITH_GAME` names, or `games/<id>/` in xenolith's
+directory of the user's data, and its `default.xex` is read with the
+player's key. A copy whose image does not have `fingerprint` is another
+version or region of the game, or another game, and is refused. The folder
+is then where the title's files are read from, and it is never written: a
+title writes only into what it saves, as it does on a console whose disc
+cannot be written.
+
+Reading the executable takes the library a lift copies beside the program,
+and a program built without it says so and boots nothing.
+
 ### `xenolith_name_the_title`
 
 Names the program to the host: what its window is titled, and the id a

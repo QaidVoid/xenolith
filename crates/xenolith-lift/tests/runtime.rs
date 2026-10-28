@@ -9154,3 +9154,71 @@ int main(void) {
         panic!("a release of a semaphore was lost:\n{complaint}");
     }
 }
+
+/// A program built to read the player's copy of the game looks for it where it
+/// says it does, and says where that was when it is not there.
+///
+/// The game is the folder named by the program's id among xenolith's data, or
+/// whatever folder `XENOLITH_GAME` names instead. A player who has put it in the
+/// wrong place is told the place it was looked for, which is the one thing
+/// they need to put it right.
+#[test]
+fn the_game_is_looked_for_where_it_is_said_to_be() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+/* Boots, catching what the runtime says on the way, and reports whether what
+ * it said holds `wanted`. */
+static int boots_saying(const char *wanted) {
+    fflush(stderr);
+    if (freopen("said.txt", "w", stderr) == NULL) { return 0; }
+    uint8_t *base = xenolith_boot_the_game(0x82000000u, 0);
+    fflush(stderr);
+    if (base != NULL) { return 0; }
+    char said[2048] = "";
+    FILE *read = fopen("said.txt", "r");
+    if (read == NULL) { return 0; }
+    size_t length = fread(said, 1, sizeof said - 1, read);
+    said[length] = '\0';
+    fclose(read);
+    return strstr(said, wanted) != NULL;
+}
+
+int main(void) {
+    char here[4096];
+    char data[4200];
+    if (getcwd(here, sizeof here) == NULL) { return 1; }
+    snprintf(data, sizeof data, "%s/data", here);
+    setenv("XENOLITH_DATA", data, 1);
+    unsetenv("XENOLITH_GAME");
+    xenolith_name_the_title("A Game", "a-game");
+
+    char wanted[4300];
+    snprintf(wanted, sizeof wanted, "the game is not at %s/games/a-game.", data);
+    if (!boots_saying(wanted)) { return 2; }
+
+    mkdir("elsewhere", 0777);
+    FILE *made = fopen("elsewhere/default.xex", "wb");
+    if (made == NULL) { return 3; }
+    fclose(made);
+    setenv("XENOLITH_GAME", "elsewhere", 1);
+    if (!boots_saying("built without libxenolith_host.a")) { return 4; }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("game_looked_for", program) {
+        panic!("the game was not looked for where it is said to be:\n{complaint}");
+    }
+}

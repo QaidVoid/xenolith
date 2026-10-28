@@ -65,14 +65,14 @@ cargo build --release
 ```
 
 The tool is `target/release/xenolith`. The build also leaves
-`libxenolith_shader.a` beside it, which every lift copies into its output so
-that a game can have the shaders it loads from its data files translated while
-it runs. Run the lift with that binary, not a copy elsewhere, so the library is
-found.
+`libxenolith_host.a` beside it, which every lift copies into its output. A
+built game reads its executable from your copy with it, and translates the
+shaders it loads from its data files while it runs. Run the lift with that
+binary, not a copy elsewhere, so the library is found.
 
 Instead of building it, you can download it from the
 [releases](https://github.com/QaidVoid/xenolith/releases). Each archive holds
-`xenolith` and `libxenolith_shader.a`. Keep the two side by side wherever you
+`xenolith` and `libxenolith_host.a`. Keep the two side by side wherever you
 unpack them, for the same reason.
 
 ```sh
@@ -107,9 +107,8 @@ mkdir -p ~/games/example
 extract-xiso -d ~/games/example -x example.iso
 ```
 
-Keep each game in a folder of its own. The lift links everything beside
-`default.xex` into the build, so a folder shared with other things gets those
-linked too.
+Keep each game in a folder of its own, anywhere you like. The built program
+finds it through a link the lift makes in step 5.
 
 Check the executable reads before going further. `inspect` reads only the
 headers, so it works without the key:
@@ -124,9 +123,9 @@ xenolith inspect ~/games/example/default.xex
 xenolith lift ~/games/example/default.xex --out ~/games/example-build
 ```
 
-This takes a minute or two and writes the translated C, the runtime, a
-`Makefile` and the decoded image into `~/games/example-build`. It ends with a
-report:
+This takes a minute or two and writes the translated C, the runtime and a
+`Makefile` into `~/games/example-build`. Nothing of the game's own goes there.
+It ends with a report:
 
 ```
 functions               36533
@@ -134,11 +133,11 @@ functions               36533
 ...
 name               Example Game
 id                 example-game
-game files linked          17
+game folder        /home/you/.local/share/xenolith/games/example-game (linked)
 
 written to /home/you/games/example-build
 build it:  make -C /home/you/games/example-build -j"$(nproc)"
-run it:    cd /home/you/games/example-build && ./example-game
+run it:    /home/you/games/example-build/example-game
 ```
 
 The name is the one the game gives itself, read out of its executable. It titles
@@ -154,9 +153,15 @@ xenolith lift ~/games/example/default.xex --out ~/games/example-build \
 An id is lower case letters, digits, dots, dashes and underscores. A game that
 carries no name of its own is called `xenolith`.
 
-"Game files linked" counts the files from the game's folder linked into the
-build, which is where the program looks for them. A name the build already holds
-is left alone, so lifting again links nothing new.
+"Game folder" is where the program looks for your copy of the game when it
+runs: `games/<id>` in xenolith's directory, `~/.local/share/xenolith`. The lift
+links the folder you gave it there. If something is there already it is left
+alone, so you can also put the game's files there yourself, or point the
+program anywhere else with `XENOLITH_GAME`:
+
+```sh
+XENOLITH_GAME=~/games/example ./example-game
+```
 
 ## 6. Build it
 
@@ -171,12 +176,13 @@ time. The result is the program named by the id, here
 ## 7. Run it
 
 ```sh
-cd ~/games/example-build
-./example-game
+~/games/example-build/example-game
 ```
 
-The program reads the game's files from the directory it runs in, so start it
-from the build directory. A window opens with the game in it.
+The program finds the game itself, so it can be started from anywhere. It reads
+`default.xex` from your copy with your key, checks it is the version the
+program was built from, and opens a window with the game in it. Your copy is
+only ever read: what the game saves goes elsewhere (step 8).
 
 ### Controls
 
@@ -214,16 +220,18 @@ by the program's id:
 ~/.local/share/xenolith/saves/example-game/
 ```
 
+Each save the game makes is a folder there named the way the game named it.
+
 Where `XDG_DATA_HOME` is set, xenolith's directory is under it instead of under
-`~/.local/share`, and `XENOLITH_DATA` names xenolith's directory outright, so
-that saves go in `$XENOLITH_DATA/saves/example-game/`. Each save the game makes is a folder there named the way the
-game named it.
+`~/.local/share`, and `XENOLITH_DATA` names xenolith's directory outright. Its
+games and saves move with it, so that saves go in
+`$XENOLITH_DATA/saves/example-game/`.
 
 Saves are kept apart from the build, so lifting again, deleting the build or
 moving the program elsewhere leaves them where they are. Two builds with the
 same id share their saves.
 
-- To back saves up, copy the game's directory.
+- To back saves up, copy the game's saves directory.
 - To start fresh, move it away. The game makes a new one.
 
 ## 9. After updating xenolith
@@ -238,14 +246,46 @@ xenolith lift ~/games/example/default.xex --out ~/games/example-build
 make -C ~/games/example-build -j"$(nproc)"
 ```
 
-The lift replaces the translated code, the runtime and the shader library, and
-keeps the links. The saves are not in the build, so nothing touches them. Lift again rather than only running `make`:
-`make` alone rebuilds the old translation.
+The lift replaces the translated code, the runtime and the host library. Your
+copy of the game and your saves are not in the build, so nothing touches them.
+Lift again rather than only running `make`: `make` alone rebuilds the old
+translation.
+
+## Sharing a build
+
+A built program holds the translation and the runtime, and nothing of the
+game's own: no executable, no data, no image. It reads all of that from the
+player's copy when it runs. So a build can be handed to someone who owns the
+game, as the one program file.
+
+They need:
+
+1. The program, built on a machine with the same graphics and sound libraries
+   they have, or on an older one.
+2. Their own copy of the game, unpacked into
+   `~/.local/share/xenolith/games/<id>/`, or anywhere they name with
+   `XENOLITH_GAME`. The id is the program's file name.
+3. Their own key, as in step 3.
+
+The program checks their copy is the version it was built from and refuses
+another, saying so, rather than running code that is not there.
+
+The program still holds a translation of the game's code. Whether handing one
+to someone is allowed where you are is for you to find out before you do.
 
 ## When it goes wrong
 
 **The lift says the executable is encrypted and no key material was found.**
-The key is not where the tool looks. See step 3.
+The key is not where the tool looks. See step 3. A built program looks in the
+same places, and says the same.
+
+**The program says the game is not at a folder.** It looked there for your copy
+and found no `default.xex`. Put the game's files in that folder, or name the
+folder holding them with `XENOLITH_GAME`.
+
+**The program says the game is not the one it was built from.** Your copy is
+another version or region of the game than the one lifted. Lift your own copy
+instead.
 
 **The build fails on a missing header.** One of the development packages from
 step 1 is missing. The makefile only turns a capability on when `pkg-config`

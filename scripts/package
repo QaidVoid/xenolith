@@ -19,7 +19,7 @@ platform=$2
 name=xenolith-$version-$platform
 stage=dist/$name
 
-for built in target/release/xenolith target/release/libxenolith_shader.a; do
+for built in target/release/xenolith target/release/libxenolith_host.a; do
     [ -f "$built" ] || {
         printf 'package: %s is not there, build with cargo build --release first\n' "$built" >&2
         exit 1
@@ -28,7 +28,7 @@ done
 
 rm -rf dist
 mkdir -p "$stage"
-cp target/release/xenolith target/release/libxenolith_shader.a "$stage/"
+cp target/release/xenolith target/release/libxenolith_host.a "$stage/"
 cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
 tar -C dist -cJf "dist/$name.tar.xz" "$name"
 rm -rf "$stage"

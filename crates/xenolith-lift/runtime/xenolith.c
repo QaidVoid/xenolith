@@ -117,9 +117,9 @@ static _Noreturn void stop_the_run(int code) {
     _exit(code);
 }
 
-uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
-    remember_where_the_image_was(image);
-
+/* Maps the guest's address space and its physical memory, ready for an image
+ * to be put in. */
+static uint8_t *map_the_guest(void) {
     /* What the run read, said however it ends.
      *
      * `atexit` covers a run that finishes and a run that stops on a gap in the
@@ -161,6 +161,23 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
         fprintf(stderr, "xenolith: could not map the guest's physical memory\n");
         return NULL;
     }
+    return (uint8_t *)base;
+}
+
+/* Sets up what a run needs once its image is in place. */
+static uint8_t *settle_the_guest(uint8_t *base) {
+    arena_memory = base;
+    initialize_sound_contexts(base);
+    say_what_the_display_is(base);
+    return base;
+}
+
+uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
+    remember_where_the_image_was(image);
+    uint8_t *base = map_the_guest();
+    if (base == NULL) {
+        return NULL;
+    }
 
     FILE *file = fopen(image, "rb");
     if (file == NULL) {
@@ -168,17 +185,14 @@ uint8_t *xenolith_boot(const char *image, uint32_t load_address) {
         return NULL;
     }
 
-    uint8_t *at = (uint8_t *)base + load_address;
+    uint8_t *at = base + load_address;
     size_t read = fread(at, 1, XENOLITH_GUEST_SPAN - load_address, file);
     fclose(file);
     if (read == 0) {
         fprintf(stderr, "xenolith: %s held nothing\n", image);
         return NULL;
     }
-    arena_memory = base;
-    initialize_sound_contexts(base);
-    say_what_the_display_is(base);
-    return (uint8_t *)base;
+    return settle_the_guest(base);
 }
 
 /* Whether this run is collecting the addresses it wanted rather than calling
@@ -359,6 +373,9 @@ void xenolith_dispatch(xenolith_context *ctx, uint8_t *base, uint32_t address,
 
 /* What opening a file that is not there reports. */
 #define XENOLITH_STATUS_NO_SUCH_FILE 0xC0000034u
+
+/* What writing somewhere that may not be written reports. */
+#define XENOLITH_STATUS_ACCESS_DENIED 0xC0000022u
 
 /* What reading past the end of a file reports. */
 #define XENOLITH_STATUS_END_OF_FILE 0xC0000011u
@@ -3101,6 +3118,10 @@ static int serviced_about_what_it_sees(xenolith_context *ctx, uint8_t *base, uin
  */
 static char title_directory[4096] = ".";
 
+/* Whether the title's files are the player's own copy of the game, which is
+ * read and never written, as a disc is. */
+static int game_is_read_only;
+
 static void remember_where_the_image_was(const char *image) {
     size_t cut = 0;
     for (size_t at = 0; image[at] != '\0'; at++) {
@@ -3168,7 +3189,11 @@ static int where_content_is_open(const char *name, char *out, size_t room) {
  * a console keeps its own files on more than one device, and what that comes
  * to here is the one directory the image was loaded from.
  */
-static int host_path_of(uint8_t *base, uint32_t attributes, char *out, size_t room) {
+static int host_path_of(uint8_t *base, uint32_t attributes, char *out, size_t room,
+                        int *in_a_save) {
+    if (in_a_save != NULL) {
+        *in_a_save = 0;
+    }
     if (attributes == 0) {
         return 0;
     }
@@ -3205,6 +3230,9 @@ static int host_path_of(uint8_t *base, uint32_t attributes, char *out, size_t ro
     size_t used;
     if (device_length > 0 && where_content_is_open(device, out, room)) {
         used = strlen(out);
+        if (in_a_save != NULL) {
+            *in_a_save = 1;
+        }
     } else {
         used = strlen(title_directory);
         if (used + 2 >= room) {
@@ -3276,7 +3304,8 @@ static void open_file(xenolith_context *ctx, uint8_t *base, int may_make) {
                                                            XENOLITH_NINTH_ARGUMENT)
                            : (uint32_t)ctx->r[8];
 
-    if (!host_path_of(base, (uint32_t)ctx->r[5], path, sizeof path)) {
+    int in_a_save = 0;
+    if (!host_path_of(base, (uint32_t)ctx->r[5], path, sizeof path, &in_a_save)) {
         report_io(base, status_at, XENOLITH_STATUS_NO_SUCH_FILE, 0);
         ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
         return;
@@ -3285,6 +3314,24 @@ static void open_file(xenolith_context *ctx, uint8_t *base, int may_make) {
     int writing = (may & (XENOLITH_MAY_WRITE_ANY | XENOLITH_MAY_WRITE_DATA |
                           XENOLITH_MAY_ADD_TO_IT)) != 0;
     int already = access(path, F_OK) == 0;
+
+    /* The player's copy of the game is read as a disc is and never written.
+     * A console's disc cannot be written either, so a title writes only into
+     * what it saves, and anything else asked is refused rather than left among
+     * the game's files. */
+    int making = may_make && say_to != XENOLITH_OPEN_IT;
+    if (game_is_read_only && !in_a_save && (writing || making)) {
+        static int told;
+        if (!told) {
+            told = 1;
+            say_a_report("the game asked to write %s, which is among its own files rather "
+                         "than in a save, and was refused",
+                         path);
+        }
+        report_io(base, status_at, XENOLITH_STATUS_ACCESS_DENIED, 0);
+        ctx->r[3] = XENOLITH_STATUS_ACCESS_DENIED;
+        return;
+    }
 
     /* A directory rather than a file. What is kept is the path, so that what is
      * in it can be read out later. */
@@ -3879,21 +3926,104 @@ static uint32_t make_a_list(uint8_t *base, uint8_t *items, uint32_t item_count,
  * the user's data, so that a program moved, or built somewhere it cannot
  * write, still finds what it saved. A directory named by anything but a whole
  * path is not one, and with no home either they go beside the image. */
-static int where_content_is_kept(char *out, size_t room) {
+static int where_xenolith_keeps(char *out, size_t room) {
     const char *own = getenv("XENOLITH_DATA");
     const char *data = getenv("XDG_DATA_HOME");
     const char *home = getenv("HOME");
     int written;
     if (own != NULL && own[0] == '/') {
-        written = snprintf(out, room, "%s/saves/%s", own, title_id);
+        written = snprintf(out, room, "%s", own);
     } else if (data != NULL && data[0] == '/') {
-        written = snprintf(out, room, "%s/xenolith/saves/%s", data, title_id);
+        written = snprintf(out, room, "%s/xenolith", data);
     } else if (home != NULL && home[0] != '\0') {
-        written = snprintf(out, room, "%s/.local/share/xenolith/saves/%s", home, title_id);
+        written = snprintf(out, room, "%s/.local/share/xenolith", home);
     } else {
-        written = snprintf(out, room, "%s/content", title_directory);
+        return 0;
     }
     return written > 0 && (size_t)written < room;
+}
+
+static int where_content_is_kept(char *out, size_t room) {
+    char kept[4096];
+    int written = where_xenolith_keeps(kept, sizeof kept)
+                      ? snprintf(out, room, "%s/saves/%s", kept, title_id)
+                      : snprintf(out, room, "%s/content", title_directory);
+    return written > 0 && (size_t)written < room;
+}
+
+/* Where the player's copy of the game is: the folder XENOLITH_GAME names, or
+ * the one named by the program's id among xenolith's data. */
+static int where_the_game_is(char *out, size_t room) {
+    const char *named = getenv("XENOLITH_GAME");
+    char kept[4096];
+    int written;
+    if (named != NULL && named[0] != '\0') {
+        written = snprintf(out, room, "%s", named);
+    } else if (where_xenolith_keeps(kept, sizeof kept)) {
+        written = snprintf(out, room, "%s/games/%s", kept, title_id);
+    } else {
+        return 0;
+    }
+    return written > 0 && (size_t)written < room;
+}
+
+#ifdef XENOLITH_CAN_READ_A_GAME
+size_t xenolith_read_the_game(const char *path, uint8_t *into, size_t room,
+                              uint64_t *fingerprint, char *why, size_t why_room);
+#endif
+
+uint8_t *xenolith_boot_the_game(uint32_t load_address, uint64_t fingerprint) {
+    char found[4096];
+    char executable[4200];
+    if (!where_the_game_is(found, sizeof found)) {
+        fprintf(stderr, "xenolith: there is no home to look for the game in, so name the "
+                        "folder holding it with XENOLITH_GAME\n");
+        return NULL;
+    }
+    snprintf(executable, sizeof executable, "%s/default.xex", found);
+    if (access(executable, F_OK) != 0) {
+        fprintf(stderr,
+                "xenolith: the game is not at %s. Put its files there, default.xex among them, "
+                "or name the folder holding them with XENOLITH_GAME\n",
+                found);
+        return NULL;
+    }
+
+#ifndef XENOLITH_CAN_READ_A_GAME
+    (void)load_address;
+    (void)fingerprint;
+    fprintf(stderr, "xenolith: this program was built without libxenolith_host.a, so it "
+                    "cannot read the game\n");
+    return NULL;
+#else
+    size_t length = strlen(found);
+    if (length >= sizeof title_directory) {
+        return NULL;
+    }
+    memcpy(title_directory, found, length + 1);
+    game_is_read_only = 1;
+
+    uint8_t *base = map_the_guest();
+    if (base == NULL) {
+        return NULL;
+    }
+    char why[1024] = "";
+    uint64_t found_print = 0;
+    if (xenolith_read_the_game(executable, base + load_address,
+                               XENOLITH_GUEST_SPAN - load_address, &found_print, why,
+                               sizeof why) == 0) {
+        fprintf(stderr, "xenolith: %s\n", why);
+        return NULL;
+    }
+    if (found_print != fingerprint) {
+        fprintf(stderr,
+                "xenolith: the game at %s is not the one this program was built from. It "
+                "may be another version or region of it\n",
+                found);
+        return NULL;
+    }
+    return settle_the_guest(base);
+#endif
 }
 
 /* Where the saved thing a block describes is kept, and beside it what is said
@@ -4954,7 +5084,7 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         char path[4096];
         /* The name sits where host_path_of looks for it, four bytes into the
          * record, because the record's first word is its own length. */
-        if (asked == 0 || !host_path_of(base, asked, path, sizeof path)) {
+        if (asked == 0 || !host_path_of(base, asked, path, sizeof path, NULL)) {
             ctx->r[3] = XENOLITH_STATUS_NO_SUCH_FILE;
             return 1;
         }

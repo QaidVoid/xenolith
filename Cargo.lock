@@ -986,6 +986,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenolith-host"
+version = "0.1.0"
+dependencies = [
+ "xenolith-shader",
+ "xenolith-xex",
+]
+
+[[package]]
 name = "xenolith-lift"
 version = "0.1.0"
 dependencies = [

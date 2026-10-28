@@ -154,11 +154,19 @@ window can be given held buttons with `XENOLITH_HOLD`.
 
 ## Files
 
-A title's files are read from the directory the program runs in, through the
-host's file calls. Saves go in the program's own directory among the user's
-data, named by its id: `saves/<id>/` in xenolith's directory, which is
-`$XENOLITH_DATA`, or `$XDG_DATA_HOME/xenolith`, or `~/.local/share/xenolith`,
-the first of those that is set. Only with none of them do they go under
+A program lifted from a container boots from the player's copy of the game:
+`games/<id>/` in xenolith's directory, which is `$XENOLITH_DATA`, or
+`$XDG_DATA_HOME/xenolith`, or `~/.local/share/xenolith`, the first of those that
+is set, or whatever folder `XENOLITH_GAME` names. It reads `default.xex` there
+through the host library, which decodes it with the player's key, and refuses an
+image whose fingerprint is not the one the lift recorded. A title's files are
+then read from that folder through the host's file calls, and never written: a
+write anywhere but a save is refused and said once, as a console's disc would
+refuse it. A program booted from an image named on the command line, or lifted
+from a bare image, reads from the image's directory instead and may write there.
+
+Saves go in the program's own directory among the user's data, named by its id:
+`saves/<id>/` in xenolith's directory. Only with no home at all do they go under
 `content/` beside the image.
 
 ## Reporting

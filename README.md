@@ -26,20 +26,22 @@ sound and music.
 
 Build the tool, or download it from the
 [releases](https://github.com/QaidVoid/xenolith/releases), keeping
-`libxenolith_shader.a` beside it as the archive has it.
+`libxenolith_host.a` beside it as the archive has it.
 
 ```sh
 cargo build --release
 target/release/xenolith lift ~/games/example/default.xex --out ~/games/example-build
 make -C ~/games/example-build -j"$(nproc)"
-cd ~/games/example-build && ./example-game
+~/games/example-build/example-game
 ```
 
-`lift` writes the translated C, the runtime, a `Makefile` and the decoded
-image, and links the game's other files in beside them. The program is named
-after the game, read out of its executable (`--name` and `--id` choose
-otherwise), and the lift ends by printing the commands to build and run it.
-Saves go in `~/.local/share/xenolith/saves/<id>/`, apart from the build.
+`lift` writes the translated C, the runtime and a `Makefile`, and nothing of the
+game's own. The program is named after the game, read out of its executable
+(`--name` and `--id` choose otherwise). When it runs it reads the game from your
+copy in `~/.local/share/xenolith/games/<id>/`, which the lift links to the
+folder it was given, and saves go in `~/.local/share/xenolith/saves/<id>/`. So a
+build can be shared with someone who owns the game: they bring their own copy
+and key.
 
 The key is read from `--key-file`, then `XENOLITH_XEX_KEY`, then
 `~/.config/xenolith/xex.key`. No key and no game data is in this repository.
@@ -78,6 +80,7 @@ through libavcodec, and reads files beside the program.
 | `crates/xenolith-analysis` | function and jump table discovery |
 | `crates/xenolith-lift` | the C emitter, and the runtime in `runtime/` |
 | `crates/xenolith-shader` | the shader translator |
+| `crates/xenolith-host` | the library a built game links, which reads the player's copy and says shaders while it runs |
 | `docs/` | the documentation site |
 | `scripts/` | the checks the project is gated on |
 

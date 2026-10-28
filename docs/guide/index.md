@@ -52,6 +52,7 @@ answer never shows whether it could have found it.
 | `xenolith-analysis` | finds functions, blocks, edges, register helpers and jump tables |
 | `xenolith-lift` | models what each instruction does, emits C, and holds the runtime |
 | `xenolith-shader` | translates the console's GPU shaders to SPIR-V |
+| `xenolith-host` | the one library a built game links: it reads the game from the player's copy and translates shaders the game loads while running |
 | `xenolith` | the command line tool tying them together |
 
 The runtime lives in `crates/xenolith-lift/runtime/` and is copied into every

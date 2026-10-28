@@ -20,14 +20,14 @@ checks that this list and the directory agree.
 | `unlifted.c` | a trap for every address that could not be lifted |
 | `table.c` | every lifted function, for an indirect branch to resolve against |
 | `main.c` | boots the runtime and enters the guest |
-| `image.bin` | the decoded image, which the runtime loads |
+| `image.bin` | the decoded image, written only for a bare image given with `--raw`. A program lifted from a container reads the game from the player's copy instead |
 | `Makefile` | builds every unit and links them into a program |
 
 Three of those come and go with the machine and the title.
 
 | file | when it is there |
 |---|---|
-| `libxenolith_shader.a` | when the build that made `xenolith` left one beside it. A title loads some shaders from the data beside its executable rather than out of the executable, and reading the executable cannot find one of those |
+| `libxenolith_host.a` | when the build that made `xenolith` left one beside it. The program reads the game from the player's copy with it, and says the shaders a game loads from its data rather than out of its executable, which reading the executable cannot find |
 | `xdg-shell-client-protocol.h` | when the machine has `wayland-protocols` and `wayland-scanner`. It is not emitted: `make` generates it from the description the desktop publishes |
 | `xdg-shell-protocol.c` | the same, and compiled into the program |
 
@@ -35,15 +35,16 @@ Three of those come and go with the machine and the title.
 rather than compiled on their own, so they are not listed in the makefile's
 sources. They go beside the runtime because that is where it looks for them.
 
-Where the shader library is not there, the lift says so once and names the path
+Where the host library is not there, the lift says so once and names the path
 it looked at.
 
-Two more things end up in the directory once a game is lifted and built.
+Once built, the directory also holds the program, named by the id the lift
+settled on. Nothing of the game's own is in it, so it can be handed to someone
+who owns the game: see [Sharing a build](/guide/playing#sharing-a-build).
 
-| what | where it comes from |
-|---|---|
-| the game's files | links to everything beside the executable, made by the lift. A name the directory already holds is left alone, and a bare image given with `--raw` gets none |
-| the program | built by `make`, and named by the id the lift settled on |
+The lift also puts the folder it was given where the program looks for the game,
+as a link at `games/<id>` in xenolith's directory of the user's data. Whatever
+is there already is left alone.
 
 ## The units
 
@@ -88,26 +89,34 @@ three off by hand gives a build with no graphics at all:
 make -C ./build DRAWING=no SHOWING=no TALKING=no
 ```
 
-`SAYING` is the one capability decided apart from those, because it is about a
+`HOSTING` is the one capability decided apart from those, because it is about a
 file beside the emitted code rather than about the machine: `$(wildcard
-libxenolith_shader.a)`.
+libxenolith_host.a)`. It turns on `-DXENOLITH_CAN_READ_A_GAME` and
+`-DXENOLITH_CAN_SAY_A_SHADER`.
 
 ## What the program does
 
 The program is named by the id the lift settled on, which is also the
-makefile's `PROGRAM`. It boots the runtime, loads `image.bin` from the directory
-it runs in, and enters the title at its recorded entry point. Given an image and
-an address it enters there instead, which runs one function on its own:
+makefile's `PROGRAM`. It boots the runtime, puts the game in the guest's memory
+and enters it at its recorded entry point.
+
+Lifted from a container, it finds the player's copy of the game in
+`games/<id>/` in xenolith's directory of the user's data, or wherever
+`XENOLITH_GAME` names, and reads `default.xex` there with the player's key. A
+copy that is another version or region than the one lifted is refused. The
+game's files are read from that folder, which is never written. What the game
+saves goes in `saves/<id>/` beside it (see [Environment](/reference/environment)
+for what moves either).
+
+Lifted from a bare image, it loads `image.bin` from the directory it runs in and
+reads the game's files from there.
+
+Given an image and an address, either kind loads the image and enters there
+instead, which runs one function on its own:
 
 ```sh
 ./example-game image.bin 0x82090000
 ```
-
-The game reads its own files from the directory the image is in, which is why
-the lift links them there. What it saves goes in the program's own directory
-among the user's data, `~/.local/share/xenolith/saves/<id>/` (see
-[Environment](/reference/environment) for what moves it), and beside the image
-only where no home can be found.
 
 The link is a check in its own right: compiling a unit says it is well formed
 alone, and only the link says the units agree about what exists and that

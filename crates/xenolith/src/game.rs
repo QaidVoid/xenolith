@@ -2,11 +2,12 @@
 //!
 //! A program is named for the game: its window says the game's name, and a
 //! desktop, a sound server and the program file go by an id made from it. The
-//! game also brings the files it reads beside its executable, and the program
-//! runs where those are.
+//! program reads the game itself from the player's copy, which it looks for
+//! under that id among xenolith's data, so the lift puts the copy it was given
+//! there.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 
@@ -85,62 +86,68 @@ pub(crate) fn c_string(text: &str) -> String {
     written
 }
 
-/// Links every file beside a game's executable into the directory its program
-/// is built in, returning how many were linked.
+/// Where xenolith keeps the user's data: `XENOLITH_DATA` where it names a whole
+/// path, then `xenolith` in `XDG_DATA_HOME`, then `~/.local/share/xenolith`,
+/// as a built program looks for it.
+pub(crate) fn where_xenolith_keeps() -> Option<PathBuf> {
+    let whole = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    whole("XENOLITH_DATA")
+        .or_else(|| whole("XDG_DATA_HOME").map(|data| data.join("xenolith")))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".local/share/xenolith"))
+        })
+}
+
+/// What putting a game where its program looks for it came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// The place was made, as a link to the game's folder.
+    Linked(PathBuf),
+    /// Something was there already and was left as it was.
+    There(PathBuf),
+}
+
+/// Puts the folder holding a game's executable where the program built from
+/// it looks for the game: `games/<id>` in xenolith's data, as a link.
 ///
-/// The program reads a game's files from the directory it runs in, so they are
-/// put there. A name the directory already holds is left alone, which keeps
-/// what the lift wrote and the links an earlier lift made. Nothing is linked
-/// where the program is built beside the executable already, and the directory
-/// the program is built in is never linked into itself.
+/// Whatever is there already is left alone, whether it is this game, a copy of
+/// it, or something the player put there on purpose.
 ///
 /// # Errors
 ///
-/// Returns an error when the game's directory cannot be read or a link cannot
-/// be made.
-pub(crate) fn link_the_data(executable: &Path, out: &Path) -> Result<usize> {
+/// Returns an error when the executable cannot be found or the link cannot be
+/// made.
+pub(crate) fn put_the_game_in_place(executable: &Path, id: &str, data: &Path) -> Result<Placed> {
     let executable = executable
         .canonicalize()
         .into_diagnostic()
         .wrap_err_with(|| format!("finding {}", executable.display()))?;
-    let out = out
-        .canonicalize()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("finding {}", out.display()))?;
     let Some(game) = executable.parent() else {
-        return Ok(0);
+        return Err(miette!("{} is not in a folder", executable.display()));
     };
-    if game == out {
-        return Ok(0);
+    let games = data.join("games");
+    let place = games.join(id);
+    if place.symlink_metadata().is_ok() {
+        return Ok(Placed::There(place));
     }
-
-    let mut linked = 0;
-    let entries = std::fs::read_dir(game)
+    std::fs::create_dir_all(&games)
         .into_diagnostic()
-        .wrap_err_with(|| format!("reading {}", game.display()))?;
-    for entry in entries {
-        let entry = entry
-            .into_diagnostic()
-            .wrap_err_with(|| format!("reading {}", game.display()))?;
-        let from = entry.path();
-        if from == executable || out.starts_with(&from) {
-            continue;
-        }
-        let to = out.join(entry.file_name());
-        if to.symlink_metadata().is_ok() {
-            continue;
-        }
-        std::os::unix::fs::symlink(&from, &to)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("linking {} to {}", to.display(), from.display()))?;
-        linked += 1;
-    }
-    Ok(linked)
+        .wrap_err_with(|| format!("making {}", games.display()))?;
+    std::os::unix::fs::symlink(game, &place)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("linking {} to {}", place.display(), game.display()))?;
+    Ok(Placed::Linked(place))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{c_string, link_the_data, naming};
+    use super::{Placed, c_string, naming, put_the_game_in_place};
 
     #[test]
     fn a_game_s_own_name_names_the_program() {
@@ -187,38 +194,25 @@ mod tests {
     }
 
     #[test]
-    fn the_files_beside_a_game_are_linked_and_nothing_else() {
-        let root = std::env::temp_dir().join("xenolith-link-the-data");
+    fn a_game_is_linked_where_its_program_looks_and_left_once_there() {
+        let root = std::env::temp_dir().join("xenolith-put-the-game-in-place");
         let _ = std::fs::remove_dir_all(&root);
-        let game = root.join("game");
-        let out = game.join("built");
-        std::fs::create_dir_all(&out).ok();
-        for name in ["default.xex", "data.img", "Makefile"] {
-            std::fs::write(game.join(name), name).ok();
-        }
-        std::fs::write(out.join("Makefile"), "the lift's own").ok();
+        let game = root.join("my copy");
+        let data = root.join("data");
+        std::fs::create_dir_all(&game).ok();
+        std::fs::write(game.join("default.xex"), "x").ok();
 
-        let linked = link_the_data(&game.join("default.xex"), &out).ok();
-
-        assert_eq!(linked, Some(1));
-        assert!(out.join("data.img").symlink_metadata().is_ok());
+        let placed = put_the_game_in_place(&game.join("default.xex"), "a-game", &data).ok();
+        let place = data.join("games/a-game");
+        assert_eq!(placed, Some(Placed::Linked(place.clone())));
         assert!(
-            !out.join("default.xex").exists(),
-            "the executable was linked"
-        );
-        assert!(
-            !out.join("built").exists(),
-            "the output was linked into itself"
-        );
-        assert_eq!(
-            std::fs::read_to_string(out.join("Makefile"))
-                .ok()
-                .as_deref(),
-            Some("the lift's own")
+            place.join("default.xex").is_file(),
+            "the link does not reach the game"
         );
 
-        /* A second lift into the same place finds every link already made. */
-        assert_eq!(link_the_data(&game.join("default.xex"), &out).ok(), Some(0));
+        /* A second lift finds it there and leaves it. */
+        let again = put_the_game_in_place(&game.join("default.xex"), "a-game", &data).ok();
+        assert_eq!(again, Some(Placed::There(place)));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
