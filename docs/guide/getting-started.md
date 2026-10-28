@@ -1,5 +1,8 @@
 # Getting started
 
+This page builds the tool and tours what it can tell you about an executable.
+To go straight to playing a game, see [Playing a game](/guide/playing).
+
 ## What you need
 
 | need | for |
@@ -101,48 +104,15 @@ tables recovered. `--functions` and `--tables` list them.
 
 ## Lifting and running a title
 
+[Playing a game](/guide/playing) walks through it step by step, from the
+packages to install to where the saves go. In short:
+
 ```sh
-xenolith lift default.xex --out ./lifted
-cd ./lifted
-make -j"$(nproc)"
-./lifted
+xenolith lift ~/games/example/default.xex --out ~/games/example-build
+make -C ~/games/example-build -j"$(nproc)"
+cd ~/games/example-build && ./example-game
 ```
 
-```
-functions               22006
-  lifted                22006  (100.000 percent)
-    import thunks         241
-  not lifted                0
-helper entries             57
-declarations            22063
-units                      39
-  largest             4448200 bytes
-```
-
-The program starts the title at its recorded entry point. It reads the title's
-other files from the directory it runs in, so put the lift output beside the
-title's data (symbolic links are fine). What the title saves goes in
-`content/`.
-
-### Controls
-
-| key | button |
-|---|---|
-| arrow keys | the pad |
-| `z`, `x`, `c`, `v` | A, B, X, Y |
-| enter | start |
-| escape | back |
-| `q`, `e` | left and right shoulder |
-| `1`, `3` | left and right trigger |
-| `w`, `a`, `s`, `d` | left stick |
-| `i`, `j`, `k`, `l` | right stick |
-| `f`, `h` | left and right stick pressed |
-
-### What a run prints
-
-A run reports on stderr, one line each, what it assumed about the console, what
-the host could not provide (no window, no sound device, no libavcodec), and a
-count of what it read from the title's GPU commands when it ends. None of those
-lines is an error in the translation.
-
+The lift names the program after the game, links the game's other files into
+the build, and ends by printing the two commands that follow it.
 [Lifting a title](/guide/lifting) covers the output in more detail.

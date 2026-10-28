@@ -30,25 +30,33 @@ Some scenes still draw wrong, and it is not yet playable end to end.
 
 ## Quick start
 
-You need a Rust toolchain, a C compiler, and the key material for the title
-(see [Key material](docs/guide/keys.md)). Vulkan, a desktop session, PulseAudio
-and libavcodec are picked up when present, for graphics, a window, sound and
-music.
+You need a Rust toolchain, a C compiler, the game's files, and the key for its
+executable (see [Key material](docs/guide/keys.md)). Vulkan, a desktop session,
+PulseAudio and libavcodec are picked up when present, for graphics, a window,
+sound and music.
+
+Build the tool, or download it from the
+[releases](https://github.com/QaidVoid/xenolith/releases), keeping
+`libxenolith_shader.a` beside it as the archive has it.
 
 ```sh
 cargo build --release
-target/release/xenolith lift path/to/default.xex --out /tmp/lifted
-cd /tmp/lifted
-make -j"$(nproc)"
-./lifted
+target/release/xenolith lift ~/games/example/default.xex --out ~/games/example-build
+make -C ~/games/example-build -j"$(nproc)"
+cd ~/games/example-build && ./example-game
 ```
 
 `lift` writes the translated C, the runtime, a `Makefile` and the decoded
-image. Run the program from that directory, with the title's other files beside
-it, since the game reads its data from there. Saves go in `content/`.
+image, and links the game's other files in beside them. The program is named
+after the game, read out of its executable (`--name` and `--id` choose
+otherwise), and the lift ends by printing the commands to build and run it.
+Saves go in `content/` inside the build directory.
 
 The key is read from `--key-file`, then `XENOLITH_XEX_KEY`, then
 `~/.config/xenolith/xex.key`. No key and no game data is in this repository.
+
+[Playing a game](docs/guide/playing.md) walks through every step, from the
+packages to install to what to do when something goes wrong.
 
 Controls: arrow keys for the pad, `z` `x` `c` `v` for A B X Y, enter for start,
 escape for back, `q` and `e` for the shoulders, `1` and `3` for the triggers,

@@ -10,6 +10,7 @@ const sections = [
     address: '0x00',
     items: [
       { text: 'What this is', link: '/guide/' },
+      { text: 'Playing a game', link: '/guide/playing' },
       { text: 'Getting started', link: '/guide/getting-started' },
       { text: 'Key material', link: '/guide/keys' },
       { text: 'Lifting a title', link: '/guide/lifting' },
