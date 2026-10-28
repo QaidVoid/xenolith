@@ -8,7 +8,7 @@
 
 use crate::Kind;
 use crate::opcodes;
-use crate::operands::read;
+use crate::operands::read_source;
 use crate::preamble::Named;
 use crate::spirv::Module;
 use crate::values::{
@@ -43,7 +43,7 @@ pub(crate) fn plainly(
                 &[named.four.number(), produced.number(), left, right],
             );
         }
-        VectorOperation::Max => module.add(
+        VectorOperation::Max | VectorOperation::MaxAndKeep => module.add(
             opcodes::EXT_INST,
             &[
                 named.four.number(),
@@ -282,14 +282,6 @@ pub(crate) fn arithmetic(
     right: u32,
     predicate: &mut u32,
 ) -> Result<Option<u32>, Refused> {
-    /* The third source is taken from the instruction here rather than handed
-     * in, because only the few operations that read one ever ask for it. */
-    let third = alu.sources()[2];
-    let third_is_register = alu.sources_are_registers()[2];
-    let third_along = alu.source_lanes()[2];
-    let third_negated = alu.sources_are_negated()[2];
-    let third_absolute = alu.sources_are_absolute()[2];
-
     if matches!(
         alu.vector_operation(),
         VectorOperation::KillOnEqual
@@ -310,15 +302,7 @@ pub(crate) fn arithmetic(
         /* Multiplying two and adding a third, which is the one operation
          * here that reads all three of its sources. */
         VectorOperation::MultiplyAdd => {
-            let last = read(
-                module,
-                named,
-                third,
-                third_is_register,
-                third_along,
-                third_absolute,
-                third_negated,
-            );
+            let last = read_source(module, named, alu, 2);
             module.add(
                 opcodes::EXT_INST,
                 &[
@@ -338,15 +322,7 @@ pub(crate) fn arithmetic(
         VectorOperation::ChooseOnEqual
         | VectorOperation::ChooseOnGreaterOrEqual
         | VectorOperation::ChooseOnGreater => {
-            let last = read(
-                module,
-                named,
-                third,
-                third_is_register,
-                third_along,
-                third_absolute,
-                third_negated,
-            );
+            let last = read_source(module, named, alu, 2);
             let asked = module.name();
             let comparison = match alu.vector_operation() {
                 VectorOperation::ChooseOnEqual => opcodes::FLOAT_ORDERED_EQUAL,
@@ -417,15 +393,7 @@ pub(crate) fn arithmetic(
         /* Two lanes multiplied and summed, with a third source added, and
          * the one number that comes out put in every lane. */
         VectorOperation::DotTwoAdd => {
-            let last = read(
-                module,
-                named,
-                third,
-                third_is_register,
-                third_along,
-                third_absolute,
-                third_negated,
-            );
+            let last = read_source(module, named, alu, 2);
             dot_two_add(module, named, produced, left, right, last);
         }
         VectorOperation::DotThree => {

@@ -460,6 +460,29 @@ impl Alu {
         (self.first >> 7) & 1 == 1
     }
 
+    /// Whether a source, where it names a constant, counts it on from the
+    /// address a shader last kept rather than from the start.
+    ///
+    /// The instruction has two bits for this, not three: the first constant it
+    /// reads takes one and any after it the other, so which bit a source goes
+    /// by depends on whether a source before it was a constant. A third bit
+    /// says whether the count is on from the kept address or from how many
+    /// times a loop has gone round, and only the first is read here.
+    #[must_use]
+    pub fn constant_follows_the_address(self, source: usize) -> bool {
+        if (self.second >> 29) & 1 == 0 {
+            return false;
+        }
+        let [one, two, _] = self.sources_are_registers();
+        let first_constant = match source {
+            0 => true,
+            1 => one,
+            _ => one && two,
+        };
+        let bit = if first_constant { 31 } else { 30 };
+        (self.second >> bit) & 1 == 1
+    }
+
     /// Whether each source is read with its sign turned about.
     #[must_use]
     pub fn sources_are_negated(self) -> [bool; 3] {
@@ -490,6 +513,39 @@ mod tests {
         assert_eq!(
             alu.map(Alu::sources_are_absolute),
             Some([true, false, true])
+        );
+    }
+
+    #[test]
+    fn a_constant_follows_the_address_by_the_bit_its_place_among_constants_names() {
+        /* The first and third sources name constants and the second a
+         * register, so the third is the second constant and goes by the bit
+         * for constants after the first. */
+        let second_register = 1u32 << 30;
+        let later_follows = (1u32 << 29) | (1 << 30);
+        let alu = Alu::at(&[0, later_follows, second_register], 0);
+        assert_eq!(
+            alu.map(|alu| alu.constant_follows_the_address(0)),
+            Some(false)
+        );
+        assert_eq!(
+            alu.map(|alu| alu.constant_follows_the_address(2)),
+            Some(true)
+        );
+
+        /* With the first two registers the third is the first constant. */
+        let first_follows = (1u32 << 29) | (1 << 31);
+        let alu = Alu::at(&[0, first_follows, (1 << 31) | (1 << 30)], 0);
+        assert_eq!(
+            alu.map(|alu| alu.constant_follows_the_address(2)),
+            Some(true)
+        );
+
+        /* Counted on from a loop rather than the address, which is not read. */
+        let alu = Alu::at(&[0, 1 << 31, 0], 0);
+        assert_eq!(
+            alu.map(|alu| alu.constant_follows_the_address(0)),
+            Some(false)
         );
     }
 

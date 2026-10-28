@@ -11,7 +11,7 @@
 use crate::constants::{HOW_FAR, POSITION};
 use crate::export::say_how_far;
 use crate::opcodes;
-use crate::operands::read;
+use crate::operands::{moved_about, read, read_source, read_source_whole};
 use crate::preamble::Named;
 use crate::spirv::Module;
 use crate::values::{chosen, extract, lane_by_lane, never_short, what_is_exported};
@@ -74,15 +74,7 @@ pub(crate) fn single_lane(
     predicate: &mut u32,
 ) -> Result<u32, Refused> {
     let operation = alu.scalar_operation();
-    let third = read(
-        module,
-        named,
-        alu.sources()[2],
-        alu.sources_are_registers()[2],
-        alu.source_lanes()[2],
-        alu.sources_are_absolute()[2],
-        alu.sources_are_negated()[2],
-    );
+    let third = read_source(module, named, alu, 2);
 
     let lane = |module: &mut Module, which: u32| {
         let one = module.name();
@@ -128,7 +120,9 @@ pub(crate) fn single_lane(
             let right = lane(module, 0);
             two(module, opcodes::FLOAT_MULTIPLY, right)
         }
-        ScalarOperation::Max => {
+        ScalarOperation::Max
+        | ScalarOperation::MaxAndKeep
+        | ScalarOperation::MaxAndKeepUnrounded => {
             let right = lane(module, 0);
             extended(module, 40, &[left, right])
         }
@@ -286,11 +280,11 @@ pub(crate) fn with_a_constant(
     alu: Alu,
     operation: ScalarOperation,
 ) -> u32 {
-    let held = read(
+    let constant = read_source_whole(module, named, alu, 2, false);
+    let held = moved_about(
         module,
         named,
-        alu.sources()[2],
-        false,
+        constant,
         alu.source_lanes()[2],
         alu.constants_are_absolute(),
         alu.sources_are_negated()[2],

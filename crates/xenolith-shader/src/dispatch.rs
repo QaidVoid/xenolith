@@ -12,14 +12,14 @@ use crate::export::what_it_puts_out;
 use crate::fetching::go_and_fetch;
 use crate::layout::{Asking, Step, Stretch, WhereNext, stretches, stretches_that_jump};
 use crate::opcodes;
-use crate::operands::{read, read_a_constant};
+use crate::operands::{keep_the_address, read_a_constant, read_source};
 use crate::picture::Runs;
 use crate::plan::{Fetches, what_the_fetches_need};
 use crate::preamble::{Named, preamble};
 use crate::single_lane::{put_it_where_it_goes, single_lane, whether_it_runs};
 use crate::spirv::Module;
 use crate::values::{extract, kept_to_one};
-use crate::{ALU_WORDS, Alu, Kind, Refused, Translated};
+use crate::{ALU_WORDS, Alu, Kind, Refused, ScalarOperation, Translated, VectorOperation};
 
 /// What carries from one instruction to the next while a shader is written out.
 struct Carrying {
@@ -72,29 +72,8 @@ fn one_instruction(
         return Err(Refused::NotAShader);
     };
 
-    let [first, second, _] = alu.sources();
-    let [first_is_register, second_is_register, _] = alu.sources_are_registers();
-    let [first_along, second_along, _] = alu.source_lanes();
-    let [first_negated, second_negated, _] = alu.sources_are_negated();
-    let [first_absolute, second_absolute, _] = alu.sources_are_absolute();
-    let left = read(
-        module,
-        named,
-        first,
-        first_is_register,
-        first_along,
-        first_absolute,
-        first_negated,
-    );
-    let right = read(
-        module,
-        named,
-        second,
-        second_is_register,
-        second_along,
-        second_absolute,
-        second_negated,
-    );
+    let left = read_source(module, named, alu, 0);
+    let right = read_source(module, named, alu, 1);
 
     let Some(produced) = arithmetic(module, named, alu, left, right, &mut carrying.predicate)?
     else {
@@ -142,6 +121,20 @@ fn one_instruction(
     };
 
     let runs = whether_it_runs(module, named, alu, step.under, carrying.predicate);
+
+    /* Kept once both halves have read what they read, because an address kept
+     * by an instruction is counted on from by the ones after it and not by
+     * itself. */
+    let keeping = match alu.scalar_operation() {
+        ScalarOperation::MaxAndKeep => Some((read_source(module, named, alu, 2), true)),
+        ScalarOperation::MaxAndKeepUnrounded => Some((read_source(module, named, alu, 2), false)),
+        _ if alu.vector_operation() == VectorOperation::MaxAndKeep => Some((left, true)),
+        _ => None,
+    };
+    if let Some((from, rounded)) = keeping {
+        let fourth = extract(module, named, from, 3);
+        keep_the_address(module, named, fourth, rounded, runs);
+    }
 
     if let Some(leaving) =
         put_it_where_it_goes(module, named, alu, produced, alone, runs, carrying.exported)?

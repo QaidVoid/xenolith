@@ -115,6 +115,9 @@ pub const IMAGE_QUERY_LOD: u16 = 105;
 /// `OpConvertFToU`: a number with a point in it as an unsigned whole number.
 pub const CONVERT_FLOAT_TO_UNSIGNED: u16 = 109;
 
+/// `OpConvertFToS`: a number with a point in it as a signed whole number.
+pub const CONVERT_FLOAT_TO_SIGNED: u16 = 110;
+
 /// `OpConvertSToF`: a signed whole number as a number with a point in it.
 pub const CONVERT_SIGNED_TO_FLOAT: u16 = 111;
 
@@ -237,6 +240,9 @@ pub const GLSL_MAXIMUM: u32 = 40;
 
 /// `FClamp`.
 pub const GLSL_CLAMP: u32 = 43;
+
+/// `SClamp`: a whole number kept between two others, all read as signed.
+pub const GLSL_SIGNED_CLAMP: u32 = 45;
 
 /// `Fma`: multiplies two and adds a third, rounding once.
 pub const GLSL_FUSED_MULTIPLY_ADD: u32 = 50;

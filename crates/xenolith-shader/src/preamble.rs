@@ -66,6 +66,12 @@ pub(crate) struct Named {
     pub(crate) predicate_kept: crate::spirv::Name,
     pub(crate) previous_kept: crate::spirv::Name,
     pub(crate) exported_kept: crate::spirv::Name,
+    /// Where a shader keeps the address it reads constants on from, and the
+    /// least and most it can be, as numbers with a point, with the half it is
+    /// rounded by.
+    pub(crate) address: crate::spirv::Name,
+    pub(crate) address_bounds: (crate::spirv::Name, crate::spirv::Name),
+    pub(crate) half: crate::spirv::Name,
     /// Where a pixel shader that says how far away its pixel is says it.
     pub(crate) how_far: Option<crate::spirv::Name>,
     /// The pictures a shader was handed, named only where it reads one.
@@ -300,6 +306,14 @@ pub(crate) fn preamble(
     let predicate_kept = module.name();
     let previous_kept = module.name();
     let exported_kept = module.name();
+    let address = module.name();
+    let mut a_number = |bits: u32| {
+        let one = module.name();
+        module.add(opcodes::CONSTANT, &[float.number(), one.number(), bits]);
+        one
+    };
+    let address_bounds = (a_number(0xc380_0000), a_number(0x437f_0000));
+    let half = a_number(0x3f00_0000);
 
     /* The test a title sets on how solid a place is.
      *
@@ -414,6 +428,10 @@ pub(crate) fn preamble(
         opcodes::VARIABLE,
         &[to_one.number(), exported_kept.number(), 7, nothing.number()],
     );
+    module.add(
+        opcodes::VARIABLE,
+        &[to_whole.number(), address.number(), 7, zero_index.number()],
+    );
     if let Some(pictures) = looked_at {
         module.add(
             opcodes::VARIABLE,
@@ -496,6 +514,9 @@ pub(crate) fn preamble(
         predicate_kept,
         previous_kept,
         exported_kept,
+        address,
+        address_bounds,
+        half,
         how_far,
     }
 }
