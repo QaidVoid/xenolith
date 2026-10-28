@@ -1,4 +1,10 @@
 
+## [0.1.2](https://github.com/QaidVoid/xenolith/compare/v0.1.1...v0.1.2) - 2026-10-28
+
+### Bug Fixes
+
+- *(runtime)* End the run when the window is closed - ([becc8b7](https://github.com/QaidVoid/xenolith/commit/becc8b75d2d356a8009e698e73f60a20a3c834cd))
+
 ## [0.1.1] - 2026-10-28
 
 ### Features
