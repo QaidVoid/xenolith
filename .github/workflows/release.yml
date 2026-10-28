@@ -1,8 +1,9 @@
 name: release
 
-# Builds the tool at a release's tag and attaches it to the release.
-# release-plz.yml calls this with the tag it made. Run it by hand to rebuild the
-# assets of an existing release.
+# Builds the tool at a release's tag, attaches it to the release and publishes
+# it. release-plz.yml calls this with the tag of the draft it made. A published
+# release is immutable, so running this by hand only helps a release still in
+# draft, such as one whose build failed.
 on:
   workflow_call:
     inputs:
@@ -59,3 +60,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: gh release upload "$TAG" dist/*.tar.xz --clobber --repo "$GITHUB_REPOSITORY"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"

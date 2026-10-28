@@ -7,6 +7,9 @@ changelog_path = "CHANGELOG.md"
 dependencies_update = false
 pr_labels = ["release"]
 semver_check = false
+# Published releases are immutable here, so a release stays a draft until the
+# build has attached its archive and published it.
+git_release_draft = true
 # Only the tool is released. The crates it is built from share its version
 # through the workspace, and what changed in them is told in its changelog.
 release = false
