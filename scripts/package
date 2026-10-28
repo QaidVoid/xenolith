@@ -2,7 +2,7 @@
 # Packs a release build of the tool into dist/.
 #
 # Usage: scripts/package <version> <platform>
-#   scripts/package 0.2.0 x86_64-linux
+#   scripts/package v0.2.0 x86_64-linux
 #
 # The archive holds the tool, the shader library beside it, the licences and
 # the README. The two have to stay side by side: a lift copies the library from
@@ -14,7 +14,7 @@ set -eu
 root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-version=$1
+version=${1#v}
 platform=$2
 name=xenolith-$version-$platform
 stage=dist/$name
@@ -32,5 +32,4 @@ cp target/release/xenolith target/release/libxenolith_host.a "$stage/"
 cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
 tar -C dist -cJf "dist/$name.tar.xz" "$name"
 rm -rf "$stage"
-(cd dist && sha256sum "$name.tar.xz" >"$name.tar.xz.sha256")
 printf 'package: dist/%s.tar.xz\n' "$name"

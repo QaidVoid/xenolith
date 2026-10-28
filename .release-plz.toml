@@ -14,7 +14,7 @@ release = false
 [[package]]
 name = "xenolith"
 release = true
-git_tag_name = "{{ version }}"
+git_tag_name = "v{{ version }}"
 changelog_include = [
   "xenolith-analysis",
   "xenolith-lift",

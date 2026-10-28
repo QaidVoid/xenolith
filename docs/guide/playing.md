@@ -76,8 +76,13 @@ Instead of building it, you can download it from the
 unpack them, for the same reason.
 
 ```sh
+gh attestation verify xenolith-<version>-x86_64-linux.tar.xz --repo QaidVoid/xenolith
 tar -xJf xenolith-<version>-x86_64-linux.tar.xz
 ```
+
+The first line checks the archive was built by this project's release workflow
+from a commit in its repository, using the attestation published with the
+release. It needs the GitHub command line tool, and can be skipped.
 
 The commands below call it `xenolith`. Either put its directory on your `PATH`
 or write the path out.
