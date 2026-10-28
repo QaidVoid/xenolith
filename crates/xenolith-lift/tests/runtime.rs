@@ -9022,3 +9022,91 @@ int main(void) {
         panic!("a closed handle was not handed out again:\n{complaint}");
     }
 }
+
+/// Every release of a semaphore is there to be spent, however many threads
+/// release it while another spends it.
+///
+/// The count was raised outside the lock a waiter spends it under, so a
+/// release landing while a waiter spent one could be lost. One title's workers
+/// each sleep on a semaphore until something is queued, and with a release lost
+/// a worker slept beside a full queue while the title waited for it to empty,
+/// a few frames into a match.
+#[test]
+fn no_release_of_a_semaphore_is_lost() {
+    let program = r#"
+#define _POSIX_C_SOURCE 200809L
+
+#include "xenolith.h"
+#include <pthread.h>
+#include <stdio.h>
+
+#define RELEASERS 4
+#define RELEASES 50000
+
+static uint8_t *base;
+static uint32_t handle;
+
+xenolith_function xenolith_lookup(uint32_t address) {
+    (void)address;
+    return 0;
+}
+
+static void *release(void *unused) {
+    (void)unused;
+    for (int turn = 0; turn < RELEASES; turn++) {
+        xenolith_context ctx = {0};
+        ctx.r[3] = handle;
+        ctx.r[4] = 1;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 243, "NtReleaseSemaphore");
+    }
+    return NULL;
+}
+
+int main(void) {
+    const char *path = "image.bin";
+    FILE *made = fopen(path, "wb");
+    if (made == NULL) { return 1; }
+    fputc('x', made);
+    fclose(made);
+    base = xenolith_boot(path, 0);
+    if (base == NULL) { return 2; }
+
+    xenolith_context ctx = {0};
+    ctx.r[3] = 0x200;
+    ctx.r[5] = 0;
+    ctx.r[6] = RELEASERS * RELEASES;
+    xenolith_import(&ctx, base, "xboxkrnl.exe", 213, "NtCreateSemaphore");
+    handle = xenolith_load32(base, 0x200);
+    if (handle == 0) { return 3; }
+
+    pthread_t releasers[RELEASERS];
+    for (int at = 0; at < RELEASERS; at++) {
+        pthread_create(&releasers[at], NULL, release, NULL);
+    }
+
+    /* A second for each, which is far longer than any release takes to land
+     * and short enough that a lost one ends the run rather than hanging it. */
+    int64_t a_second = -10000000;
+    for (int spent = 0; spent < RELEASERS * RELEASES; spent++) {
+        xenolith_store64(base, 0x300, (uint64_t)a_second);
+        ctx.r[3] = handle;
+        ctx.r[4] = 1;
+        ctx.r[5] = 0;
+        ctx.r[6] = 0x300;
+        xenolith_import(&ctx, base, "xboxkrnl.exe", 253, "NtWaitForSingleObjectEx");
+        if (ctx.r[3] != 0) {
+            fprintf(stderr, "release %d of %d was never there to spend\n", spent,
+                    RELEASERS * RELEASES);
+            return 4;
+        }
+    }
+    for (int at = 0; at < RELEASERS; at++) {
+        pthread_join(releasers[at], NULL);
+    }
+    return 0;
+}
+"#;
+    if let Err(complaint) = runs("no_release_lost", program) {
+        panic!("a release of a semaphore was lost:\n{complaint}");
+    }
+}

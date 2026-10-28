@@ -4734,10 +4734,16 @@ static int serviced_about_what_it_holds(xenolith_context *ctx, uint8_t *base, ui
         struct object *found = object_of((uint32_t)ctx->r[3]);
         uint32_t before_at = (uint32_t)ctx->r[5];
         if (found != NULL) {
-            if (before_at != 0) {
-                xenolith_store32(base, before_at, (uint32_t)found->count);
-            }
+            /* Raised under the lock a waiter spends it under. Raised outside
+             * it, a release landing while a waiter spent one was lost, and a
+             * worker slept for ever beside a queue it had been told was full. */
+            pthread_mutex_lock(&found->lock);
+            long before = found->count;
             found->count += (long)(int32_t)ctx->r[4];
+            pthread_mutex_unlock(&found->lock);
+            if (before_at != 0) {
+                xenolith_store32(base, before_at, (uint32_t)before);
+            }
             signal_object(found, 1);
         }
         ctx->r[3] = XENOLITH_STATUS_SUCCESS;
