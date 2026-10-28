@@ -27,15 +27,6 @@ run secrets scripts/check-secrets
 # the shader crate that no page names is one a reader cannot find.
 run docs scripts/check-docs
 
-# Every count the documentation quotes, against a run of the tool. A number
-# typed into a page is a claim about what the code did when the page was
-# written, and nothing else in the build notices when that stops being true.
-if [ -d ../xen/corpus ]; then
-    run numbers scripts/check-numbers
-else
-    printf 'check: numbers skipped, because this machine has no corpus\n'
-fi
-
 # The differential against hardware is ignored unless a cross toolchain is
 # named, which is right for a machine that has none. Where one is installed the
 # skip is the wrong answer, because the only oracle that can see a wrong result

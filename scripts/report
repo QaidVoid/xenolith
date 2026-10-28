@@ -1,11 +1,7 @@
 #!/bin/sh
-# Prints every number the documentation quotes, from the tool that produces it.
-#
-# A number on a page is a claim about what the tool does. Written by hand it is
-# a claim about what the tool did when the page was written, and nothing says
-# when that was. This prints them from a run, and `scripts/check-numbers`
-# compares the pages against this output, so a page that drifts fails the gate
-# rather than being believed.
+# Prints what the tool recovers and lifts from each title in the corpus: the
+# functions it finds, the share of executable words they claim, and how many
+# are lifted, from a run rather than from memory.
 #
 # Nothing here copies game data. The corpus is read where it already is, and no
 # path it prints is a key.

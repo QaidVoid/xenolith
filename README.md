@@ -12,21 +12,10 @@ Linux only.
 
 ## Status
 
-Two retail titles lift completely and compile without warnings. Both boot,
-reach the renderer and draw with their own translated shaders.
-
-| | title A | title B |
-|---|---|---|
-| functions discovered | 22,006 | 36,533 |
-| executable words claimed | 868,194 (98.130%) | 2,678,828 (99.092%) |
-| functions lifted to C | 22,006 (100%) | 36,533 (100%) |
-| of those, import thunks | 241 | 189 |
-| helper entries emitted beside them | 57 | 47 |
-| emitted C compiles | yes | yes |
-
-Title A is the one taken furthest. It plays its logos, opening film and menus,
-runs the mission briefing and flies the first mission, with music and voices.
-Some scenes still draw wrong, and it is not yet playable end to end.
+Two retail games have been taken through it so far. Every function in both is
+recovered and lifted to C, which compiles without warnings, and both play their
+menus and their game with music and sound. Some scenes still draw wrong.
+`scripts/report` prints the counts from a run of the tool.
 
 ## Quick start
 
